@@ -38,8 +38,9 @@ def _db():
 @require_admin
 def admin_shell(_=None):
     """Serve the admin single-page application."""
+    from version import VERSION
     user = current_user()
-    return render_template_string(_ADMIN_HTML, user=user)
+    return render_template_string(_ADMIN_HTML, user=user, version=VERSION)
 
 
 # ── User API ──────────────────────────────────────────────────────────────────
@@ -358,7 +359,7 @@ select option { background:var(--panel); }
 <body>
 
 <div class="hdr">
-  <div class="logo">PQC<em>-</em>Monitor <span style="color:var(--muted);font-size:.75rem;margin-left:.5rem">Administration</span></div>
+  <div class="logo">PQC<em>-</em>Monitor <span style="color:var(--muted);font-size:.75rem;margin-left:.5rem">Administration &nbsp;v{{ version }}</span></div>
   <div class="hdr-right">
     <span style="color:var(--text);font-size:.83rem">{{ user.username }}</span>
     <a href="/app">↗ Dashboard</a>
@@ -758,6 +759,9 @@ function showPageAlert(id, msg, type) {
 // ── Init ──────────────────────────────────────────────────────────────────────
 loadUsers();
 </script>
+<footer style="text-align:center;padding:1.25rem;color:var(--muted);font-size:.7rem;border-top:1px solid var(--border);margin-top:2rem">
+  PQC-Monitor v{{ version }} &nbsp;·&nbsp; GPL-3.0-or-later &nbsp;·&nbsp; AI-assisted (Claude/Anthropic)
+</footer>
 </body>
 </html>
 """

@@ -323,7 +323,8 @@ def create_app(config: dict = None) -> Flask:
     @app.route("/")
     @app.route("/dashboard")
     def dashboard():
-        return render_template_string(DASHBOARD_HTML)
+        from version import VERSION
+        return render_template_string(DASHBOARD_HTML, version=VERSION)
 
     return app
 
@@ -540,7 +541,7 @@ footer {
 <body>
 
 <div class="header">
-  <div class="logo">PQC<span>-</span>Monitor <span style="font-size:0.7rem;color:var(--muted)">v1.0</span></div>
+  <div class="logo">PQC<span>-</span>Monitor <span style="font-size:0.7rem;color:var(--muted)">v{{ version }}</span></div>
   <div class="header-nav">
     <button class="nav-btn active" onclick="showView('dashboard')">Dashboard</button>
     <button class="nav-btn" onclick="showView('domains')">Domain Discovery</button>
@@ -1088,7 +1089,10 @@ footer {
     <div class="panel" style="margin-top:1.5rem">
       <div class="panel-header"><div class="panel-title">About PQC-Monitor</div></div>
       <div class="panel-body" style="color:var(--muted);font-size:0.85rem;line-height:1.6">
-        <p>PQC-Monitor is open-source software licensed under the GNU GPL v3.</p>
+        <p><strong style="color:var(--text)">Version:</strong>
+          <span style="font-family:var(--font-mono);color:var(--accent)">v{{ version }}</span>
+        </p>
+        <p style="margin-top:0.5rem">PQC-Monitor is open-source software licensed under the GNU GPL v3.</p>
         <p style="margin-top:0.5rem"><strong style="color:var(--text)">AI-assisted development notice:</strong>
         This software was created with assistance from Claude (Anthropic). All code is provided as-is.</p>
         <p style="margin-top:0.5rem"><strong style="color:var(--text)">Disclaimer:</strong>
@@ -1101,7 +1105,7 @@ footer {
 </div>
 
 <footer>
-  PQC-Monitor v1.0 &nbsp;·&nbsp; GPL-3.0 &nbsp;·&nbsp; AI-assisted (Claude/Anthropic) &nbsp;·&nbsp;
+  PQC-Monitor v{{ version }} &nbsp;·&nbsp; GPL-3.0 &nbsp;·&nbsp; AI-assisted (Claude/Anthropic) &nbsp;·&nbsp;
   Non-intrusive cryptographic posture assessment
 </footer>
 

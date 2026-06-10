@@ -48,6 +48,7 @@ def _discovery():
 @app_bp.route("/")
 @require_auth
 def dashboard_home():
+    from version import VERSION
     user = current_user()
     dashboard_content = current_app.config.get("DASHBOARD_BODY", "")
     return render_template_string(
@@ -55,6 +56,7 @@ def dashboard_home():
         user=user,
         is_admin=user.is_admin,
         dashboard_content=dashboard_content,
+        version=VERSION,
     )
 
 
@@ -444,7 +446,7 @@ _APP_SHELL = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PQC-Monitor</title>
+<title>PQC-Monitor v{{ version }}</title>
 <!-- The dashboard CSS/JS is injected inline via the original DASHBOARD_HTML template
      which is rendered from within the create_app factory.  Here we provide the
      outer authenticated shell only. -->
@@ -483,7 +485,7 @@ body { background:var(--bg); color:var(--text);
 </head>
 <body>
 <div class="top-bar">
-  <div class="brand">PQC<em>-</em>Monitor</div>
+  <div class="brand">PQC<em>-</em>Monitor <span style="color:var(--muted);font-size:.7rem;margin-left:.4rem">v{{ version }}</span></div>
   <div class="user-bar">
     {% if is_admin %}
     <a href="/admin">Admin Panel</a>

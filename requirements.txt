@@ -39,5 +39,8 @@ anthropic>=0.26.0
 # Data processing
 python-dateutil>=2.9.0
 
+# WSGI server for production deployment
+gunicorn>=22.0.0
+
 # Auth (werkzeug already pulled in by flask; listing explicitly for clarity)
 # werkzeug>=3.0.0   # provides generate_password_hash / check_password_hash

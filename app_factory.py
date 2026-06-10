@@ -22,7 +22,7 @@ import os
 import sys
 from datetime import timedelta
 
-from flask import Flask, redirect, url_for, after_this_request, request
+from flask import Flask, redirect, url_for, after_this_request, request, jsonify
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -85,6 +85,14 @@ def create_app(config: dict = None) -> Flask:
     )
     app.config["ORCHESTRATOR"] = orchestrator
     app.config["DISCOVERY"]    = discovery
+
+    # ── Version ───────────────────────────────────────────────────────────────
+    from version import VERSION
+    app.config["PQC_VERSION"] = VERSION
+
+    @app.route("/api/version")
+    def api_version():
+        return jsonify({"version": VERSION, "name": "PQC-Monitor"})
 
     # ── Dashboard body pre-extracted ─────────────────────────────────────────
     app.config["DASHBOARD_BODY"] = _extract_body(DASHBOARD_HTML)

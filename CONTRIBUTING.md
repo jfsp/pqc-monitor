@@ -99,6 +99,29 @@ Before opening a PR, verify all of the following:
 - [ ] AI-assistance disclosure if applicable:
       `# AI-assisted development: portions generated with Claude (Anthropic)`
 - [ ] `CHANGELOG.md` entry added under `[Unreleased]`
+- [ ] If this is a release PR: `VERSION` file updated to the new semver string
+
+---
+
+## Releasing a new version
+
+1. Update `VERSION`:
+   ```bash
+   echo "1.2.0" > VERSION
+   ```
+
+2. Move `[Unreleased]` entries in `CHANGELOG.md` to a new `## [1.2.0] — YYYY-MM-DD` section.
+
+3. Update the comparison links at the bottom of `CHANGELOG.md`.
+
+4. Commit: `git commit -am "release: v1.2.0"`
+
+5. Tag: `git tag -a v1.2.0 -m "v1.2.0"`
+
+No other source files need editing — all UI and CLI components read the version
+string from the `VERSION` file automatically via `version.py`.
+
+
 - [ ] No API keys, passwords, or scan databases committed
   (check `.gitignore` includes `config/config.yaml` and `data/*.db`)
 - [ ] Non-intrusive scanning principle preserved — no exploit payloads,

@@ -76,6 +76,9 @@ before scanning any systems. For research purposes only. GPL-3.0.
 @click.group()
 @click.option("--config", default=None, help="Path to config.yaml")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose logging")
+@click.version_option(prog_name="PQC-Monitor",
+                      version=open(os.path.join(ROOT, "VERSION")).read().strip()
+                      if os.path.exists(os.path.join(ROOT, "VERSION")) else "unknown")
 @click.pass_context
 def cli(ctx, config, verbose):
     """PQC-Monitor: Post-Quantum Cryptography Readiness Scanner"""
@@ -534,6 +537,66 @@ def list_schedules(ctx):
             f"{r['id']:<4} {r.get('name',''):<25} {r.get('interval_days',90):>8}d  "
             f"{(r.get('next_run') or '')[:19]:<22} {(r.get('last_run') or 'never')[:19]:<22} {enabled}"
         )
+
+
+@cli.command("scheduler-daemon")
+@click.pass_context
+def scheduler_daemon(ctx):
+    """Run the periodic scan scheduler as a long-lived daemon process.
+
+    This is the entry point used by the pqc-monitor-scheduler systemd service.
+    The process blocks until interrupted (SIGTERM/SIGINT), running configured
+    periodic scans in background threads.
+
+    To add schedules use:
+      pqc_monitor.py schedule --domains FILE --interval 90d
+    """
+    import time
+    import signal
+    cfg = ctx.obj["config"]
+    db  = Database(cfg.get("db_path", "data/pqc_monitor.db"))
+
+    from scanner.orchestrator import ScanOrchestrator
+    from scheduler.scan_scheduler import ScanScheduler
+
+    orch  = ScanOrchestrator(cfg)
+    sched = ScanScheduler(orch, db)
+
+    if not sched.scheduler:
+        click.echo("❌ APScheduler is not installed. Run: pip install apscheduler",
+                   err=True)
+        sys.exit(1)
+
+    from version import VERSION
+    click.echo(f"PQC-Monitor v{VERSION} scheduler starting")
+    click.echo(f"Database: {cfg.get('db_path', 'data/pqc_monitor.db')}")
+
+    schedules = sched.list_schedules()
+    if schedules:
+        click.echo(f"Loaded {len(schedules)} schedule(s):")
+        for s in schedules:
+            click.echo(f"  #{s['id']} {s['name']}: every {s['interval_days']}d")
+    else:
+        click.echo("No schedules configured yet. Add with: pqc_monitor.py schedule …")
+
+    sched.start()
+    click.echo("Scheduler running. Press Ctrl+C or send SIGTERM to stop.")
+
+    # Block until signal
+    stop_event = {"flag": False}
+    def _handle_signal(sig, frame):
+        click.echo(f"Signal {sig} received, shutting down…")
+        stop_event["flag"] = True
+
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT,  _handle_signal)
+
+    try:
+        while not stop_event["flag"]:
+            time.sleep(5)
+    finally:
+        sched.stop()
+        click.echo("Scheduler stopped.")
 
 
 if __name__ == "__main__":

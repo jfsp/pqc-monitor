@@ -1,0 +1,63 @@
+# PQC-Monitor: Scheduler Service Unit
+# Runs the APScheduler daemon that executes periodic domain scans.
+# This process is deliberately separate from the web service so that
+# a long-running scan does not affect web response times.
+#
+# Installation:
+#   sudo cp systemd/pqc-monitor-scheduler.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pqc-monitor-scheduler
+#
+# Logs:
+#   journalctl -u pqc-monitor-scheduler -f
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[Unit]
+Description=PQC-Monitor Scheduler Service
+Documentation=https://github.com/your-org/pqc-monitor
+After=network-online.target pqc-monitor-web.service
+Wants=network-online.target
+PartOf=pqc-monitor.target
+
+[Service]
+Type=simple
+
+# ── Identity ─────────────────────────────────────────────────────────────────
+User=pqcmonitor
+Group=pqcmonitor
+WorkingDirectory=/opt/pqc-monitor
+
+# ── Environment ──────────────────────────────────────────────────────────────
+EnvironmentFile=/etc/pqc-monitor/pqc-monitor.env
+Environment=PYTHONUNBUFFERED=1
+
+# ── Startup ───────────────────────────────────────────────────────────────────
+ExecStart=/opt/pqc-monitor/.venv/bin/python3 \
+    /opt/pqc-monitor/pqc_monitor.py scheduler-daemon
+
+# ── Hardening ─────────────────────────────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/pqc-monitor/data /var/log/pqc-monitor
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Scheduler makes outbound TCP connections for scanning
+SystemCallFilter=@system-service @network-io
+SystemCallErrorNumber=EPERM
+
+# ── Restart policy ────────────────────────────────────────────────────────────
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pqc-monitor-scheduler
+
+[Install]
+WantedBy=pqc-monitor.target

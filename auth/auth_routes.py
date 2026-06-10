@@ -25,6 +25,14 @@ from auth.middleware import (
 logger = logging.getLogger(__name__)
 auth_bp = Blueprint("auth_bp", __name__)
 
+
+def _get_version() -> str:
+    try:
+        from version import VERSION
+        return VERSION
+    except Exception:
+        return ""
+
 # Simple in-memory rate limiter: (ip, minute_bucket) → attempt count
 _login_attempts: dict[tuple, int] = {}
 _MAX_PER_MINUTE = 10
@@ -86,7 +94,8 @@ def login():
                     )
                 logger.warning(f"Login failed: {username} from {ip}")
 
-    return render_template_string(_LOGIN_HTML, error=error, next_url=next_url)
+    return render_template_string(_LOGIN_HTML, error=error, next_url=next_url,
+                                   version=_get_version())
 
 
 # ── Logout ────────────────────────────────────────────────────────────────────
@@ -197,7 +206,7 @@ footer { text-align:center; color:var(--muted); font-size:.7rem;
            autocomplete="current-password" required>
     <button type="submit">Sign In</button>
   </form>
-  <footer>PQC-Monitor &nbsp;·&nbsp; GPL-3.0 &nbsp;·&nbsp; AI-assisted</footer>
+  <footer>PQC-Monitor v{{ version }} &nbsp;·&nbsp; GPL-3.0 &nbsp;·&nbsp; AI-assisted</footer>
 </div>
 </body>
 </html>"""

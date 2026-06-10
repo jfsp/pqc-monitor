@@ -1,0 +1,73 @@
+# PQC-Monitor: Web Service Unit
+# Runs the Flask application under Gunicorn for production use.
+#
+# Installation:
+#   sudo cp systemd/pqc-monitor-web.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pqc-monitor-web
+#
+# Logs:
+#   journalctl -u pqc-monitor-web -f
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[Unit]
+Description=PQC-Monitor Web Service
+Documentation=https://github.com/your-org/pqc-monitor
+After=network-online.target
+Wants=network-online.target
+PartOf=pqc-monitor.target
+
+[Service]
+Type=notify
+
+# ── Identity ─────────────────────────────────────────────────────────────────
+User=pqcmonitor
+Group=pqcmonitor
+WorkingDirectory=/opt/pqc-monitor
+
+# ── Environment ──────────────────────────────────────────────────────────────
+EnvironmentFile=/etc/pqc-monitor/pqc-monitor.env
+Environment=PYTHONUNBUFFERED=1
+
+# ── Startup ───────────────────────────────────────────────────────────────────
+# Gunicorn listens on 127.0.0.1:5000 by default.
+# Put nginx or caddy in front for TLS termination.
+ExecStart=/opt/pqc-monitor/.venv/bin/gunicorn \
+    --bind ${PQC_BIND:-127.0.0.1:5000} \
+    --workers ${PQC_WEB_WORKERS:-2} \
+    --worker-class sync \
+    --timeout 120 \
+    --keep-alive 5 \
+    --access-logfile - \
+    --error-logfile - \
+    --capture-output \
+    --forwarded-allow-ips "*" \
+    "app_factory:create_app()"
+
+ExecReload=/bin/kill -HUP $MAINPID
+
+# ── Hardening ─────────────────────────────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/pqc-monitor/data /var/log/pqc-monitor
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# ── Restart policy ────────────────────────────────────────────────────────────
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=90
+StartLimitBurst=5
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pqc-monitor-web
+
+[Install]
+WantedBy=pqc-monitor.target

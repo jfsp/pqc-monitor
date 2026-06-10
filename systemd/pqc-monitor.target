@@ -1,0 +1,25 @@
+# PQC-Monitor: System Target
+# Groups all PQC-Monitor services so they can be managed together.
+#
+# Usage:
+#   sudo systemctl start   pqc-monitor.target   # start everything
+#   sudo systemctl stop    pqc-monitor.target   # stop everything
+#   sudo systemctl restart pqc-monitor.target   # restart everything
+#   sudo systemctl enable  pqc-monitor.target   # start on boot
+#   sudo systemctl status  pqc-monitor.target   # show combined status
+#
+# Installation:
+#   sudo cp systemd/pqc-monitor.target /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pqc-monitor.target
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[Unit]
+Description=PQC-Monitor (all services)
+Documentation=https://github.com/your-org/pqc-monitor
+After=network-online.target
+Wants=pqc-monitor-web.service pqc-monitor-scheduler.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,103 @@
+{
+  "id": "bsi_tr02102",
+  "name": "BSI TR-02102-1",
+  "version": "2026-01",
+  "published": "2026-01",
+  "source": "https://www.bsi.bund.de/SharedDocs/Downloads/EN/BSI/Publications/TechGuidelines/TG02102/BSI-TR-02102-1.pdf",
+  "description": "BSI Technical Guideline - Cryptographic Mechanisms: Recommendations and Key Lengths",
+  "notes": "German Federal Office for Information Security recommendations. RSA/DH minimum 3000 bits from 2026.",
+
+  "tls_versions": {
+    "TLSv1.3": {"status": "recommended", "score": 100},
+    "TLSv1.2": {"status": "acceptable", "score": 60, "notes": "Allowed with restricted cipher suites"},
+    "TLSv1.1": {"status": "disallowed", "score": 0},
+    "TLSv1.0": {"status": "disallowed", "score": 0},
+    "SSLv3":   {"status": "disallowed", "score": 0},
+    "SSLv2":   {"status": "disallowed", "score": 0}
+  },
+
+  "cipher_suites": {
+    "recommended": [
+      "TLS_AES_256_GCM_SHA384",
+      "TLS_AES_128_GCM_SHA256",
+      "TLS_CHACHA20_POLY1305_SHA256",
+      "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+      "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+      "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+      "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+      "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256"
+    ],
+    "acceptable": [
+      "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384",
+      "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256",
+      "TLS_DHE_DSS_WITH_AES_256_GCM_SHA384"
+    ],
+    "deprecated": [
+      "TLS_RSA_WITH_AES_256_GCM_SHA384",
+      "TLS_RSA_WITH_AES_128_GCM_SHA256",
+      "TLS_RSA_WITH_AES_256_CBC_SHA256",
+      "TLS_RSA_WITH_AES_128_CBC_SHA256"
+    ],
+    "disallowed": [
+      "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
+      "TLS_RSA_WITH_RC4_128_SHA",
+      "TLS_RSA_WITH_RC4_128_MD5",
+      "TLS_RSA_WITH_DES_CBC_SHA",
+      "TLS_RSA_EXPORT_WITH_RC4_40_MD5",
+      "TLS_NULL_WITH_NULL_NULL"
+    ]
+  },
+
+  "key_sizes": {
+    "RSA": {
+      "minimum_acceptable": 2000,
+      "recommended": 3000,
+      "mandatory_from_2026": 3000,
+      "disallowed_below": 1000,
+      "notes": "BSI requires minimum 3000 bits from 2026 for new deployments"
+    },
+    "ECDSA": {
+      "minimum_bits": 250,
+      "recommended_curves": ["brainpoolP256r1","brainpoolP384r1","brainpoolP512r1","P-256","P-384","P-521"],
+      "preferred_curves": ["brainpoolP256r1","brainpoolP384r1"],
+      "deprecated_curves": ["secp192r1","secp160r1","secp112r1"]
+    },
+    "DH": {
+      "minimum_acceptable": 2000,
+      "recommended": 3000,
+      "mandatory_from_2026": 3000,
+      "disallowed_below": 1000
+    },
+    "ECDH": {
+      "minimum_bits": 250,
+      "recommended_curves": ["brainpoolP256r1","brainpoolP384r1","brainpoolP512r1","P-256","P-384","P-521"]
+    }
+  },
+
+  "hash_functions": {
+    "SHA3-512":  {"status": "recommended", "score": 100},
+    "SHA3-384":  {"status": "recommended", "score": 100},
+    "SHA3-256":  {"status": "recommended", "score": 100},
+    "SHA-512":   {"status": "recommended", "score": 100},
+    "SHA-384":   {"status": "recommended", "score": 100},
+    "SHA-256":   {"status": "recommended", "score": 90},
+    "SHA-224":   {"status": "acceptable", "score": 50},
+    "SHA-1":     {"status": "disallowed", "score": 0, "notes": "Disallowed in BSI since 2019"},
+    "MD5":       {"status": "disallowed", "score": 0},
+    "MD4":       {"status": "disallowed", "score": 0},
+    "RIPEMD-160":{"status": "acceptable", "score": 50}
+  },
+
+  "pqc_algorithms": {
+    "ML-KEM-768":  {"status": "recommended", "type": "kem"},
+    "ML-KEM-1024": {"status": "recommended", "type": "kem"},
+    "ML-DSA-65":   {"status": "recommended", "type": "signature"},
+    "ML-DSA-87":   {"status": "recommended", "type": "signature"},
+    "FrodoKEM":    {"status": "acceptable", "type": "kem", "notes": "BSI recommends for conservative deployments"},
+    "Classic McEliece": {"status": "acceptable", "type": "kem"}
+  },
+
+  "security_strength_minimum": 100,
+  "security_strength_recommended": 128
+}

@@ -1,0 +1,107 @@
+{
+  "id": "nist_800_131a",
+  "name": "NIST SP 800-131Ar3",
+  "version": "r3-ipd-2024",
+  "published": "2024-10-21",
+  "source": "https://doi.org/10.6028/NIST.SP.800-131Ar3.ipd",
+  "description": "NIST guidance for transitioning cryptographic algorithms and key lengths",
+  "notes": "Includes PQC transition roadmap. SHA-1/SHA-224 deprecated by 2030. DSA disallowed for signing.",
+
+  "tls_versions": {
+    "TLSv1.3": {"status": "recommended", "score": 100},
+    "TLSv1.2": {"status": "acceptable", "score": 60},
+    "TLSv1.1": {"status": "deprecated", "score": 10},
+    "TLSv1.0": {"status": "disallowed", "score": 0},
+    "SSLv3":   {"status": "disallowed", "score": 0},
+    "SSLv2":   {"status": "disallowed", "score": 0}
+  },
+
+  "cipher_suites": {
+    "recommended": [
+      "TLS_AES_256_GCM_SHA384",
+      "TLS_AES_128_GCM_SHA256",
+      "TLS_CHACHA20_POLY1305_SHA256",
+      "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+      "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+      "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+      "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+      "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"
+    ],
+    "acceptable": [
+      "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384",
+      "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256",
+      "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384",
+      "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256"
+    ],
+    "deprecated": [
+      "TLS_RSA_WITH_AES_256_GCM_SHA384",
+      "TLS_RSA_WITH_AES_128_GCM_SHA256",
+      "TLS_RSA_WITH_AES_256_CBC_SHA256",
+      "TLS_RSA_WITH_AES_128_CBC_SHA256",
+      "TLS_RSA_WITH_AES_256_CBC_SHA",
+      "TLS_RSA_WITH_AES_128_CBC_SHA",
+      "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
+      "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA"
+    ],
+    "disallowed": [
+      "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
+      "TLS_RSA_WITH_RC4_128_SHA",
+      "TLS_RSA_WITH_RC4_128_MD5",
+      "TLS_RSA_WITH_DES_CBC_SHA",
+      "TLS_RSA_EXPORT_WITH_RC4_40_MD5",
+      "TLS_NULL_WITH_NULL_NULL",
+      "SSL_CK_RC4_128_WITH_MD5",
+      "TLS_RSA_WITH_NULL_MD5",
+      "TLS_RSA_WITH_NULL_SHA"
+    ]
+  },
+
+  "key_sizes": {
+    "RSA": {
+      "minimum_acceptable": 2048,
+      "recommended": 3072,
+      "deprecated_below": 2048,
+      "disallowed_below": 1024,
+      "notes": "Transition to 3072+ before 2030; RSA will be superseded by PQC"
+    },
+    "DSA": {
+      "status": "disallowed_for_signing",
+      "notes": "DSA disallowed for digital signature generation per r3"
+    },
+    "ECDSA": {
+      "minimum_curve_bits": 224,
+      "recommended_curves": ["P-256","P-384","P-521","brainpoolP256r1","brainpoolP384r1"],
+      "deprecated_curves": ["secp192r1","secp160r1"]
+    },
+    "DH": {
+      "minimum_acceptable": 2048,
+      "recommended": 3072,
+      "disallowed_below": 1024
+    }
+  },
+
+  "hash_functions": {
+    "SHA3-512":  {"status": "recommended", "score": 100},
+    "SHA3-384":  {"status": "recommended", "score": 100},
+    "SHA3-256":  {"status": "recommended", "score": 100},
+    "SHA-512":   {"status": "recommended", "score": 100},
+    "SHA-384":   {"status": "recommended", "score": 100},
+    "SHA-256":   {"status": "recommended", "score": 90},
+    "SHA-224":   {"status": "deprecated_by_2030", "score": 40},
+    "SHA-1":     {"status": "deprecated_by_2030", "score": 20},
+    "MD5":       {"status": "disallowed", "score": 0},
+    "MD4":       {"status": "disallowed", "score": 0}
+  },
+
+  "pqc_algorithms": {
+    "ML-KEM":    {"status": "recommended", "type": "kem", "standard": "FIPS 203"},
+    "ML-DSA":    {"status": "recommended", "type": "signature", "standard": "FIPS 204"},
+    "SLH-DSA":   {"status": "recommended", "type": "signature", "standard": "FIPS 205"},
+    "CRYSTALS-Kyber": {"status": "deprecated_name", "notes": "Now ML-KEM / FIPS 203"},
+    "CRYSTALS-Dilithium": {"status": "deprecated_name", "notes": "Now ML-DSA / FIPS 204"}
+  },
+
+  "security_strength_minimum": 112,
+  "security_strength_recommended": 128
+}

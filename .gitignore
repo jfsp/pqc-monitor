@@ -1,0 +1,52 @@
+# PQC-Monitor .gitignore
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Data — never commit scan results or databases
+data/pqc_monitor.db
+data/demo.db
+data/*.db
+data/scans/
+data/trends/
+*.sqlite3
+
+# Secrets — never commit API keys
+config/config.yaml
+.env
+.env.*
+*.key
+*.pem
+*.p12
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Packaging
+*.tar.gz
+*.zip
+dist/

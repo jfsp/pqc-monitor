@@ -1,0 +1,43 @@
+# PQC-Monitor Configuration
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copy to config.yaml and edit
+
+shodan:
+  api_key: ""          # Set your Shodan API key here; leave empty for direct scanning
+
+scanning:
+  timeout: 10          # seconds per connection attempt
+  max_workers: 20      # parallel scan threads
+  ports:               # TLS-bearing ports to probe
+    - 443              # HTTPS
+    - 8443             # Alt HTTPS
+    - 465              # SMTPS
+    - 993              # IMAPS
+    - 636              # LDAPS
+    - 5061             # SIP-TLS
+  user_agent: "PQCMonitor/1.0 (security research; non-intrusive)"
+
+dashboard:
+  host: "127.0.0.1"
+  port: 5000
+  secret_key: "change-me-in-production"
+
+scheduler:
+  default_interval_days: 90   # every ~3 months
+
+database:
+  path: "data/pqc_monitor.db"
+
+ai:
+  anthropic_api_key: ""       # For natural-language domain discovery
+  model: "claude-sonnet-4-20250514"
+
+guidelines:
+  active:
+    - nist_800_131a
+    - bsi_tr02102
+    - ccn_stic_221
+
+logging:
+  level: INFO
+  file: "data/pqc_monitor.log"

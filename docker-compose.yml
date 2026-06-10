@@ -1,0 +1,47 @@
+# PQC-Monitor — docker-compose.yml
+# SPDX-License-Identifier: GPL-3.0-or-later
+# AI-assisted development: portions generated with Claude (Anthropic)
+#
+# Usage:
+#   docker-compose up -d
+#   docker-compose exec pqc-monitor python3 pqc_monitor.py discover "finance in Spain"
+#   docker-compose exec pqc-monitor python3 tests/seed_demo_data.py
+
+services:
+  pqc-monitor:
+    build: .
+    image: pqc-monitor:latest
+    container_name: pqc-monitor
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/app/data          # persist scan database
+      - ./guidelines:/app/guidelines  # live-edit guidelines without rebuild
+      - ./config:/app/config
+    environment:
+      - SHODAN_API_KEY=${SHODAN_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    command: >
+      python3 -c "
+      import os, sys
+      sys.path.insert(0, '/app')
+      from dashboard.app import create_app
+      import yaml
+      cfg = yaml.safe_load(open('config/config.yaml')) or {}
+      config = {
+        'db_path': 'data/pqc_monitor.db',
+        'shodan_api_key': os.environ.get('SHODAN_API_KEY', ''),
+        'anthropic_api_key': os.environ.get('ANTHROPIC_API_KEY', ''),
+        'guidelines_dir': '/app/guidelines',
+      }
+      app = create_app(config)
+      app.run(host='0.0.0.0', port=5000, debug=False)
+      "
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/summary')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

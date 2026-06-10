@@ -1,0 +1,40 @@
+# PQC-Monitor requirements
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Web framework & dashboard
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# TLS/SSL probing
+cryptography>=42.0.0
+pyOpenSSL>=24.0.0
+
+# Network scanning
+python-nmap>=0.7.1
+dnspython>=2.6.0
+
+# Shodan integration (optional)
+shodan>=1.31.0
+
+# HTTP requests
+requests>=2.31.0
+httpx>=0.27.0
+
+# Scheduling
+APScheduler>=3.10.4
+
+# Configuration
+pyyaml>=6.0.1
+
+# Database
+# (uses built-in sqlite3)
+
+# CLI
+click>=8.1.7
+rich>=13.7.0
+
+# Anthropic SDK (for domain discovery NL queries)
+anthropic>=0.26.0
+
+# Data processing
+python-dateutil>=2.9.0

@@ -1,0 +1,85 @@
+{
+  "id": "ccn_stic_221",
+  "name": "CCN-STIC-221",
+  "version": "2023",
+  "published": "2023",
+  "source": "https://www.ccn-cert.cni.es/es/series-ccn-stic/guias-de-acceso-publico-ccn-stic/6954-ccn-stic-221-guia-de-mecanismos-criptograficos-autorizados-por-el-ccn-1/file",
+  "description": "CCN (Spanish National Cryptologic Centre) guide on authorised cryptographic mechanisms",
+  "notes": "Aligned with ENISA and EU eIDAS requirements. Applies to Spanish public administration.",
+
+  "tls_versions": {
+    "TLSv1.3": {"status": "recommended", "score": 100},
+    "TLSv1.2": {"status": "acceptable", "score": 60},
+    "TLSv1.1": {"status": "disallowed", "score": 0},
+    "TLSv1.0": {"status": "disallowed", "score": 0},
+    "SSLv3":   {"status": "disallowed", "score": 0},
+    "SSLv2":   {"status": "disallowed", "score": 0}
+  },
+
+  "cipher_suites": {
+    "recommended": [
+      "TLS_AES_256_GCM_SHA384",
+      "TLS_AES_128_GCM_SHA256",
+      "TLS_CHACHA20_POLY1305_SHA256",
+      "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+      "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+      "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+      "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+    ],
+    "acceptable": [
+      "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384",
+      "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256",
+      "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384"
+    ],
+    "deprecated": [
+      "TLS_RSA_WITH_AES_256_GCM_SHA384",
+      "TLS_RSA_WITH_AES_128_GCM_SHA256",
+      "TLS_RSA_WITH_AES_256_CBC_SHA256"
+    ],
+    "disallowed": [
+      "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
+      "TLS_RSA_WITH_RC4_128_SHA",
+      "TLS_RSA_WITH_RC4_128_MD5",
+      "TLS_RSA_WITH_DES_CBC_SHA",
+      "TLS_NULL_WITH_NULL_NULL"
+    ]
+  },
+
+  "key_sizes": {
+    "RSA": {
+      "minimum_acceptable": 2048,
+      "recommended": 3072,
+      "disallowed_below": 1024,
+      "notes": "Minimum 2048 required; 3072+ for long-term security"
+    },
+    "ECDSA": {
+      "minimum_bits": 224,
+      "recommended_curves": ["P-256","P-384","P-521","brainpoolP256r1","brainpoolP384r1"]
+    },
+    "DH": {
+      "minimum_acceptable": 2048,
+      "recommended": 3072,
+      "disallowed_below": 1024
+    }
+  },
+
+  "hash_functions": {
+    "SHA3-512":  {"status": "recommended", "score": 100},
+    "SHA3-256":  {"status": "recommended", "score": 100},
+    "SHA-512":   {"status": "recommended", "score": 100},
+    "SHA-384":   {"status": "recommended", "score": 100},
+    "SHA-256":   {"status": "recommended", "score": 90},
+    "SHA-224":   {"status": "deprecated", "score": 40},
+    "SHA-1":     {"status": "disallowed", "score": 0},
+    "MD5":       {"status": "disallowed", "score": 0}
+  },
+
+  "pqc_algorithms": {
+    "ML-KEM":  {"status": "watch", "notes": "CCN monitoring NIST/ETSI PQC standardisation"},
+    "ML-DSA":  {"status": "watch"},
+    "SLH-DSA": {"status": "watch"}
+  },
+
+  "security_strength_minimum": 112,
+  "security_strength_recommended": 128
+}

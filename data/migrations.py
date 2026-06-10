@@ -148,6 +148,44 @@ CREATE INDEX IF NOT EXISTS idx_domain_extra ON domain_extra(run_id, domain)""",
 CREATE INDEX IF NOT EXISTS idx_roadmaps_domain ON roadmaps(domain);
 CREATE INDEX IF NOT EXISTS idx_roadmaps_run    ON roadmaps(run_id)""",
     ),
+    (
+        10,
+        "Add RBAC auth tables (users, user_domain_lists, audit_log)",
+        """CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT UNIQUE NOT NULL COLLATE NOCASE,
+    email         TEXT UNIQUE NOT NULL COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'analyst',
+    full_name     TEXT DEFAULT '',
+    is_active     INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT NOT NULL,
+    last_login    TEXT,
+    failed_logins INTEGER DEFAULT 0,
+    locked_until  TEXT
+);
+CREATE TABLE IF NOT EXISTS user_domain_lists (
+    user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    domain_list_id INTEGER NOT NULL REFERENCES domain_lists(id) ON DELETE CASCADE,
+    granted_at     TEXT NOT NULL,
+    granted_by     INTEGER REFERENCES users(id),
+    PRIMARY KEY (user_id, domain_list_id)
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER,
+    username    TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    resource    TEXT DEFAULT '',
+    ip_address  TEXT DEFAULT '',
+    user_agent  TEXT DEFAULT '',
+    timestamp   TEXT NOT NULL,
+    detail      TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_ts   ON audit_log(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_udl_user   ON user_domain_lists(user_id)""",
+    ),
 ]
 
 

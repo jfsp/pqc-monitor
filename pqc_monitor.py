@@ -186,18 +186,22 @@ def scan(ctx, domains, domain, sector, region, shodan):
 @cli.command()
 @click.pass_context
 def dashboard(ctx):
-    """Launch the web dashboard.
+    """Launch the web dashboard (with RBAC).
 
     Opens on http://localhost:5000 by default.
+    Default admin credentials: admin / changeme123 — change on first login.
     """
     cfg = ctx.obj["config"]
-    from dashboard.app import create_app
+    from app_factory import create_app
 
     app = create_app(cfg)
     host = cfg.get("dashboard_host", "127.0.0.1")
     port = cfg.get("dashboard_port", 5000)
 
     click.echo(f"🚀 Dashboard starting at http://{host}:{port}")
+    click.echo("   RBAC enabled — login at /login")
+    click.echo("   Default admin: username=admin  password=changeme123")
+    click.echo("   ⚠  Change the default password immediately!")
     click.echo("   Press Ctrl+C to stop")
     app.run(host=host, port=port, debug=False)
 

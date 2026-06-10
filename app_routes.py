@@ -48,15 +48,35 @@ def _discovery():
 @app_bp.route("/")
 @require_auth
 def dashboard_home():
+    """Render the full dashboard HTML directly, injecting auth context and version."""
     from version import VERSION
+    from dashboard.app import DASHBOARD_HTML
     user = current_user()
-    dashboard_content = current_app.config.get("DASHBOARD_BODY", "")
+
+    # Inject fetch rewrite so all /api/... calls become /app/api/...
+    fetch_rewrite = """<script>
+(function(){
+  const _orig = window.fetch;
+  window.fetch = function(url, opts) {
+    if (typeof url === 'string' && url.startsWith('/api/')) {
+      url = '/app' + url;
+    }
+    return _orig.call(this, url, opts);
+  };
+})();
+</script>"""
+
+    # Render DASHBOARD_HTML as a full Jinja2 template with all needed variables
+    html = DASHBOARD_HTML.replace(
+        "<script src=",
+        fetch_rewrite + "\n<script src=",
+        1  # inject fetch rewrite before the first <script src=
+    )
     return render_template_string(
-        _APP_SHELL,
+        html,
+        version=VERSION,
         user=user,
         is_admin=user.is_admin,
-        dashboard_content=dashboard_content,
-        version=VERSION,
     )
 
 

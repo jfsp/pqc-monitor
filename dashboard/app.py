@@ -364,13 +364,13 @@ body { background: var(--bg); color: var(--text); font-family: var(--font-sans);
 .header {
   background: linear-gradient(135deg, #0f1629 0%, #1a1040 100%);
   border-bottom: 1px solid var(--border);
-  padding: 0 2rem;
+  padding: 0 1.5rem;
   display: flex; align-items: center; justify-content: space-between;
-  height: 64px;
+  height: 56px; gap: 1rem;
 }
-.logo { font-family: var(--font-mono); font-size: 1.1rem; color: var(--accent); letter-spacing: 0.05em; }
+.logo { font-family: var(--font-mono); font-size: 1.1rem; color: var(--accent); letter-spacing: 0.05em; flex-shrink: 0; }
 .logo span { color: var(--accent2); }
-.header-nav { display: flex; gap: 0.5rem; }
+.header-nav { display: flex; gap: 0.5rem; flex-wrap: wrap; }
 .nav-btn {
   background: transparent; border: 1px solid var(--border);
   color: var(--muted); padding: 0.4rem 1rem; border-radius: 6px;
@@ -542,6 +542,15 @@ footer {
 
 <div class="header">
   <div class="logo">PQC<span>-</span>Monitor <span style="font-size:0.7rem;color:var(--muted)">v{{ version }}</span></div>
+  <div style="display:flex;align-items:center;gap:.75rem">
+    {% if user is defined %}
+    {% if user.role == 'admin' %}<a href="/admin" style="color:var(--muted);font-size:.78rem;text-decoration:none" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='var(--muted)'">Admin Panel</a>{% endif %}
+    <span style="color:var(--text);font-size:.8rem">{{ user.username }}</span>
+    <span style="background:rgba({% if user.role == 'admin' %}239,68,68{% else %}124,58,237{% endif %},.2);color:{% if user.role == 'admin' %}#fca5a5{% else %}#a78bfa{% endif %};padding:.15rem .5rem;border-radius:4px;font-size:.7rem">{{ user.role }}</span>
+    <a href="/change-password" style="color:var(--muted);font-size:.78rem;text-decoration:none" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='var(--muted)'">Password</a>
+    <a href="/logout" style="color:var(--muted);font-size:.78rem;text-decoration:none" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='var(--muted)'">Sign out</a>
+    {% endif %}
+  </div>
   <div class="header-nav">
     <button class="nav-btn active" onclick="showView('dashboard')">Dashboard</button>
     <button class="nav-btn" onclick="showView('domains')">Domain Discovery</button>
@@ -552,6 +561,11 @@ footer {
     <button class="nav-btn" onclick="showView('settings')">Settings</button>
   </div>
 </div>
+{% if user is defined and not user.is_admin %}
+<div style="background:rgba(0,212,255,.06);border-bottom:1px solid rgba(0,212,255,.15);padding:.35rem 2rem;font-size:.74rem;color:var(--muted)">
+  Viewing domains from your assigned lists only
+</div>
+{% endif %}
 
 <div class="main">
 

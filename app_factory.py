@@ -22,28 +22,38 @@ import os
 import sys
 from datetime import timedelta
 
-from flask import Flask, redirect, url_for, after_this_request, request, jsonify
+from flask import Flask, redirect, url_for, request, jsonify
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 from auth.store    import AuthStore
 from auth.middleware import LocalAuthProvider, SESSION_LIFETIME_SECONDS
-from auth.auth_routes import auth_bp
-from admin.routes  import admin_bp
-from app_routes    import app_bp
 
 from data.database import Database
 from scanner.orchestrator import ScanOrchestrator
 from domain_discovery.domain_finder import DomainDiscovery
-
-# Pull the dashboard HTML body from the old app so we reuse it
-from dashboard.app import DASHBOARD_HTML
 
 logger = logging.getLogger(__name__)
 
 
 def create_app(config: dict = None) -> Flask:
     cfg = config or {}
+
+    # Import blueprint modules fresh each call so blueprints can be registered
+    # on multiple Flask app instances (needed for test isolation).
+    import importlib
+    import auth.auth_routes as _auth_mod
+    import admin.routes     as _admin_mod
+    import app_routes       as _app_mod
+
+    # Re-import creates new Blueprint objects only if modules aren't cached.
+    # Force fresh blueprints by reloading when already registered.
+    for mod in (_auth_mod, _admin_mod, _app_mod):
+        importlib.reload(mod)
+
+    from auth.auth_routes import auth_bp
+    from admin.routes     import admin_bp
+    from app_routes       import app_bp
 
     # ── Flask setup ───────────────────────────────────────────────────────────
     app = Flask(__name__)
@@ -91,17 +101,6 @@ def create_app(config: dict = None) -> Flask:
     app.config["ORCHESTRATOR"] = orchestrator
     app.config["DISCOVERY"]    = discovery
 
-    # ── Version ───────────────────────────────────────────────────────────────
-    from version import VERSION
-    app.config["PQC_VERSION"] = VERSION
-
-    @app.route("/api/version")
-    def api_version():
-        return jsonify({"version": VERSION, "name": "PQC-Monitor"})
-
-    # ── Dashboard body pre-extracted ─────────────────────────────────────────
-    app.config["DASHBOARD_BODY"] = _extract_body(DASHBOARD_HTML)
-
     # ── Blueprints ────────────────────────────────────────────────────────────
     app.register_blueprint(auth_bp)
     app.register_blueprint(admin_bp)
@@ -112,6 +111,14 @@ def create_app(config: dict = None) -> Flask:
     def root():
         return redirect(url_for("auth_bp.login"))
 
+    # ── Version endpoint ──────────────────────────────────────────────────────
+    from version import VERSION
+    app.config["PQC_VERSION"] = VERSION
+
+    @app.route("/api/version")
+    def api_version():
+        return jsonify({"version": VERSION, "name": "PQC-Monitor"})
+
     # ── Security headers (internet-facing) ────────────────────────────────────
     @app.after_request
     def add_security_headers(response):
@@ -120,7 +127,6 @@ def create_app(config: dict = None) -> Flask:
         response.headers["X-XSS-Protection"]          = "1; mode=block"
         response.headers["Referrer-Policy"]           = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"]        = "geolocation=(), camera=(), microphone=()"
-        # CSP — allow Chart.js and Google Fonts loaded by the dashboard
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
             "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; "
@@ -129,30 +135,11 @@ def create_app(config: dict = None) -> Flask:
             "img-src 'self' data:; "
             "connect-src 'self';"
         )
-        # HSTS — only set when running behind HTTPS
         if https_enabled:
             response.headers["Strict-Transport-Security"] = (
                 "max-age=31536000; includeSubDomains"
             )
         return response
 
-    logger.info("PQC-Monitor application factory initialised (RBAC enabled)")
+    logger.info("PQC-Monitor v%s application factory initialised (RBAC enabled)", VERSION)
     return app
-
-
-def _extract_body(html: str) -> str:
-    """
-    Extract just the dashboard's <body> content (excluding outer structural
-    tags) so it can be embedded inside the authenticated app shell.
-    The dashboard HTML uses inline CSS/JS — we strip the outer <html>,
-    <head>, <body> open/close and return the interior.
-    """
-    import re
-    # Remove DOCTYPE and html/head tags
-    body = re.sub(r"<!DOCTYPE[^>]*>", "", html, flags=re.IGNORECASE)
-    body = re.sub(r"<html[^>]*>|</html>", "", body, flags=re.IGNORECASE)
-    # Remove the <head>...</head> block entirely
-    body = re.sub(r"<head>.*?</head>", "", body, flags=re.DOTALL | re.IGNORECASE)
-    # Remove <body...> open and </body>
-    body = re.sub(r"<body[^>]*>|</body>", "", body, flags=re.IGNORECASE)
-    return body.strip()

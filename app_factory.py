@@ -58,9 +58,14 @@ def create_app(config: dict = None) -> Flask:
         )
     app.secret_key = secret
 
-    # Session security — internet-facing
+    # ── Session security ──────────────────────────────────────────────────────
+    # cookie_secure must be False when running over plain HTTP.
+    # Set https_enabled: true in config.yaml (or pass cookie_secure: true)
+    # only when a TLS-terminating reverse proxy is in front.
+    https_enabled = cfg.get("https_enabled", cfg.get("cookie_secure", False))
+
     app.config.update(
-        SESSION_COOKIE_SECURE   = cfg.get("cookie_secure", True),
+        SESSION_COOKIE_SECURE   = https_enabled,
         SESSION_COOKIE_HTTPONLY = True,
         SESSION_COOKIE_SAMESITE = "Lax",
         PERMANENT_SESSION_LIFETIME = timedelta(seconds=SESSION_LIFETIME_SECONDS),
@@ -124,8 +129,8 @@ def create_app(config: dict = None) -> Flask:
             "img-src 'self' data:; "
             "connect-src 'self';"
         )
-        # HSTS — only set when cookie_secure is True
-        if cfg.get("cookie_secure", True):
+        # HSTS — only set when running behind HTTPS
+        if https_enabled:
             response.headers["Strict-Transport-Security"] = (
                 "max-age=31536000; includeSubDomains"
             )

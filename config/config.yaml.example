@@ -21,6 +21,11 @@ dashboard:
   host: "127.0.0.1"
   port: 5000
   secret_key: "change-me-in-production"
+  # Set https_enabled to true ONLY when a TLS-terminating reverse proxy
+  # (nginx, Caddy) is in front. When false (default), session cookies work
+  # over plain HTTP so the app is reachable during initial setup.
+  # Running in production without TLS is not recommended.
+  https_enabled: false
 
 scheduler:
   default_interval_days: 90   # every ~3 months

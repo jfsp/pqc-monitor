@@ -74,11 +74,26 @@ def login():
                 login_user(user)
                 _audit("login", resource="", detail=f"ip={ip}")
                 logger.info(f"Login OK: {username} from {ip}")
-                # Only allow relative redirects to prevent open-redirect
-                safe_next = next_url if (
-                    next_url and next_url.startswith("/") and
-                    not next_url.startswith("//")
-                ) else url_for("app_bp.dashboard_home")
+
+                # Build a safe redirect target.
+                # next_url may be an absolute URL (e.g. http://host/app/) when
+                # the middleware redirected to /login?next=<absolute>.  Extract
+                # the path+query portion and validate it is on this host.
+                safe_next = url_for("app_bp.dashboard_home")
+                if next_url:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(next_url)
+                    if parsed.scheme:
+                        # Absolute URL — keep only the path (drop scheme+host)
+                        path_only = parsed.path or "/"
+                        if parsed.query:
+                            path_only += "?" + parsed.query
+                    else:
+                        path_only = next_url
+                    # Allow only relative paths that don't start with //
+                    if path_only.startswith("/") and not path_only.startswith("//"):
+                        safe_next = path_only
+
                 return redirect(safe_next)
             else:
                 error = "Invalid username or password."

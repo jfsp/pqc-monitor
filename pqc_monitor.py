@@ -62,6 +62,9 @@ def load_config(config_path: str = None) -> dict:
         "guidelines_dir": os.path.join(ROOT, "guidelines"),
         "dashboard_host": raw.get("dashboard", {}).get("host", "127.0.0.1"),
         "dashboard_port": raw.get("dashboard", {}).get("port", 5000),
+        # Set https_enabled: true in config.yaml only when TLS is terminated
+        # by a reverse proxy. Must be false when running over plain HTTP.
+        "https_enabled": raw.get("dashboard", {}).get("https_enabled", False),
     }
 
 

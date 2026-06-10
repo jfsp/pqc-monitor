@@ -44,7 +44,7 @@ def _make_app(db_path: str):
     app = create_app({
         "db_path": db_path,
         "secret_key": "test-secret-key-for-testing-only-32chars",
-        "cookie_secure": False,   # allow HTTP in tests
+        "https_enabled": False,   # allow HTTP in tests (default, but explicit)
     })
     app.config["TESTING"] = True
     return app
@@ -412,6 +412,31 @@ class TestEndpointProtection(unittest.TestCase):
         }, follow_redirects=False)
         self.assertEqual(r.status_code, 302)
         self.assertIn("/app", r.headers["Location"])
+
+    def test_absolute_next_url_is_stripped_to_path(self):
+        """Regression: login with ?next=http://host/app/ must redirect to /app/
+        not loop back to /login (this was the production bug)."""
+        r = self.client.post(
+            "/login?next=http://34.30.196.194:5000/app/",
+            data={"username": "admin", "password": "changeme123"},
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 302)
+        location = r.headers["Location"]
+        # Must redirect to /app/ not back to /login
+        self.assertNotIn("/login", location)
+        self.assertIn("/app", location)
+        # Must not contain an absolute URL (open-redirect prevention)
+        self.assertFalse(location.startswith("http://34."))
+
+    def test_session_survives_after_login_on_http(self):
+        """Regression: session cookie must be readable over HTTP (Secure=False)."""
+        self.client.post("/login", data={
+            "username": "admin", "password": "changeme123"
+        }, follow_redirects=True)
+        # Subsequent request must be authenticated, not redirected to login
+        r = self.client.get("/app/api/summary")
+        self.assertEqual(r.status_code, 200)
 
     def test_invalid_login_stays_on_login_page(self):
         r = self.client.post("/login", data={

@@ -39,18 +39,16 @@ logger = logging.getLogger(__name__)
 def create_app(config: dict = None) -> Flask:
     cfg = config or {}
 
-    # Import blueprint modules fresh each call so blueprints can be registered
-    # on multiple Flask app instances (needed for test isolation).
+    # Import blueprint modules inside create_app and reload them so that each
+    # call gets fresh Blueprint instances. This is required for test isolation —
+    # Flask raises AssertionError if the same Blueprint object is registered on
+    # two different app instances.
     import importlib
     import auth.auth_routes as _auth_mod
     import admin.routes     as _admin_mod
     import app_routes       as _app_mod
-
-    # Re-import creates new Blueprint objects only if modules aren't cached.
-    # Force fresh blueprints by reloading when already registered.
-    for mod in (_auth_mod, _admin_mod, _app_mod):
-        importlib.reload(mod)
-
+    for _mod in (_auth_mod, _admin_mod, _app_mod):
+        importlib.reload(_mod)
     from auth.auth_routes import auth_bp
     from admin.routes     import admin_bp
     from app_routes       import app_bp

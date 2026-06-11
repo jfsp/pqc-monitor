@@ -62,6 +62,8 @@ class DomainAssessment:
     cdn_name: str = ""
     cdn_slug: str = ""
     cdn_pqc_support: str = ""
+    # Service type tag (T2-1)
+    service_type: Optional[str] = None
 
     def to_dict(self):
         d = asdict(self)
@@ -99,7 +101,8 @@ class CryptoAssessor:
                       chain_analysis: dict = None,
                       cipher_enum: dict = None,
                       cdn_result: dict = None,
-                      extra_findings: list = None) -> DomainAssessment:
+                      extra_findings: list = None,
+                      service_type: str = None) -> DomainAssessment:
         """
         Assess a domain given per-port scan results plus optional enrichment data.
 
@@ -118,7 +121,8 @@ class CryptoAssessor:
             domain=domain,
             scan_timestamp=scan_ts,
             assessment_timestamp=assessment_ts,
-            guidelines_used=list(self.guidelines.keys())
+            guidelines_used=list(self.guidelines.keys()),
+            service_type=service_type,
         )
 
         if not scan_results:

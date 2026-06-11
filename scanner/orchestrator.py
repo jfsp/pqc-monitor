@@ -42,6 +42,32 @@ logger = logging.getLogger(__name__)
 DEFAULT_PORTS     = [443, 8443, 465, 993, 636]
 STARTTLS_PORT_SET = set(STARTTLS_PORTS.keys())
 
+# T2-1: canonical service_type label per port number
+SERVICE_TYPE_MAP: dict[int, str] = {
+    443:   "web_primary",
+    8443:  "web_secondary",
+    4443:  "web_secondary",
+    465:   "smtp",
+    587:   "smtp",
+    25:    "smtp",
+    993:   "imap",
+    143:   "imap",
+    995:   "pop3",
+    110:   "pop3",
+    636:   "ldap",
+    389:   "ldap",
+    2096:  "web_secondary",
+    2087:  "web_secondary",
+    10000: "web_secondary",
+    5061:  "sip",
+    8883:  "mqtt",
+}
+
+
+def _port_to_service_type(port: int) -> str:
+    """Return a service_type label for a port, falling back to 'other'."""
+    return SERVICE_TYPE_MAP.get(port, "other")
+
 
 class ScanOrchestrator:
     """Runs scans across a list of domains, stores results, and triggers assessment."""
@@ -260,5 +286,6 @@ class ScanOrchestrator:
             extra_findings=(
                 chain_extra_findings + enum_extra_findings + cdn_extra_findings
             ),
+            service_type=_port_to_service_type(primary_port),
         )
         self.db.save_assessment(run_id, assessment.to_dict())

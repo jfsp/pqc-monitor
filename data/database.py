@@ -272,8 +272,8 @@ class Database:
                 INSERT INTO assessments
                 (run_id, domain, assessed_at, guidelines_used, score, level,
                  findings_json, tls_versions, cipher_suites, has_pqc,
-                 cert_expiry_days, errors_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                 cert_expiry_days, errors_json, service_type)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 run_id,
                 assessment.get("domain", ""),
@@ -286,7 +286,8 @@ class Database:
                 json.dumps(assessment.get("cipher_suites_found", [])),
                 1 if assessment.get("has_pqc") else 0,
                 assessment.get("certificate_expiry_days"),
-                json.dumps(assessment.get("errors", []))
+                json.dumps(assessment.get("errors", [])),
+                assessment.get("service_type"),
             ))
 
     def get_latest_assessments(self, run_id: str = None) -> list:
@@ -306,6 +307,30 @@ class Database:
                     ) latest ON a.domain=latest.domain AND a.assessed_at=latest.max_ts
                     ORDER BY score ASC
                 """).fetchall()
+        return [self._parse_assessment_row(r) for r in rows]
+
+    def get_assessments_by_service_type(
+        self, run_id: str = None, service_type: str = None
+    ) -> list:
+        """
+        Return assessments filtered by service_type.
+        Both run_id and service_type are optional filters.
+        service_type=None returns all; service_type='web_primary' returns only those rows.
+        """
+        clauses = []
+        params: list = []
+        if run_id:
+            clauses.append("run_id=?")
+            params.append(run_id)
+        if service_type:
+            clauses.append("service_type=?")
+            params.append(service_type)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM assessments {where} ORDER BY domain",
+                params,
+            ).fetchall()
         return [self._parse_assessment_row(r) for r in rows]
 
     def get_domain_history(self, domain: str) -> list:

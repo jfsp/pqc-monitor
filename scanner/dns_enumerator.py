@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+"""
+PQC-Monitor: DNS Deep-Dive Enumerator (T3-1)
+Enumerates all sub-services of a domain via DNS record walking,
+CT log SAN harvesting, a built-in subdomain wordlist, and optional
+DNSDumpster scraping.  Results feed the scan pipeline with a
+candidate list of {host, port, service_type} tuples.
+
+Sources (in order of reliability):
+  1. Direct DNS queries  — A/AAAA, MX, NS, CNAME, TXT, SRV
+  2. CT SAN harvest      — unique FQDNs from crt.sh certificate SANs
+  3. Wordlist brute-force — ~120 common prefixes resolved concurrently
+  4. DNSDumpster scrape  — parsed HTML table (unofficial, best-effort)
+
+Results are deduplicated and stored in domain_extra as type 'dns_enum'.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+Copyright (C) 2024 PQC-Monitor Contributors
+AI-assisted development: portions generated with Claude (Anthropic)
+"""
+
+import logging
+import concurrent.futures
+import socket
+from dataclasses import dataclass, field, asdict
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+try:
+    import dns.resolver
+    import dns.rdatatype
+    import dns.exception
+    HAS_DNSPYTHON = True
+except ImportError:
+    HAS_DNSPYTHON = False
+    logger.warning("dnspython not installed — DNS enumeration will be limited")
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
+# ── Port→service_type mapping (mirrors orchestrator.SERVICE_TYPE_MAP) ─────────
+
+_PORT_SERVICE: dict[int, str] = {
+    443:   "web_primary",
+    8443:  "web_secondary",
+    4443:  "web_secondary",
+    465:   "smtp",
+    587:   "smtp",
+    25:    "smtp",
+    993:   "imap",
+    143:   "imap",
+    995:   "pop3",
+    110:   "pop3",
+    636:   "ldap",
+    389:   "ldap",
+}
+
+# Ports we'll suggest scanning on discovered hosts
+_DEFAULT_PROBE_PORTS = [443, 25, 587, 993, 636]
+
+# ── Subdomain wordlist ─────────────────────────────────────────────────────────
+
+SUBDOMAIN_WORDLIST: list[str] = [
+    # Web / application
+    "www", "web", "app", "portal", "secure", "login", "auth", "sso",
+    "api", "api2", "rest", "graphql", "gateway", "proxy",
+    # Mail
+    "mail", "smtp", "imap", "pop", "mx", "mx1", "mx2", "email",
+    "webmail", "outlook", "exchange", "autodiscover",
+    # Infrastructure
+    "ns", "ns1", "ns2", "dns", "dns1", "dns2",
+    "vpn", "remote", "gateway", "firewall", "fw", "ras",
+    "cdn", "static", "assets", "media", "img", "images",
+    # Admin / management
+    "admin", "manage", "mgmt", "panel", "dashboard", "monitor",
+    "syslog", "log", "logs", "metrics",
+    # Dev / staging
+    "dev", "staging", "stage", "test", "qa", "uat", "sandbox",
+    "preview", "beta", "demo",
+    # LDAP / directory
+    "ldap", "ldaps", "dc", "dc1", "dc2", "ad", "dir",
+    # Misc services
+    "ftp", "sftp", "ssh", "rdp", "citrix",
+    "intranet", "internal", "extranet",
+    "shop", "store", "pay", "payment", "billing",
+    "support", "helpdesk", "servicedesk",
+    "wiki", "docs", "confluence", "jira",
+    "git", "gitlab", "github", "svn", "ci", "jenkins",
+    "cloud", "aws", "azure",
+    # Common numbered hosts
+    "host1", "host2", "server", "server1", "server2",
+    # Geographic/regional
+    "eu", "us", "uk", "de", "fr", "es",
+]
+
+# ── Dataclasses ───────────────────────────────────────────────────────────────
+
+@dataclass
+class TlsCandidate:
+    """A {host, port, service_type} tuple recommended for TLS scanning."""
+    host: str
+    port: int
+    service_type: str
+    source: str  # dns_record | ct_san | wordlist | dnsdumpster
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class DnsEnumerationResult:
+    domain: str
+    a_records: list[str]       = field(default_factory=list)
+    aaaa_records: list[str]    = field(default_factory=list)
+    mx_hosts: list[str]        = field(default_factory=list)
+    ns_hosts: list[str]        = field(default_factory=list)
+    cname_chain: list[str]     = field(default_factory=list)
+    spf_record: Optional[str]  = None
+    dmarc_record: Optional[str] = None
+    subdomains: list[str]      = field(default_factory=list)   # all discovered FQDNs
+    tls_candidates: list[dict] = field(default_factory=list)   # TlsCandidate dicts
+    errors: list[str]          = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _resolve(domain: str, rtype: str, timeout: float = 5.0) -> list[str]:
+    """
+    Query *domain* for records of *rtype*.  Returns a list of string values.
+    Empty list on NXDOMAIN / timeout / not-installed.
+    """
+    if not HAS_DNSPYTHON:
+        return []
+    resolver = dns.resolver.Resolver()
+    resolver.lifetime = timeout
+    try:
+        answers = resolver.resolve(domain, rtype)
+        return [str(r) for r in answers]
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer,
+            dns.resolver.NoNameservers, dns.exception.Timeout,
+            dns.exception.DNSException):
+        return []
+    except Exception as exc:
+        logger.debug(f"DNS {rtype} query for {domain} failed: {exc}")
+        return []
+
+
+def _cname_chain(domain: str, max_depth: int = 8) -> list[str]:
+    """Follow CNAME chain up to max_depth hops; returns list of targets."""
+    chain: list[str] = []
+    current = domain
+    for _ in range(max_depth):
+        targets = _resolve(current, "CNAME")
+        if not targets:
+            break
+        target = targets[0].rstrip(".")
+        chain.append(target)
+        current = target
+    return chain
+
+
+def _txt_records(domain: str) -> tuple[Optional[str], Optional[str]]:
+    """Return (spf_record, dmarc_record) from TXT queries."""
+    spf = None
+    dmarc = None
+    for txt in _resolve(domain, "TXT"):
+        clean = txt.strip('"')
+        if clean.startswith("v=spf1") and spf is None:
+            spf = clean
+    for txt in _resolve(f"_dmarc.{domain}", "TXT"):
+        clean = txt.strip('"')
+        if clean.startswith("v=DMARC1") and dmarc is None:
+            dmarc = clean
+    return spf, dmarc
+
+
+def _resolves(fqdn: str, timeout: float = 3.0) -> bool:
+    """Quick check: does the FQDN have at least one A or AAAA record?"""
+    if HAS_DNSPYTHON:
+        return bool(_resolve(fqdn, "A", timeout) or _resolve(fqdn, "AAAA", timeout))
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.gethostbyname(fqdn)
+        return True
+    except (socket.gaierror, socket.timeout):
+        return False
+
+
+def _wordlist_subdomains(
+    domain: str,
+    wordlist: list[str],
+    max_workers: int = 30,
+    timeout: float = 3.0,
+) -> list[str]:
+    """Resolve wordlist prefixes against domain concurrently; return resolving FQDNs."""
+    candidates = [f"{w}.{domain}" for w in wordlist]
+    found: list[str] = []
+
+    def check(fqdn: str) -> Optional[str]:
+        return fqdn if _resolves(fqdn, timeout) else None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for result in ex.map(check, candidates):
+            if result:
+                found.append(result)
+    return found
+
+
+def _ct_sans(domain: str) -> list[str]:
+    """
+    Harvest unique FQDNs from crt.sh certificate SANs for *domain*.
+    Uses the same JSON endpoint as ct/ct_monitor.py.
+    Returns a de-duplicated, lowercase list of FQDNs that are children
+    of *domain* (wildcards stripped).
+    """
+    if not HAS_REQUESTS:
+        return []
+    url = f"https://crt.sh/?q=%.{domain}&output=json&exclude=expired"
+    try:
+        resp = requests.get(url, timeout=15, headers={"Accept": "application/json"})
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.debug(f"CT SAN harvest failed for {domain}: {exc}")
+        return []
+
+    fqdns: set[str] = set()
+    for entry in data:
+        name_value = entry.get("name_value", "")
+        for name in name_value.split("\n"):
+            name = name.strip().lstrip("*.").lower()
+            if name and name.endswith(f".{domain}") or name == domain:
+                fqdns.add(name)
+    return sorted(fqdns)
+
+
+def _dnsdumpster_subdomains(domain: str, timeout: int = 15) -> list[str]:
+    """
+    Scrape DNSDumpster for additional subdomains (unofficial, best-effort).
+    Returns a list of FQDNs; empty list on any failure.
+    """
+    if not HAS_REQUESTS:
+        return []
+    session = requests.Session()
+    base = "https://dnsdumpster.com"
+    try:
+        # Fetch CSRF token from landing page
+        r = session.get(base, timeout=timeout,
+                        headers={"User-Agent": "PQC-Monitor/1.1 (DNS research)"})
+        r.raise_for_status()
+
+        csrf = None
+        for line in r.text.splitlines():
+            if "csrfmiddlewaretoken" in line and "value=" in line:
+                # <input type="hidden" name="csrfmiddlewaretoken" value="...">
+                start = line.find('value="') + 7
+                end   = line.find('"', start)
+                csrf  = line[start:end]
+                break
+        if not csrf:
+            logger.debug("DNSDumpster: could not extract CSRF token")
+            return []
+
+        # Submit search
+        post = session.post(
+            base,
+            data={"csrfmiddlewaretoken": csrf, "targetip": domain, "user": "free"},
+            headers={
+                "Referer": base,
+                "User-Agent": "PQC-Monitor/1.1 (DNS research)",
+            },
+            timeout=timeout,
+        )
+        post.raise_for_status()
+        html = post.text
+
+    except Exception as exc:
+        logger.debug(f"DNSDumpster request failed for {domain}: {exc}")
+        return []
+
+    # Extract FQDNs from table cells — each subdomain row starts with the FQDN
+    fqdns: set[str] = set()
+    import re
+    # Pattern: table cell content that looks like a subdomain of target
+    for match in re.finditer(
+        r'<td[^>]*>\s*([a-zA-Z0-9._-]+\.' + re.escape(domain) + r')\s*</td>',
+        html
+    ):
+        fqdn = match.group(1).lower().strip()
+        if fqdn.endswith(f".{domain}"):
+            fqdns.add(fqdn)
+
+    logger.debug(f"DNSDumpster returned {len(fqdns)} subdomains for {domain}")
+    return sorted(fqdns)
+
+
+def _build_candidates(
+    domain: str,
+    all_subdomains: list[str],
+    mx_hosts: list[str],
+    ns_hosts: list[str],
+) -> list[TlsCandidate]:
+    """
+    Build TLS scan candidate list from all discovered hosts.
+    Each host gets a candidate per default probe port.
+    MX hosts → smtp candidates; NS hosts → no TLS probes by default.
+    """
+    candidates: list[TlsCandidate] = []
+    seen: set[tuple[str, int]] = set()
+
+    def add(host: str, port: int, source: str):
+        host = host.rstrip(".").lower()
+        key = (host, port)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(TlsCandidate(
+            host=host,
+            port=port,
+            service_type=_PORT_SERVICE.get(port, "other"),
+            source=source,
+        ))
+
+    # Primary domain itself
+    for port in _DEFAULT_PROBE_PORTS:
+        add(domain, port, "dns_record")
+
+    # Subdomains → web + mail ports
+    for sub in all_subdomains:
+        for port in _DEFAULT_PROBE_PORTS:
+            add(sub, port, "subdomain")
+
+    # MX hosts → SMTP-specific ports only
+    for mx in mx_hosts:
+        for port in [25, 587, 465]:
+            add(mx, port, "mx_record")
+
+    return candidates
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+def enumerate_domain(
+    domain: str,
+    use_wordlist: bool = True,
+    use_ct: bool = True,
+    use_dnsdumpster: bool = True,
+    wordlist: list[str] = None,
+    max_workers: int = 30,
+    timeout: float = 5.0,
+) -> DnsEnumerationResult:
+    """
+    Full DNS deep-dive for *domain*.
+
+    Parameters
+    ----------
+    domain          Root domain to enumerate (e.g. "example.com")
+    use_wordlist    Brute-force with built-in wordlist (default True)
+    use_ct          Harvest SANs from crt.sh CT logs (default True)
+    use_dnsdumpster Scrape DNSDumpster (default True, best-effort)
+    wordlist        Override built-in wordlist
+    max_workers     Concurrency for wordlist resolution
+    timeout         Per-query DNS timeout in seconds
+
+    Returns
+    -------
+    DnsEnumerationResult with all discovered data and TLS candidates.
+    """
+    result = DnsEnumerationResult(domain=domain)
+    wl = wordlist if wordlist is not None else SUBDOMAIN_WORDLIST
+    all_subs: set[str] = set()
+
+    # ── A / AAAA ──────────────────────────────────────────────────
+    result.a_records    = _resolve(domain, "A",    timeout)
+    result.aaaa_records = _resolve(domain, "AAAA", timeout)
+    if not result.a_records and not result.aaaa_records:
+        result.errors.append(f"Domain {domain} does not resolve")
+
+    # ── CNAME chain ───────────────────────────────────────────────
+    result.cname_chain = _cname_chain(domain)
+
+    # ── MX ────────────────────────────────────────────────────────
+    mx_raw = _resolve(domain, "MX", timeout)
+    # MX records look like "10 mail.example.com." — extract host
+    for rec in mx_raw:
+        parts = rec.split()
+        host = (parts[-1] if parts else rec).rstrip(".")
+        if host and host not in result.mx_hosts:
+            result.mx_hosts.append(host)
+            all_subs.add(host)
+
+    # ── NS ────────────────────────────────────────────────────────
+    ns_raw = _resolve(domain, "NS", timeout)
+    result.ns_hosts = [r.rstrip(".") for r in ns_raw]
+
+    # ── TXT (SPF / DMARC) ─────────────────────────────────────────
+    result.spf_record, result.dmarc_record = _txt_records(domain)
+
+    # ── CT SAN harvest ────────────────────────────────────────────
+    if use_ct:
+        try:
+            ct_subs = _ct_sans(domain)
+            logger.debug(f"{domain}: CT SANs found {len(ct_subs)} subdomains")
+            all_subs.update(ct_subs)
+        except Exception as exc:
+            result.errors.append(f"CT harvest error: {exc}")
+            logger.warning(f"CT harvest failed for {domain}: {exc}")
+
+    # ── Wordlist brute-force ──────────────────────────────────────
+    if use_wordlist:
+        try:
+            wl_subs = _wordlist_subdomains(domain, wl, max_workers, timeout)
+            logger.debug(f"{domain}: wordlist found {len(wl_subs)} subdomains")
+            all_subs.update(wl_subs)
+        except Exception as exc:
+            result.errors.append(f"Wordlist error: {exc}")
+            logger.warning(f"Wordlist enumeration failed for {domain}: {exc}")
+
+    # ── DNSDumpster ───────────────────────────────────────────────
+    if use_dnsdumpster:
+        try:
+            dd_subs = _dnsdumpster_subdomains(domain)
+            logger.debug(f"{domain}: DNSDumpster found {len(dd_subs)} subdomains")
+            all_subs.update(dd_subs)
+        except Exception as exc:
+            result.errors.append(f"DNSDumpster error: {exc}")
+            logger.debug(f"DNSDumpster failed for {domain}: {exc}")
+
+    # Filter to confirmed children of root domain, deduplicate
+    result.subdomains = sorted(
+        s for s in all_subs
+        if s != domain and (s.endswith(f".{domain}") or "." in s)
+    )
+
+    # ── Build TLS candidates ──────────────────────────────────────
+    candidates = _build_candidates(
+        domain,
+        result.subdomains,
+        result.mx_hosts,
+        result.ns_hosts,
+    )
+    result.tls_candidates = [c.to_dict() for c in candidates]
+
+    logger.info(
+        f"DNS enumeration {domain}: "
+        f"{len(result.a_records)} A, "
+        f"{len(result.mx_hosts)} MX, "
+        f"{len(result.subdomains)} subdomains, "
+        f"{len(result.tls_candidates)} TLS candidates"
+    )
+    return result

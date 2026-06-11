@@ -191,6 +191,16 @@ CREATE INDEX IF NOT EXISTS idx_udl_user   ON user_domain_lists(user_id)""",
         "Add updated_at to domain_lists",
         "ALTER TABLE domain_lists ADD COLUMN updated_at TEXT",
     ),
+    (
+        12,
+        "Reserved — geography columns on domain_lists (T1-2)",
+        "SELECT 1",  # placeholder; real SQL added when T1-2 is implemented
+    ),
+    (
+        13,
+        "Add service_type column to assessments (T2-1)",
+        "ALTER TABLE assessments ADD COLUMN service_type TEXT",
+    ),
 ]
 
 

@@ -12,6 +12,44 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.2.0] — 2026-06-11
+
+### Added
+
+**T2-1 — Resource type tagging on assessments**
+
+- `service_type` column on `assessments` table (migration v13). Values:
+  `web_primary`, `web_secondary`, `smtp`, `imap`, `pop3`, `ldap`, `sip`, `mqtt`, `other`.
+- `orchestrator.py`: `SERVICE_TYPE_MAP` and `_port_to_service_type(port)` derive
+  a label from the primary port; passed into `assess_domain()` and stored per row.
+- `crypto_assessor.py`: `DomainAssessment` gains `service_type: Optional[str]`;
+  `assess_domain()` accepts the keyword argument.
+- `database.py`: `save_assessment()` persists `service_type`; new
+  `get_assessments_by_service_type(run_id, service_type)` for filtered queries.
+- `GET /api/assessments`: accepts optional `?service_type=` query parameter.
+- Migration v12 reserved as placeholder for T1-2; migration v13 is the real ALTER TABLE.
+
+**T3-1 — DNS deep-dive on domain add**
+
+- New `scanner/dns_enumerator.py` with `enumerate_domain()` entry point.
+  Four enumeration passes: (1) direct DNS (A/AAAA/MX/NS/CNAME/TXT),
+  (2) CT SAN harvest via crt.sh, (3) wordlist brute-force (120 built-in prefixes,
+  concurrent resolution), (4) DNSDumpster CSRF scrape. Each source is
+  independently guarded; errors collected non-fatally.
+  Returns `DnsEnumerationResult` with `tls_candidates` list ready for the scan pipeline.
+- `POST /api/dns-enumerate`: on-demand endpoint. Accepts `use_wordlist`,
+  `use_ct`, `use_dnsdumpster` flags. Stores in `domain_extra` (type `dns_enum`)
+  when `run_id` given. Requires `scan.run` permission.
+- `POST /api/save-domains`: gains optional `dns_enumerate: true` + `run_id`;
+  runs enumeration on save and returns per-domain summary.
+
+### Migration notes
+
+Schema now at v13. Existing databases auto-upgrade on first connection.
+`service_type` is nullable — all pre-existing rows are unaffected.
+
+---
+
 ## [1.1.3] — 2026-06-11
 
 ### Fixed

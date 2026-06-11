@@ -42,6 +42,9 @@ def _orchestrator():
 def _discovery():
     return current_app.config["DISCOVERY"]
 
+def _dns_config() -> dict:
+    """Return dns_enumeration config block from app config (or defaults)."""
+    return current_app.config.get("DNS_ENUM_CONFIG", {})
 
 # ── Root redirect ─────────────────────────────────────────────────────────────
 
@@ -113,10 +116,14 @@ def api_summary():
 @app_bp.route("/api/assessments")
 @require_auth
 def api_assessments():
-    db     = _db()
-    user   = current_user()
-    run_id = request.args.get("run_id")
-    all_   = db.get_latest_assessments(run_id)
+    db           = _db()
+    user         = current_user()
+    run_id       = request.args.get("run_id")
+    service_type = request.args.get("service_type")  # T2-1 filter
+    if service_type:
+        all_ = db.get_assessments_by_service_type(run_id=run_id, service_type=service_type)
+    else:
+        all_ = db.get_latest_assessments(run_id)
     return jsonify(filter_assessments(all_, user))
 
 
@@ -176,6 +183,62 @@ def api_discover():
     return jsonify(result)
 
 
+# T3-1: DNS deep-dive endpoint
+@app_bp.route("/api/dns-enumerate", methods=["POST"])
+@require_auth
+def api_dns_enumerate():
+    """
+    Run DNS deep-dive enumeration for one or more domains.
+    Returns DnsEnumerationResult for each domain and optionally stores
+    results in domain_extra (requires a run_id).
+
+    Request body:
+      {
+        "domains": ["example.com", ...],
+        "run_id": "<uuid>",          # optional — store in domain_extra
+        "use_wordlist": true,
+        "use_ct": true,
+        "use_dnsdumpster": true
+      }
+    """
+    if not current_user().can("scan.run"):
+        return jsonify({"error": "forbidden"}), 403
+
+    data    = request.get_json() or {}
+    domains = data.get("domains", [])
+    run_id  = data.get("run_id")
+    use_wl  = data.get("use_wordlist", True)
+    use_ct  = data.get("use_ct", True)
+    use_dd  = data.get("use_dnsdumpster", True)
+
+    if not domains:
+        return jsonify({"error": "domains list is required"}), 400
+
+    from scanner.dns_enumerator import enumerate_domain
+    db = _db()
+    results = {}
+
+    for domain in domains:
+        try:
+            enum_result = enumerate_domain(
+                domain,
+                use_wordlist=use_wl,
+                use_ct=use_ct,
+                use_dnsdumpster=use_dd,
+            )
+            results[domain] = enum_result.to_dict()
+            if run_id:
+                db.save_domain_extra(run_id, domain, "dns_enum", enum_result.to_dict())
+            _audit("dns.enumerate", resource=domain,
+                   detail=(f"{len(enum_result.subdomains)} subdomains, "
+                           f"{len(enum_result.tls_candidates)} candidates"))
+        except Exception as exc:
+            logger.error(f"DNS enumeration failed for {domain}: {exc}")
+            results[domain] = {"error": str(exc)}
+
+    return jsonify(results)
+
+
 @app_bp.route("/api/scan", methods=["POST"])
 @require_auth
 def api_scan():
@@ -219,14 +282,42 @@ def api_reassess():
 @app_bp.route("/api/save-domains", methods=["POST"])
 @require_auth
 def api_save_domains():
+    """
+    Save a domain list.  Pass dns_enumerate=true to run DNS deep-dive
+    on each domain immediately; results stored in domain_extra if run_id given.
+    """
     if not current_user().can("domain_list.manage"):
         return jsonify({"error": "forbidden"}), 403
     data    = request.get_json() or {}
     name    = data.get("name", "unnamed")
     domains = data.get("domains", [])
     query   = data.get("query", "")
+    run_id  = data.get("run_id")
+    do_enum = data.get("dns_enumerate", False)
+
     list_id = _db().save_domain_list(name, domains, query)
-    return jsonify({"list_id": list_id, "count": len(domains)})
+    response: dict = {"list_id": list_id, "count": len(domains)}
+
+    if do_enum and domains:
+        from scanner.dns_enumerator import enumerate_domain
+        db = _db()
+        enum_summary: dict = {}
+        for domain in domains:
+            try:
+                enum_result = enumerate_domain(domain)
+                if run_id:
+                    db.save_domain_extra(run_id, domain, "dns_enum",
+                                         enum_result.to_dict())
+                enum_summary[domain] = {
+                    "subdomains": len(enum_result.subdomains),
+                    "tls_candidates": len(enum_result.tls_candidates),
+                    "errors": enum_result.errors,
+                }
+            except Exception as exc:
+                enum_summary[domain] = {"error": str(exc)}
+        response["dns_enumeration"] = enum_summary
+
+    return jsonify(response)
 
 
 # ── CT endpoints (scoped) ─────────────────────────────────────────────────────

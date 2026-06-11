@@ -12,6 +12,27 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.1.3] — 2026-06-11
+
+### Fixed
+
+**CT Monitor, Roadmap, and Settings views still empty after v1.1.2**
+
+The `view-trends` `<div>` was never closed in `dashboard/app.py`. The CT Monitor,
+Roadmap, and Settings view `<div>` elements were therefore children of `view-trends`
+in the DOM, not siblings. When `view-trends` was deactivated (`.view` CSS sets
+`display:none`) all three hidden views became invisible along with it, regardless
+of whether they had the `.active` class applied.
+
+Fix: added the missing `</div>  <!-- /view-trends -->` at line 827, restoring all
+seven views to the correct sibling relationship within `<div class="main">`. All
+views are now at DOM depth 2 (main=1, view=1) as intended.
+
+This was a pre-existing HTML structure bug introduced when the CT Monitor and
+Roadmap views were added in earlier sessions. The v1.1.2 JavaScript fixes
+(`showView`, Chart.js guards, `renderSettingsVersion`) were correct but could not
+overcome the CSS hiding caused by the nesting bug.
+
 ## [1.1.2] — 2026-06-11
 
 ### Fixed
@@ -394,7 +415,8 @@ Fixes applied:
 
 ---
 
-[Unreleased]: https://github.com/your-org/pqc-monitor/compare/v1.1.2...HEAD
+[Unreleased]: https://github.com/your-org/pqc-monitor/compare/v1.1.3...HEAD
+[1.1.3]: https://github.com/your-org/pqc-monitor/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/your-org/pqc-monitor/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/your-org/pqc-monitor/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/your-org/pqc-monitor/compare/v1.0.0...v1.1.0

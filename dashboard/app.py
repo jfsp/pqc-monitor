@@ -823,6 +823,7 @@ footer {
         <div id="schedules-body" style="color:var(--muted)">Loading…</div>
       </div>
     </div>
+  </div>  <!-- /view-trends -->
 
 
   <!-- ═══ CT MONITOR VIEW ═══ -->

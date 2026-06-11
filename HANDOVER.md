@@ -1,9 +1,10 @@
 # PQC-Monitor — Developer Handover Document
 
-**Version:** 1.1.3  
+**Version:** 1.2.0  
 **Date:** 2026-06-11  
-**Status:** 366/366 tests passing  
-**Purpose:** Context transfer for continuing development in a new session
+**Status:** 408/408 tests passing  
+**Purpose:** Context transfer for continuing development in a new session  
+**Repository:** https://github.com/jfsp/pqc-monitor
 
 ---
 
@@ -35,6 +36,36 @@ Two systemd services — `pqc-monitor-web` (Gunicorn) and `pqc-monitor-scheduler
 **License:** GPL-3.0-or-later  
 **AI-assisted:** Substantial portions generated with Claude (Anthropic). All code reviewed by developer.
 
+### Source Repository
+
+**GitHub:** https://github.com/jfsp/pqc-monitor
+
+### Git Workflow for AI-Assisted Development
+
+When continuing work with Claude, the expected workflow is:
+
+1. Share the updated zip **or** paste individual files that need changing
+2. Claude delivers modified files **plus** ready-to-apply git commits  
+   (one logical commit per concern, conventional commit format: `type(scope): message`)
+3. Stage and commit each change:
+   ```bash
+   git add <changed-files>
+   git commit -m "feat(scope): description"
+   git push origin main
+   ```
+
+**Commit format used in this project:**
+```
+type(scope): short description (≤72 chars)
+
+- bullet explaining what changed and why
+- backlog reference if applicable (e.g. T2-1, T3-1)
+
+Files changed:
+  path/to/file.py
+```
+Types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`
+
 ---
 
 ## 2. Version History
@@ -46,6 +77,7 @@ Two systemd services — `pqc-monitor-web` (Gunicorn) and `pqc-monitor-scheduler
 | 1.1.1 | Fix: login loop on plain HTTP (`SESSION_COOKIE_SECURE` defaulted True); fix: absolute `?next=` URL redirect |
 | 1.1.2 | Fix: CT/Roadmap/Settings tabs empty (stray `return app` before blueprint registration); fix: `showView` used implicit `event.target`; added dashboard card filtering and sortable columns |
 | 1.1.3 | Fix: CT/Roadmap/Settings still empty — `</div>` missing from `view-trends`, making CT/Roadmap/Settings children of trends in DOM |
+| 1.2.0 | T2-1: `service_type` column on assessments (migration v13), port→service_type map, `?service_type=` filter on `GET /api/assessments`; T3-1: `scanner/dns_enumerator.py` (CT SANs + wordlist + DNSDumpster), `POST /api/dns-enumerate`, `dns_enumerate` flag on `POST /api/save-domains` |
 
 ---
 
@@ -53,7 +85,7 @@ Two systemd services — `pqc-monitor-web` (Gunicorn) and `pqc-monitor-scheduler
 
 ```
 pqc-monitor/
-├── VERSION                     # "1.1.3" — ONLY file to edit when releasing
+├── VERSION                     # "1.2.0" — ONLY file to edit when releasing
 ├── version.py                  # reads VERSION, exports VERSION/__version__
 ├── pqc_monitor.py              # CLI entry point (12 commands)
 ├── app_factory.py              # Flask app factory — the production entry point

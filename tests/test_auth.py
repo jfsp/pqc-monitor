@@ -658,5 +658,236 @@ class TestAdminAPI(unittest.TestCase):
             self.assertEqual(domains_seen, {DOMAIN_PROFILES[0]["domain"]})
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Domain List CRUD
+# ═══════════════════════════════════════════════════════════════════
+
+class TestDomainListCRUD(unittest.TestCase):
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        _, self.db_path = _make_store(self.tmpdir)
+        self.app = _make_app(self.db_path)
+        self.client = self.app.test_client()
+        import auth.auth_routes as _ar; _ar._login_attempts.clear()
+        self.client.post("/login",
+                          data={"username": "admin", "password": "changeme123"},
+                          follow_redirects=True)
+        self.db = __import__("data.database", fromlist=["Database"]).Database(self.db_path)
+
+    # ── Index ──────────────────────────────────────────────────────
+
+    def test_index_empty(self):
+        r = self.client.get("/admin/api/domain-lists")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(json.loads(r.data), [])
+
+    def test_index_includes_domain_count(self):
+        self.db.save_domain_list("A", ["x.com", "y.com"], "q")
+        r = self.client.get("/admin/api/domain-lists")
+        lists = json.loads(r.data)
+        self.assertEqual(lists[0]["domain_count"], 2)
+
+    def test_index_includes_user_count(self):
+        list_id = self.db.save_domain_list("B", ["z.com"], "")
+        store = __import__("auth.store", fromlist=["AuthStore"]).AuthStore(self.db_path)
+        u = store.create_user("ana", "ana@e.com", "password1234", "analyst")
+        store.assign_domain_list(u.id, list_id)
+        r = self.client.get("/admin/api/domain-lists")
+        lists = json.loads(r.data)
+        dl = next(x for x in lists if x["id"] == list_id)
+        self.assertEqual(dl["user_count"], 1)
+
+    # ── Create ─────────────────────────────────────────────────────
+
+    def test_create_list(self):
+        r = self.client.post("/admin/api/domain-lists",
+                              json={"name": "Finance Spain",
+                                    "domains": ["bbva.es", "santander.es"],
+                                    "query": "finance spain"},
+                              content_type="application/json")
+        self.assertEqual(r.status_code, 201)
+        d = json.loads(r.data)
+        self.assertIn("id", d)
+        self.assertEqual(d["name"], "Finance Spain")
+        self.assertEqual(d["count"], 2)
+
+    def test_create_list_no_name_400(self):
+        r = self.client.post("/admin/api/domain-lists",
+                              json={"domains": ["x.com"]},
+                              content_type="application/json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_create_list_empty_domains_ok(self):
+        r = self.client.post("/admin/api/domain-lists",
+                              json={"name": "Empty list", "domains": []},
+                              content_type="application/json")
+        self.assertEqual(r.status_code, 201)
+        d = json.loads(r.data)
+        self.assertEqual(d["count"], 0)
+
+    def test_create_strips_blank_entries(self):
+        r = self.client.post("/admin/api/domain-lists",
+                              json={"name": "Clean",
+                                    "domains": ["  x.com  ", "", "  ", "y.com"]},
+                              content_type="application/json")
+        d = json.loads(r.data)
+        self.assertEqual(d["count"], 2)
+
+    # ── Get single ─────────────────────────────────────────────────
+
+    def test_get_list_full(self):
+        list_id = self.db.save_domain_list("Test", ["a.com", "b.com"], "q")
+        r = self.client.get(f"/admin/api/domain-lists/{list_id}")
+        self.assertEqual(r.status_code, 200)
+        d = json.loads(r.data)
+        self.assertEqual(d["name"], "Test")
+        self.assertIn("domains", d)
+        self.assertCountEqual(d["domains"], ["a.com", "b.com"])
+
+    def test_get_nonexistent_404(self):
+        r = self.client.get("/admin/api/domain-lists/99999")
+        self.assertEqual(r.status_code, 404)
+
+    # ── Update ─────────────────────────────────────────────────────
+
+    def test_update_name(self):
+        list_id = self.db.save_domain_list("Old", ["x.com"], "")
+        r = self.client.patch(f"/admin/api/domain-lists/{list_id}",
+                               json={"name": "New Name"},
+                               content_type="application/json")
+        self.assertEqual(r.status_code, 200)
+        updated = self.db.get_domain_list_full(list_id)
+        self.assertEqual(updated["name"], "New Name")
+        # Domains unchanged
+        self.assertCountEqual(updated["domains"], ["x.com"])
+
+    def test_update_domains_replaces_all(self):
+        list_id = self.db.save_domain_list("L", ["old.com"], "")
+        r = self.client.patch(f"/admin/api/domain-lists/{list_id}",
+                               json={"domains": ["new1.com", "new2.com"]},
+                               content_type="application/json")
+        self.assertEqual(r.status_code, 200)
+        updated = self.db.get_domain_list_full(list_id)
+        self.assertCountEqual(updated["domains"], ["new1.com", "new2.com"])
+        self.assertNotIn("old.com", updated["domains"])
+
+    def test_update_query_only(self):
+        list_id = self.db.save_domain_list("Q", ["x.com"], "old query")
+        self.client.patch(f"/admin/api/domain-lists/{list_id}",
+                           json={"query": "new query"},
+                           content_type="application/json")
+        updated = self.db.get_domain_list_full(list_id)
+        self.assertEqual(updated["query"], "new query")
+        self.assertCountEqual(updated["domains"], ["x.com"])
+
+    def test_update_sets_updated_at(self):
+        list_id = self.db.save_domain_list("Ts", ["x.com"], "")
+        self.client.patch(f"/admin/api/domain-lists/{list_id}",
+                           json={"name": "Updated"},
+                           content_type="application/json")
+        updated = self.db.get_domain_list_full(list_id)
+        self.assertIsNotNone(updated.get("updated_at"))
+
+    def test_update_nonexistent_404(self):
+        r = self.client.patch("/admin/api/domain-lists/99999",
+                               json={"name": "X"},
+                               content_type="application/json")
+        self.assertEqual(r.status_code, 404)
+
+    # ── Delete ─────────────────────────────────────────────────────
+
+    def test_delete_list(self):
+        list_id = self.db.save_domain_list("Del", ["x.com"], "")
+        r = self.client.delete(f"/admin/api/domain-lists/{list_id}")
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(self.db.get_domain_list_full(list_id))
+
+    def test_delete_removes_user_assignments(self):
+        list_id = self.db.save_domain_list("Assigned", ["x.com"], "")
+        store = __import__("auth.store", fromlist=["AuthStore"]).AuthStore(self.db_path)
+        u = store.create_user("bob2", "bob2@e.com", "password1234", "analyst")
+        store.assign_domain_list(u.id, list_id)
+        # Confirm assignment exists
+        u_before = store.get_user_by_id(u.id)
+        self.assertIn(list_id, u_before.domain_list_ids)
+        # Delete the list
+        self.client.delete(f"/admin/api/domain-lists/{list_id}")
+        # Assignment should be gone
+        u_after = store.get_user_by_id(u.id)
+        self.assertNotIn(list_id, u_after.domain_list_ids)
+
+    def test_delete_nonexistent_404(self):
+        r = self.client.delete("/admin/api/domain-lists/99999")
+        self.assertEqual(r.status_code, 404)
+
+    # ── Known domains ──────────────────────────────────────────────
+
+    def test_known_domains_empty_when_no_scans(self):
+        r = self.client.get("/admin/api/domains/known")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(json.loads(r.data), [])
+
+    def test_known_domains_from_assessments(self):
+        from tests.seed_demo_data import seed_run, DOMAIN_PROFILES
+        from scanner.crypto_assessor import CryptoAssessor
+        assessor = CryptoAssessor(guidelines_dir=os.path.join(
+            os.path.dirname(__file__), "..", "guidelines"))
+        seed_run(self.db, assessor, DOMAIN_PROFILES[:3], "finance", "Spain")
+        r = self.client.get("/admin/api/domains/known")
+        domains = json.loads(r.data)
+        self.assertIsInstance(domains, list)
+        self.assertGreater(len(domains), 0)
+        # Must be sorted
+        self.assertEqual(domains, sorted(domains))
+
+    def test_known_domains_no_duplicates(self):
+        from tests.seed_demo_data import seed_run, DOMAIN_PROFILES
+        from scanner.crypto_assessor import CryptoAssessor
+        assessor = CryptoAssessor(guidelines_dir=os.path.join(
+            os.path.dirname(__file__), "..", "guidelines"))
+        # Two runs for the same domains
+        seed_run(self.db, assessor, DOMAIN_PROFILES[:2], "finance", "Spain")
+        seed_run(self.db, assessor, DOMAIN_PROFILES[:2], "finance", "Spain")
+        r = self.client.get("/admin/api/domains/known")
+        domains = json.loads(r.data)
+        self.assertEqual(len(domains), len(set(domains)))
+
+    # ── DB methods directly ────────────────────────────────────────
+
+    def test_db_update_domain_list_returns_false_for_missing(self):
+        result = self.db.update_domain_list(99999, name="X")
+        self.assertFalse(result)
+
+    def test_db_delete_domain_list_returns_false_for_missing(self):
+        result = self.db.delete_domain_list(99999)
+        self.assertFalse(result)
+
+    def test_db_get_domain_list_full_returns_none_for_missing(self):
+        result = self.db.get_domain_list_full(99999)
+        self.assertIsNone(result)
+
+    def test_db_get_all_known_domains_sorted(self):
+        # Manually insert assessments
+        import uuid
+        from datetime import datetime, timezone
+        run_id = uuid.uuid4().hex[:8]
+        with self.db._connect() as conn:
+            conn.execute(
+                "INSERT INTO scan_runs (run_id,started_at,domain_list,status) VALUES (?,?,?,?)",
+                (run_id, datetime.now(timezone.utc).isoformat(), '[]', 'completed')
+            )
+            for domain in ["z.com", "a.com", "m.com"]:
+                conn.execute(
+                    "INSERT INTO assessments (run_id,domain,assessed_at,score,level) "
+                    "VALUES (?,?,?,?,?)",
+                    (run_id, domain, datetime.now(timezone.utc).isoformat(), 50, "weak")
+                )
+        domains = self.db.get_all_known_domains()
+        self.assertEqual(domains, sorted(domains))
+        self.assertIn("a.com", domains)
+        self.assertIn("z.com", domains)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

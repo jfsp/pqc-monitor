@@ -409,6 +409,72 @@ class Database:
             return json.loads(row["domains_json"])
         return None
 
+    def get_domain_list_full(self, list_id: int) -> Optional[dict]:
+        """Return full domain list record including the domains_json array."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM domain_lists WHERE id=?", (list_id,)
+            ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["domains"] = json.loads(d.get("domains_json") or "[]")
+        except Exception:
+            d["domains"] = []
+        return d
+
+    def update_domain_list(self, list_id: int, name: str = None,
+                            domains: list = None, query: str = None) -> bool:
+        """Update name, query, and/or domains of an existing domain list."""
+        ts = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM domain_lists WHERE id=?", (list_id,)
+            ).fetchone()
+            if not row:
+                return False
+            current = dict(row)
+            new_name    = name    if name    is not None else current["name"]
+            new_query   = query   if query   is not None else current.get("query", "")
+            new_domains = json.dumps(domains) if domains is not None \
+                          else current["domains_json"]
+            conn.execute(
+                "UPDATE domain_lists SET name=?, query=?, domains_json=?, updated_at=? "
+                "WHERE id=?",
+                (new_name, new_query, new_domains, ts, list_id)
+            )
+        return True
+
+    def delete_domain_list(self, list_id: int) -> bool:
+        """
+        Delete a domain list and its user assignments.
+        Returns False if the list doesn't exist.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM domain_lists WHERE id=?", (list_id,)
+            ).fetchone()
+            if not row:
+                return False
+            # Cascade: remove user assignments first (FK may not enforce)
+            conn.execute(
+                "DELETE FROM user_domain_lists WHERE domain_list_id=?", (list_id,)
+            )
+            conn.execute("DELETE FROM domain_lists WHERE id=?", (list_id,))
+        return True
+
+    def get_all_known_domains(self) -> list[str]:
+        """
+        Return every distinct domain that has ever been assessed, sorted.
+        Used to populate the domain picker when editing a domain list.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT domain FROM assessments ORDER BY domain"
+            ).fetchall()
+        return [r["domain"] for r in rows]
+
     # ─── Enrichment data (chain / cipher_enum / cdn) ──────────────
 
     def save_domain_extra(self, run_id: str, domain: str,

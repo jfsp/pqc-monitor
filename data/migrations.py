@@ -186,6 +186,11 @@ CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_ts   ON audit_log(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_udl_user   ON user_domain_lists(user_id)""",
     ),
+    (
+        11,
+        "Add updated_at to domain_lists",
+        "ALTER TABLE domain_lists ADD COLUMN updated_at TEXT",
+    ),
 ]
 
 

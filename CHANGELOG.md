@@ -12,7 +12,132 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [1.1.0] — 2026-06-10
+## [1.1.2] — 2026-06-11
+
+### Fixed
+
+**CT Monitor, Roadmap, and Settings tabs showed empty content**
+
+Root cause: `showView(name)` used the implicit global `event.target` to highlight
+the active nav button. When `event.target` was not the nav button (or when `showView`
+was called programmatically via `showView2`), the function threw a silent TypeError
+that aborted execution before Chart.js render calls in CT and Roadmap could run.
+Settings appeared empty because it received no data calls — but the TypeError on
+`event.target` still caused execution to abort in some browser contexts.
+
+Fixes applied:
+- `showView(name, btn)` — accepts an explicit `btn` parameter (the clicked element,
+  passed as `this` from each nav button's `onclick`). Falls back to `event.target`
+  only if available.
+- All nav buttons updated: `onclick="showView('ct',this)"` etc.
+- `showView2` (used by scan-run "View" buttons) now delegates to `showView` with
+  the matching nav button found by name, ensuring data-loading functions always run.
+- `if (name === 'settings') { renderSettingsVersion(); }` added to `showView` so
+  the Settings tab is explicitly activated.
+- All Chart.js instantiations guarded with `typeof Chart === 'undefined'` checks to
+  prevent crashes when Chart.js CDN load is slow.
+
+### Added
+
+**Dashboard — filter by stat card**
+- Clicking a stat card (Critical, Weak, Moderate, PQC-Ready, PQC Detected) filters
+  the Domain Assessments table to show only matching domains.
+- Active filter shown as an accent badge next to the panel title.
+- "✕ Clear filter" button appears when a filter is active.
+- Clicking the same card again toggles the filter off.
+- Cards gain a hover lift effect and an active outline when selected.
+
+**Dashboard — sortable columns**
+- All Domain Assessment table columns are now clickable sort headers: Domain,
+  Score, Level, Key, PQC, Findings.
+- First click sorts ascending; second click reverses to descending.
+- Active sort column and direction shown with ▲/▼ indicators in the header.
+- Sort is applied after filtering, so both work together.
+- Findings column sorts by critical-severity count (×100) + high-severity count,
+  putting the most urgent domains first.
+
+**Implementation detail**
+- `_allAssessments` module-level variable stores the full unfiltered dataset so
+  filter/sort operations are purely client-side with no additional API calls.
+- `setFilter(level)` and `sortBy(col)` functions call `applyFilterAndSort()` which
+  filters first, then sorts, then calls `renderAssessments()`.
+
+
+
+### Fixed
+
+**Login loop on plain-HTTP deployments** (`auth/auth_routes.py`, `app_factory.py`, `pqc_monitor.py`)
+- `SESSION_COOKIE_SECURE` defaulted to `True`, causing browsers to silently discard
+  session cookies over plain HTTP. Login succeeded server-side but every subsequent
+  request appeared unauthenticated, creating an infinite `/login` redirect loop.
+- Fix: `https_enabled` now defaults to `False`. Set `https_enabled: true` in
+  `config.yaml` only when a TLS-terminating reverse proxy (nginx/Caddy) is in front.
+- Added `https_enabled` key to `config/config.yaml.example` with clear instructions.
+- Added `https_enabled` to `load_config()` in `pqc_monitor.py`.
+
+**Absolute `?next=` URL rejected after login** (`auth/auth_routes.py`)
+- Flask middleware builds `?next=http://host/app/` (absolute URL) when redirecting
+  unauthenticated requests. The open-redirect safety check blocked absolute URLs and
+  fell back incorrectly, worsening the login loop.
+- Fix: parse absolute `?next=` values, strip scheme+host, use path component only.
+  Open-redirect protection is preserved.
+
+**Dashboard rendered unstyled with literal `v{{ version }}`** (`app_factory.py`, `app_routes.py`, `dashboard/app.py`)
+- A stray `return app` on line 112 of `app_factory.py` placed all blueprint
+  registration code after an unreachable return. The app started with only 2 routes
+  (`/api/version` and `/static/...`); every other URL fell through to error pages.
+- The `_APP_SHELL` + `_extract_body()` approach stripped the `<head>` block
+  (containing all CSS) and never ran `DASHBOARD_HTML` through Jinja2's template
+  engine, leaving `{{ version }}` as a literal string.
+- Fix: removed the stray `return`; corrected blueprint registration order.
+  `dashboard_home` now renders `DASHBOARD_HTML` directly as a Jinja2 template
+  (passing `version`, `user`, `is_admin`). Auth user bar integrated into the
+  dashboard's existing `<header>` element. `_APP_SHELL` and `_extract_body`
+  removed entirely.
+
+**Blueprint re-registration across test instances** (`app_factory.py`)
+- Module-level blueprint imports caused `AssertionError` on the second `create_app()`
+  call in tests (Flask refuses to register a blueprint on a second app).
+- Fix: blueprint modules are reloaded inside `create_app()` so each test gets
+  fresh blueprint instances.
+
+### Added
+
+**Domain List CRUD** (`admin/routes.py`, `data/database.py`, `data/migrations.py`)
+- Full create / edit / delete capability for domain lists in the Admin panel.
+- **New admin API routes:**
+  - `GET  /admin/api/domain-lists` — index with `domain_count`, `user_count`, `updated_at`
+  - `GET  /admin/api/domain-lists/<id>` — full record including `domains` array
+  - `POST /admin/api/domain-lists` — create with name, query, domains
+  - `PATCH /admin/api/domain-lists/<id>` — update name / query / domains independently
+  - `DELETE /admin/api/domain-lists/<id>` — delete list and cascade user assignments
+  - `GET  /admin/api/domains/known` — all distinct domains with assessment data,
+    sorted alphabetically; used to populate the domain picker
+- **Domain List Editor modal** — two-pane interface:
+  - *Left pane*: filterable checklist of all domains that have ever been scanned.
+    Checking/unchecking immediately updates the right pane. "Select all visible"
+    and "Clear" buttons for bulk operations.
+  - *Right pane*: current list members with per-item remove buttons, free-text
+    entry (comma/newline-separated bulk paste supported, strips blanks), A→Z sort,
+    and Clear all.
+  - Changes are not saved until the user clicks "Create List" / "Save Changes".
+- **New DB methods:** `get_domain_list_full()`, `update_domain_list()`,
+  `delete_domain_list()`, `get_all_known_domains()`.
+- **Migration v11:** adds `updated_at` column to `domain_lists`.
+
+**Tests** — 24 new tests in `TestDomainListCRUD`:
+  index (empty, domain count, user count), create (success, missing name, empty
+  domains, strip blanks), get single (full, 404), update (name, domains replace,
+  query only, sets `updated_at`, 404), delete (success, cascades assignments, 404),
+  known domains (empty, from assessments, no duplicates, sorted), direct DB method
+  coverage.
+
+### Regression tests added
+- `test_absolute_next_url_is_stripped_to_path` — login with absolute `?next=` must
+  redirect to the path, not loop back to `/login`
+- `test_session_survives_after_login_on_http` — session cookie readable over HTTP
+
+
 
 ### Added
 
@@ -269,6 +394,8 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
-[Unreleased]: https://github.com/your-org/pqc-monitor/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/your-org/pqc-monitor/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/your-org/pqc-monitor/compare/v1.1.1...v1.1.2
+[1.1.1]: https://github.com/your-org/pqc-monitor/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/your-org/pqc-monitor/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/your-org/pqc-monitor/releases/tag/v1.0.0

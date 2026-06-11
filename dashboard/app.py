@@ -477,6 +477,12 @@ textarea { resize: vertical; min-height: 80px; width: 100%; font-family: var(--f
 /* ─── Views ─── */
 .view { display: none; }
 .view.active { display: block; }
+.stat-card-filter { cursor: pointer; transition: transform .12s, box-shadow .12s; }
+.stat-card-filter:hover { transform: translateY(-2px); box-shadow: 0 4px 16px rgba(0,0,0,.25); }
+.stat-card-filter.filter-active { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.sortable:hover { color: var(--accent); }
+.sort-icon { font-size: .65rem; margin-left: .2rem; color: var(--accent); }
 
 /* ─── Progress / alerts ─── */
 .alert {
@@ -552,13 +558,13 @@ footer {
     {% endif %}
   </div>
   <div class="header-nav">
-    <button class="nav-btn active" onclick="showView('dashboard')">Dashboard</button>
-    <button class="nav-btn" onclick="showView('domains')">Domain Discovery</button>
-    <button class="nav-btn" onclick="showView('scan')">Scan</button>
-    <button class="nav-btn" onclick="showView('trends')">Trends</button>
-    <button class="nav-btn" onclick="showView('ct')">CT Monitor</button>
-    <button class="nav-btn" onclick="showView('roadmap')">Roadmap</button>
-    <button class="nav-btn" onclick="showView('settings')">Settings</button>
+    <button class="nav-btn active" onclick="showView('dashboard',this)">Dashboard</button>
+    <button class="nav-btn" onclick="showView('domains',this)">Domain Discovery</button>
+    <button class="nav-btn" onclick="showView('scan',this)">Scan</button>
+    <button class="nav-btn" onclick="showView('trends',this)">Trends</button>
+    <button class="nav-btn" onclick="showView('ct',this)">CT Monitor</button>
+    <button class="nav-btn" onclick="showView('roadmap',this)">Roadmap</button>
+    <button class="nav-btn" onclick="showView('settings',this)">Settings</button>
   </div>
 </div>
 {% if user is defined and not user.is_admin %}
@@ -574,11 +580,11 @@ footer {
     <div id="stats-grid" class="stats-grid">
       <div class="stat-card"><div class="stat-val val-accent" id="stat-total">—</div><div class="stat-label">Domains Monitored</div></div>
       <div class="stat-card"><div class="stat-val val-accent" id="stat-avg">—</div><div class="stat-label">Avg PQC Score</div></div>
-      <div class="stat-card"><div class="stat-val val-critical" id="stat-critical">—</div><div class="stat-label">Critical</div></div>
-      <div class="stat-card"><div class="stat-val val-weak" id="stat-weak">—</div><div class="stat-label">Weak</div></div>
-      <div class="stat-card"><div class="stat-val val-moderate" id="stat-moderate">—</div><div class="stat-label">Moderate</div></div>
-      <div class="stat-card"><div class="stat-val val-ready" id="stat-ready">—</div><div class="stat-label">PQC-Ready</div></div>
-      <div class="stat-card"><div class="stat-val" id="stat-pqc" style="color:#a78bfa">—</div><div class="stat-label">PQC Detected</div></div>
+      <div class="stat-card stat-card-filter" id="filter-card-critical" onclick="setFilter('critical')" title="Click to filter by Critical"><div class="stat-val val-critical" id="stat-critical">—</div><div class="stat-label">Critical</div></div>
+      <div class="stat-card stat-card-filter" id="filter-card-weak"     onclick="setFilter('weak')"     title="Click to filter by Weak"><div class="stat-val val-weak" id="stat-weak">—</div><div class="stat-label">Weak</div></div>
+      <div class="stat-card stat-card-filter" id="filter-card-moderate" onclick="setFilter('moderate')" title="Click to filter by Moderate"><div class="stat-val val-moderate" id="stat-moderate">—</div><div class="stat-label">Moderate</div></div>
+      <div class="stat-card stat-card-filter" id="filter-card-ready"    onclick="setFilter('ready')"    title="Click to filter by PQC-Ready"><div class="stat-val val-ready" id="stat-ready">—</div><div class="stat-label">PQC-Ready</div></div>
+      <div class="stat-card stat-card-filter" id="filter-card-pqc"      onclick="setFilter('pqc')"      title="Click to filter PQC Detected"><div class="stat-val" id="stat-pqc" style="color:#a78bfa">—</div><div class="stat-label">PQC Detected</div></div>
       <div class="stat-card"><div class="stat-val" id="stat-ct-pqc" style="color:#22c55e">—</div><div class="stat-label">PQC Certs (CT)</div></div>
       <div class="stat-card"><div class="stat-val" id="stat-p1-actions" style="color:var(--critical)">—</div><div class="stat-label">Urgent Actions</div></div>
     </div>
@@ -604,20 +610,25 @@ footer {
 
     <div class="panel">
       <div class="panel-header">
-        <div class="panel-title">Domain Assessments</div>
-        <button class="btn-outline" onclick="loadAssessments()">↻ Refresh</button>
+        <div class="panel-title">Domain Assessments
+          <span id="filter-badge" style="display:none;margin-left:.6rem;background:rgba(0,212,255,.15);color:var(--accent);padding:.15rem .5rem;border-radius:4px;font-size:.72rem;font-family:var(--font-sans)"></span>
+        </div>
+        <div style="display:flex;gap:.5rem;align-items:center">
+          <button class="btn-outline" id="btn-clear-filter" style="display:none" onclick="setFilter(null)">✕ Clear filter</button>
+          <button class="btn-outline" onclick="loadAssessments()">↻ Refresh</button>
+        </div>
       </div>
       <div class="panel-body" style="padding:0">
         <table class="domain-table" id="domain-table">
           <thead>
             <tr>
-              <th>Domain</th>
-              <th>Score</th>
-              <th>Level</th>
+              <th class="sortable" onclick="sortBy('domain')"   id="th-domain">Domain <span class="sort-icon" id="si-domain"></span></th>
+              <th class="sortable" onclick="sortBy('score')"    id="th-score">Score <span class="sort-icon" id="si-score">▲</span></th>
+              <th class="sortable" onclick="sortBy('level')"    id="th-level">Level <span class="sort-icon" id="si-level"></span></th>
               <th>TLS</th>
-              <th>Key</th>
-              <th>PQC</th>
-              <th>Findings</th>
+              <th class="sortable" onclick="sortBy('key_type')" id="th-key_type">Key <span class="sort-icon" id="si-key_type"></span></th>
+              <th class="sortable" onclick="sortBy('has_pqc')"  id="th-has_pqc">PQC <span class="sort-icon" id="si-has_pqc"></span></th>
+              <th class="sortable" onclick="sortBy('findings')" id="th-findings">Findings <span class="sort-icon" id="si-findings"></span></th>
             </tr>
           </thead>
           <tbody id="domain-tbody">
@@ -1127,19 +1138,26 @@ footer {
 // ─── State ───────────────────────────────────────────────────────────────────
 let discoveredDomains = [];
 let charts = {};
+let _allAssessments  = [];   // full unfiltered dataset
+let _activeFilter    = null; // 'critical'|'weak'|'moderate'|'ready'|'pqc'|null
+let _sortCol         = 'score';
+let _sortDir         = 'asc'; // 'asc'|'desc'
 
 // ─── Navigation ──────────────────────────────────────────────────────────────
-function showView(name) {
+function showView(name, btn) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById('view-' + name).classList.add('active');
-  event.target.classList.add('active');
+  const viewEl = document.getElementById('view-' + name);
+  if (viewEl) viewEl.classList.add('active');
+  const navTarget = btn || (typeof event !== 'undefined' ? event.target : null);
+  if (navTarget && navTarget.classList) navTarget.classList.add('active');
   if (name === 'dashboard') { loadSummary(); loadAssessments(); }
   if (name === 'trends')    { loadTrends(); populateDomainSelector(); loadSchedules(); }
   if (name === 'scan')      { loadRuns(); }
   if (name === 'domains')   { loadDomainLists(); }
   if (name === 'ct')        { loadCTStats(); loadCTSummaries(); loadCTPQCCerts(); loadCTTimeline(); }
   if (name === 'roadmap')   { loadRoadmapStats(); loadRoadmapTable(); populateRoadmapRunSel(); }
+  if (name === 'settings')  { renderSettingsVersion(); }
 }
 
 // ─── Summary ─────────────────────────────────────────────────────────────────
@@ -1164,7 +1182,8 @@ async function loadSummary() {
 }
 
 function renderDistChart(s) {
-  const ctx = document.getElementById('chartDist').getContext('2d');
+  const ctx = document.getElementById('chartDist')?.getContext('2d');
+  if (!ctx || typeof Chart === 'undefined') return;
   if (charts.dist) charts.dist.destroy();
   charts.dist = new Chart(ctx, {
     type: 'doughnut',
@@ -1189,19 +1208,121 @@ async function loadAssessments(runId) {
   const url = runId ? `/api/assessments?run_id=${runId}` : '/api/assessments';
   const r = await fetch(url);
   const data = await r.json();
-  renderAssessments(data);
+  _allAssessments = data;
+  _activeFilter   = null;
+  updateFilterUI();
+  applyFilterAndSort();
   renderTLSChart(data);
+}
+
+function setFilter(level) {
+  if (_activeFilter === level) {
+    _activeFilter = null;  // toggle off
+  } else {
+    _activeFilter = level;
+  }
+  updateFilterUI();
+  applyFilterAndSort();
+}
+
+function updateFilterUI() {
+  // Stat card highlight
+  document.querySelectorAll('.stat-card-filter').forEach(c => c.classList.remove('filter-active'));
+  const badge  = document.getElementById('filter-badge');
+  const clearBtn = document.getElementById('btn-clear-filter');
+  if (_activeFilter) {
+    const card = document.getElementById('filter-card-' + _activeFilter);
+    if (card) card.classList.add('filter-active');
+    if (badge)   { badge.textContent = 'Filtered: ' + ucfirst(_activeFilter); badge.style.display = ''; }
+    if (clearBtn) clearBtn.style.display = '';
+  } else {
+    if (badge)   badge.style.display = 'none';
+    if (clearBtn) clearBtn.style.display = 'none';
+  }
+  // Sort icon indicators
+  ['domain','score','level','key_type','has_pqc','findings'].forEach(col => {
+    const si = document.getElementById('si-' + col);
+    if (!si) return;
+    if (col === _sortCol) {
+      si.textContent = _sortDir === 'asc' ? '▲' : '▼';
+    } else {
+      si.textContent = '';
+    }
+  });
+}
+
+function sortBy(col) {
+  if (_sortCol === col) {
+    _sortDir = _sortDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    _sortCol = col;
+    _sortDir = col === 'domain' ? 'asc' : 'asc';
+  }
+  updateFilterUI();
+  applyFilterAndSort();
+}
+
+function applyFilterAndSort() {
+  const LEVEL_ORDER = { critical: 0, weak: 1, moderate: 2, ready: 3 };
+
+  // Filter
+  let items = _allAssessments.slice();
+  if (_activeFilter === 'pqc') {
+    items = items.filter(a => a.has_pqc);
+  } else if (_activeFilter) {
+    items = items.filter(a => (a.level || '').toLowerCase() === _activeFilter);
+  }
+
+  // Sort
+  items.sort((a, b) => {
+    let av, bv;
+    if (_sortCol === 'domain') {
+      av = (a.domain || '').toLowerCase();
+      bv = (b.domain || '').toLowerCase();
+    } else if (_sortCol === 'score') {
+      av = a.score ?? -1;
+      bv = b.score ?? -1;
+    } else if (_sortCol === 'level') {
+      av = LEVEL_ORDER[a.level] ?? 99;
+      bv = LEVEL_ORDER[b.level] ?? 99;
+    } else if (_sortCol === 'key_type') {
+      av = (a.key_type || '').toLowerCase();
+      bv = (b.key_type || '').toLowerCase();
+    } else if (_sortCol === 'has_pqc') {
+      av = a.has_pqc ? 1 : 0;
+      bv = b.has_pqc ? 1 : 0;
+    } else if (_sortCol === 'findings') {
+      const fa = tryJSON(a.findings_json) || [];
+      const fb = tryJSON(b.findings_json) || [];
+      av = fa.filter(f => f.severity === 'critical').length * 100 +
+           fa.filter(f => f.severity === 'high').length;
+      bv = fb.filter(f => f.severity === 'critical').length * 100 +
+           fb.filter(f => f.severity === 'high').length;
+    } else {
+      av = a[_sortCol] ?? '';
+      bv = b[_sortCol] ?? '';
+    }
+    if (av < bv) return _sortDir === 'asc' ? -1 : 1;
+    if (av > bv) return _sortDir === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  renderAssessments(items);
 }
 
 function renderAssessments(items) {
   const tbody = document.getElementById('domain-tbody');
-  if (!items.length) {
+  const total = _allAssessments.length;
+  if (!total) {
     tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:2rem">No assessment data. Run a scan first.</td></tr>';
+    return;
+  }
+  if (!items.length) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:2rem">No domains match the current filter. <a href="#" onclick="setFilter(null);return false" style="color:var(--accent)">Clear filter</a></td></tr>`;
     return;
   }
   tbody.innerHTML = items.map(a => {
     const lc = a.level || 'moderate';
-    const sc = scoreClass(a.score);
     const tlsArr = tryJSON(a.tls_versions) || [];
     const findings = tryJSON(a.findings_json) || [];
     const critCount = findings.filter(f=>f.severity==='critical').length;
@@ -1229,7 +1350,8 @@ function renderTLSChart(items) {
   });
   const labels = Object.keys(tlsCounts);
   const values = labels.map(k => tlsCounts[k]);
-  const ctx = document.getElementById('chartTLS').getContext('2d');
+  const ctx = document.getElementById('chartTLS')?.getContext('2d');
+  if (!ctx || typeof Chart === 'undefined') return;
   if (charts.tls) charts.tls.destroy();
   charts.tls = new Chart(ctx, {
     type: 'bar',
@@ -1520,12 +1642,10 @@ async function loadTrends() {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function showView2(name) {
-  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById('view-' + name).classList.add('active');
-  document.querySelectorAll('.nav-btn').forEach(b => {
-    if (b.getAttribute('onclick')?.includes(name)) b.classList.add('active');
-  });
+  // Same as showView but used programmatically (no click event to reference).
+  const btn = [...document.querySelectorAll('.nav-btn')]
+    .find(b => b.getAttribute('onclick')?.includes("'" + name + "'"));
+  showView(name, btn || null);
 }
 
 function showAlert(id, msg, type) {
@@ -1634,7 +1754,7 @@ async function loadCTTimeline() {
   const hybrid = rows.map(r => r.hybrid_total || 0);
 
   const ctx = document.getElementById('chartCTTimeline')?.getContext('2d');
-  if (!ctx) return;
+  if (!ctx || typeof Chart === 'undefined') return;
   if (charts.ctTimeline) charts.ctTimeline.destroy();
   charts.ctTimeline = new Chart(ctx, {
     type: 'bar',
@@ -1668,7 +1788,7 @@ async function loadCTTimeline() {
   const algoColors = ['#22c55e','#a78bfa','#00d4ff','#f97316','#eab308','#ef4444'];
 
   const ctx2 = document.getElementById('chartCTAlgos')?.getContext('2d');
-  if (ctx2 && algoLabels.length) {
+  if (ctx2 && algoLabels.length && typeof Chart !== 'undefined') {
     if (charts.ctAlgos) charts.ctAlgos.destroy();
     charts.ctAlgos = new Chart(ctx2, {
       type: 'doughnut',
@@ -1792,7 +1912,7 @@ function renderRoadmapCharts(domains) {
 
   // Score progression chart
   const ctx1 = document.getElementById('chartRmScores')?.getContext('2d');
-  if (ctx1) {
+  if (ctx1 && typeof Chart !== 'undefined') {
     if (charts.rmScores) charts.rmScores.destroy();
     charts.rmScores = new Chart(ctx1, {
       type: 'bar',
@@ -1827,7 +1947,7 @@ function renderRoadmapCharts(domains) {
     effortByPhase.p3 += Math.round((d.phase3_items||0)/total * emax);
   });
   const ctx2 = document.getElementById('chartRmEffort')?.getContext('2d');
-  if (ctx2) {
+  if (ctx2 && typeof Chart !== 'undefined') {
     if (charts.rmEffort) charts.rmEffort.destroy();
     charts.rmEffort = new Chart(ctx2, {
       type: 'doughnut',
@@ -2018,6 +2138,13 @@ async function loadSchedules() {
       <td><span style="color:${s.enabled?'var(--ready)':'var(--muted)'}">${s.enabled?'active':'paused'}</span></td>
     </tr>`).join('')}</tbody>
   </table>`;
+}
+
+// ─── Settings ────────────────────────────────────────────────────────────────
+
+function renderSettingsVersion() {
+  // Settings view is static HTML — just ensure it's visible (nothing async needed)
+  // The {{ version }} is already rendered server-side.
 }
 
 // ─── Init ────────────────────────────────────────────────────────────────────

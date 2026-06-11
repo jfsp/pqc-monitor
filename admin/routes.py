@@ -178,16 +178,92 @@ def api_set_user_domain_lists(uid):
 @admin_bp.route("/api/domain-lists")
 @require_admin
 def api_admin_domain_lists():
-    db = _db()
-    lists = db.get_domain_lists()
-    # Annotate with user count
+    db    = _db()
     store = _store()
     users = store.list_users()
-    for dl in lists:
-        dl["user_count"] = sum(
-            1 for u in users if dl["id"] in u.domain_list_ids
-        )
+    # Use full fetch to get domains_json so we can report domain count
+    with db._connect() as conn:
+        rows = conn.execute(
+            "SELECT id, name, query, created_at, updated_at, domains_json "
+            "FROM domain_lists ORDER BY created_at DESC"
+        ).fetchall()
+    import json as _json
+    lists = []
+    for row in rows:
+        d = dict(row)
+        try:
+            d["domain_count"] = len(_json.loads(d.get("domains_json") or "[]"))
+        except Exception:
+            d["domain_count"] = 0
+        d.pop("domains_json", None)   # don't send full list in index
+        d["user_count"] = sum(1 for u in users if d["id"] in u.domain_list_ids)
+        lists.append(d)
     return jsonify(lists)
+
+
+@admin_bp.route("/api/domain-lists/<int:list_id>")
+@require_admin
+def api_get_domain_list(list_id):
+    dl = _db().get_domain_list_full(list_id)
+    if not dl:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(dl)
+
+
+@admin_bp.route("/api/domain-lists", methods=["POST"])
+@require_admin
+def api_create_domain_list():
+    data    = request.get_json() or {}
+    name    = (data.get("name") or "").strip()
+    domains = data.get("domains") or []
+    query   = (data.get("query") or "").strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+    if not isinstance(domains, list):
+        return jsonify({"error": "domains must be a list"}), 400
+    domains = [d.strip() for d in domains if isinstance(d, str) and d.strip()]
+    list_id = _db().save_domain_list(name, domains, query)
+    _audit("domain_list.created", resource=name,
+           detail=f"{len(domains)} domains")
+    return jsonify({"id": list_id, "name": name,
+                    "domains": domains, "count": len(domains)}), 201
+
+
+@admin_bp.route("/api/domain-lists/<int:list_id>", methods=["PATCH"])
+@require_admin
+def api_update_domain_list(list_id):
+    data    = request.get_json() or {}
+    name    = data.get("name")
+    query   = data.get("query")
+    domains = data.get("domains")
+    if domains is not None:
+        if not isinstance(domains, list):
+            return jsonify({"error": "domains must be a list"}), 400
+        domains = [d.strip() for d in domains if isinstance(d, str) and d.strip()]
+    ok = _db().update_domain_list(list_id, name=name, domains=domains, query=query)
+    if not ok:
+        return jsonify({"error": "not found"}), 404
+    _audit("domain_list.updated", resource=str(list_id),
+           detail=f"domains={len(domains) if domains is not None else '?'}")
+    return jsonify({"ok": True})
+
+
+@admin_bp.route("/api/domain-lists/<int:list_id>", methods=["DELETE"])
+@require_admin
+def api_delete_domain_list(list_id):
+    dl = _db().get_domain_list_full(list_id)
+    if not dl:
+        return jsonify({"error": "not found"}), 404
+    _db().delete_domain_list(list_id)
+    _audit("domain_list.deleted", resource=dl.get("name", str(list_id)))
+    return jsonify({"ok": True})
+
+
+@admin_bp.route("/api/domains/known")
+@require_admin
+def api_known_domains():
+    """All distinct domains that have assessment data — for the list editor picker."""
+    return jsonify(_db().get_all_known_domains())
 
 
 # ── Audit log ─────────────────────────────────────────────────────────────────
@@ -408,18 +484,22 @@ select option { background:var(--panel); }
     <div id="view-lists" class="view">
       <div class="page-hdr">
         <div class="page-title">Domain Lists</div>
+        <button class="btn" onclick="openCreateList()">+ New List</button>
       </div>
+      <div id="lists-alert" class="alert"></div>
       <div class="card">
-        <div class="card-hdr"><div class="card-title">All Domain Lists</div>
+        <div class="card-hdr">
+          <div class="card-title">All Domain Lists</div>
           <button class="btn-ghost btn-sm" onclick="loadDomainLists()">↻ Refresh</button>
         </div>
         <div class="card-body" style="padding:0">
           <table class="tbl">
             <thead><tr>
-              <th>ID</th><th>Name</th><th>Query</th><th>Created</th><th>Users Assigned</th>
+              <th>ID</th><th>Name</th><th>Query</th><th>Domains</th>
+              <th>Updated</th><th>Users</th><th>Actions</th>
             </tr></thead>
             <tbody id="lists-tbody">
-              <tr><td colspan="5" style="text-align:center;color:var(--muted);padding:2rem">Loading…</td></tr>
+              <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:2rem">Loading…</td></tr>
             </tbody>
           </table>
         </div>
@@ -508,6 +588,86 @@ select option { background:var(--panel); }
     <div class="form-actions">
       <button class="btn btn-ghost" onclick="closeModal('modal-reset-pw')">Cancel</button>
       <button class="btn" onclick="submitResetPw()">Set Password</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Domain List Editor Modal ── -->
+<div class="modal-bg" id="modal-list-editor">
+  <div class="modal" style="max-width:780px">
+    <h3 id="modal-list-title">New Domain List</h3>
+    <div id="modal-list-alert" class="alert"></div>
+
+    <div class="form-grid" style="margin-bottom:1rem">
+      <div class="form-group">
+        <label>List Name *</label>
+        <input type="text" id="fl-name" placeholder="e.g. Spain Finance">
+      </div>
+      <div class="form-group">
+        <label>Query / Description</label>
+        <input type="text" id="fl-query" placeholder="e.g. financial institutions in Spain">
+      </div>
+    </div>
+
+    <!-- Domain picker: two-pane -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem">
+
+      <!-- Left: known domains from DB -->
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem">
+          <label style="font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">
+            Known Domains (from scan data)
+          </label>
+          <span id="known-count" style="font-size:.7rem;color:var(--muted)"></span>
+        </div>
+        <input type="text" id="fl-search" placeholder="Filter domains…"
+               style="margin-bottom:.4rem;width:100%;font-size:.8rem"
+               oninput="filterKnown()">
+        <div class="check-list" id="fl-known-list" style="max-height:260px">
+          <div style="color:var(--muted);font-size:.8rem;padding:.5rem">Loading…</div>
+        </div>
+        <div style="margin-top:.4rem;display:flex;gap:.5rem">
+          <button class="btn-ghost btn-sm" onclick="selectAllVisible()">Select all visible</button>
+          <button class="btn-ghost btn-sm" onclick="clearKnownSelection()">Clear</button>
+        </div>
+      </div>
+
+      <!-- Right: current list members -->
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.4rem">
+          <label style="font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em">
+            In This List
+          </label>
+          <span id="list-member-count" style="font-size:.7rem;color:var(--muted)"></span>
+        </div>
+
+        <!-- Free-text add -->
+        <div style="display:flex;gap:.4rem;margin-bottom:.4rem">
+          <input type="text" id="fl-add-input"
+                 placeholder="Type or paste domain(s)…"
+                 style="flex:1;font-size:.8rem"
+                 onkeydown="if(event.key==='Enter'){addFreeText();event.preventDefault()}">
+          <button class="btn btn-sm" onclick="addFreeText()">Add</button>
+        </div>
+        <div style="font-size:.7rem;color:var(--muted);margin-bottom:.4rem">
+          Comma- or newline-separated bulk paste accepted
+        </div>
+
+        <!-- Member list -->
+        <div id="fl-member-list"
+             style="max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:.4rem">
+          <div style="color:var(--muted);font-size:.8rem;padding:.5rem">No domains yet</div>
+        </div>
+        <div style="margin-top:.4rem;display:flex;justify-content:space-between;align-items:center">
+          <button class="btn-ghost btn-sm" onclick="clearAllMembers()">Clear all</button>
+          <button class="btn-ghost btn-sm" onclick="sortMembers()">A→Z sort</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('modal-list-editor')">Cancel</button>
+      <button class="btn" id="modal-list-submit" onclick="submitListModal()">Create List</button>
     </div>
   </div>
 </div>
@@ -702,21 +862,207 @@ async function submitResetPw() {
 }
 
 // ── Domain Lists ──────────────────────────────────────────────────────────────
+
+let _editListId   = null;
+let _listMembers  = [];
+let _knownDomains = [];
+
 async function loadDomainLists() {
   const r = await fetch('/admin/api/domain-lists');
   const lists = await r.json();
   const tbody = document.getElementById('lists-tbody');
   if (!lists.length) {
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:2rem">No domain lists. Create one in the Scanner tab.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:2rem">No domain lists yet. Click + New List to create one.</td></tr>';
     return;
   }
   tbody.innerHTML = lists.map(dl => `<tr>
-    <td style="font-family:monospace">#${dl.id}</td>
-    <td>${dl.name}</td>
-    <td style="color:var(--muted);font-size:.78rem">${dl.query||'—'}</td>
-    <td style="color:var(--muted);font-size:.75rem">${(dl.created_at||'').slice(0,10)}</td>
-    <td><span style="color:var(--accent)">${dl.user_count||0} user(s)</span></td>
+    <td style="font-family:monospace;font-size:.82rem">#${dl.id}</td>
+    <td style="font-weight:500">${esc(dl.name)}</td>
+    <td style="color:var(--muted);font-size:.78rem;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(dl.query||'')}">${esc(dl.query||'—')}</td>
+    <td style="font-family:monospace;font-size:.78rem;text-align:center">${dl.domain_count ?? 0}</td>
+    <td style="color:var(--muted);font-size:.75rem">${(dl.updated_at||dl.created_at||'').slice(0,10)||'—'}</td>
+    <td style="text-align:center"><span style="color:var(--accent)">${dl.user_count||0}</span></td>
+    <td>
+      <button class="btn btn-outline btn-sm" onclick="openEditList(${dl.id})">Edit</button>
+      <button class="btn btn-danger btn-sm"  onclick="deleteList(${dl.id},'${esc(dl.name)}')">Delete</button>
+    </td>
   </tr>`).join('');
+}
+
+async function openCreateList() {
+  _editListId = null;
+  _listMembers = [];
+  document.getElementById('modal-list-title').textContent  = 'New Domain List';
+  document.getElementById('modal-list-submit').textContent = 'Create List';
+  document.getElementById('fl-name').value   = '';
+  document.getElementById('fl-query').value  = '';
+  document.getElementById('fl-search').value = '';
+  document.getElementById('fl-add-input').value = '';
+  hideAlert('modal-list-alert');
+  await _loadKnownDomains();
+  _renderMembers();
+  document.getElementById('modal-list-editor').classList.add('open');
+}
+
+async function openEditList(listId) {
+  _editListId = listId;
+  const r  = await fetch(`/admin/api/domain-lists/${listId}`);
+  const dl = await r.json();
+  if (dl.error) { showPageAlert('lists-alert', dl.error, 'error'); return; }
+  document.getElementById('modal-list-title').textContent  = `Edit List: ${esc(dl.name)}`;
+  document.getElementById('modal-list-submit').textContent = 'Save Changes';
+  document.getElementById('fl-name').value   = dl.name  || '';
+  document.getElementById('fl-query').value  = dl.query || '';
+  document.getElementById('fl-search').value = '';
+  document.getElementById('fl-add-input').value = '';
+  _listMembers = [...(dl.domains || [])];
+  hideAlert('modal-list-alert');
+  await _loadKnownDomains();
+  _renderMembers();
+  document.getElementById('modal-list-editor').classList.add('open');
+}
+
+async function _loadKnownDomains() {
+  try {
+    const r = await fetch('/admin/api/domains/known');
+    _knownDomains = await r.json();
+  } catch(e) { _knownDomains = []; }
+  const el = document.getElementById('known-count');
+  if (el) el.textContent = `${_knownDomains.length} available`;
+  _renderKnown('');
+}
+
+function _renderKnown(filter) {
+  const container = document.getElementById('fl-known-list');
+  if (!container) return;
+  const f     = (filter || '').toLowerCase();
+  const shown = f ? _knownDomains.filter(d => d.toLowerCase().includes(f)) : _knownDomains;
+  if (!shown.length) {
+    container.innerHTML = `<div style="color:var(--muted);font-size:.8rem;padding:.5rem">${
+      f ? 'No matching domains' : 'No scan data yet — add domains manually on the right'}</div>`;
+    return;
+  }
+  const memberSet = new Set(_listMembers);
+  container.innerHTML = shown.map(d => `<label class="check-item" title="${esc(d)}">
+    <input type="checkbox" value="${esc(d)}" ${memberSet.has(d) ? 'checked' : ''}
+           onchange="toggleKnown('${esc(d)}',this.checked)">
+    <span style="font-family:monospace;font-size:.78rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(d)}</span>
+  </label>`).join('');
+}
+
+function filterKnown() {
+  _renderKnown(document.getElementById('fl-search').value);
+}
+
+function toggleKnown(domain, checked) {
+  if (checked) { if (!_listMembers.includes(domain)) _listMembers.push(domain); }
+  else { _listMembers = _listMembers.filter(d => d !== domain); }
+  _renderMembers();
+}
+
+function selectAllVisible() {
+  const f = (document.getElementById('fl-search').value || '').toLowerCase();
+  const shown = f ? _knownDomains.filter(d => d.toLowerCase().includes(f)) : _knownDomains;
+  shown.forEach(d => { if (!_listMembers.includes(d)) _listMembers.push(d); });
+  _renderMembers();
+  _renderKnown(document.getElementById('fl-search').value);
+}
+
+function clearKnownSelection() {
+  const f = (document.getElementById('fl-search').value || '').toLowerCase();
+  const shown = new Set(f ? _knownDomains.filter(d => d.toLowerCase().includes(f)) : _knownDomains);
+  _listMembers = _listMembers.filter(d => !shown.has(d));
+  _renderMembers();
+  _renderKnown(document.getElementById('fl-search').value);
+}
+
+function addFreeText() {
+  const input = document.getElementById('fl-add-input');
+  const added = input.value.split(/[\n,\s]+/)
+    .map(s => s.trim().toLowerCase())
+    .filter(s => s.length > 2 && s.includes('.'));
+  added.forEach(d => { if (!_listMembers.includes(d)) _listMembers.push(d); });
+  input.value = '';
+  _renderMembers();
+  _renderKnown(document.getElementById('fl-search').value);
+}
+
+function removeMember(domain) {
+  _listMembers = _listMembers.filter(d => d !== domain);
+  _renderMembers();
+  _renderKnown(document.getElementById('fl-search').value);
+}
+
+function clearAllMembers() {
+  if (!_listMembers.length) return;
+  if (!confirm('Remove all domains from this list?')) return;
+  _listMembers = [];
+  _renderMembers();
+  _renderKnown(document.getElementById('fl-search').value);
+}
+
+function sortMembers() { _listMembers.sort(); _renderMembers(); }
+
+function _renderMembers() {
+  const container = document.getElementById('fl-member-list');
+  const countEl   = document.getElementById('list-member-count');
+  if (countEl) countEl.textContent = `${_listMembers.length} domain${_listMembers.length !== 1 ? 's' : ''}`;
+  if (!container) return;
+  if (!_listMembers.length) {
+    container.innerHTML = '<div style="color:var(--muted);font-size:.8rem;padding:.5rem">No domains yet</div>';
+    return;
+  }
+  container.innerHTML = _listMembers.map(d => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:.3rem .4rem;border-radius:5px;gap:.5rem"
+         onmouseover="this.style.background='rgba(0,212,255,.05)'" onmouseout="this.style.background=''">
+      <span style="font-family:monospace;font-size:.78rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1" title="${esc(d)}">${esc(d)}</span>
+      <button onclick="removeMember('${esc(d)}')"
+              style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:.9rem;padding:0 .25rem;flex-shrink:0;line-height:1"
+              onmouseover="this.style.color='var(--critical)'" onmouseout="this.style.color='var(--muted)'" title="Remove">✕</button>
+    </div>`).join('');
+}
+
+async function submitListModal() {
+  const name  = document.getElementById('fl-name').value.trim();
+  const query = document.getElementById('fl-query').value.trim();
+  if (!name) { showAlert('modal-list-alert', 'List name is required.', 'error'); return; }
+  if (!_listMembers.length && !confirm('Save list with no domains? You can add them later.')) return;
+
+  const body = JSON.stringify({ name, query, domains: _listMembers });
+  if (_editListId) {
+    const r = await fetch(`/admin/api/domain-lists/${_editListId}`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'}, body
+    });
+    const d = await r.json();
+    if (d.error) { showAlert('modal-list-alert', d.error, 'error'); return; }
+    closeModal('modal-list-editor');
+    showPageAlert('lists-alert', `List "${name}" updated — ${_listMembers.length} domains.`, 'ok');
+  } else {
+    const r = await fetch('/admin/api/domain-lists', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body
+    });
+    const d = await r.json();
+    if (d.error) { showAlert('modal-list-alert', d.error, 'error'); return; }
+    closeModal('modal-list-editor');
+    showPageAlert('lists-alert', `List "${name}" created — ${_listMembers.length} domains.`, 'ok');
+  }
+  loadDomainLists();
+  // refresh user-modal domain picker if it's open
+  if (document.getElementById('modal-user').classList.contains('open'))
+    loadDomainListCheckboxes(null);
+}
+
+async function deleteList(listId, name) {
+  if (!confirm(`Delete list "${name}"?\nUser assignments for this list will be removed. Scan data is not affected.`)) return;
+  const r = await fetch(`/admin/api/domain-lists/${listId}`, { method:'DELETE' });
+  const d = await r.json();
+  if (d.error) { showPageAlert('lists-alert', d.error, 'error'); return; }
+  showPageAlert('lists-alert', `List "${name}" deleted.`, 'ok');
+  loadDomainLists();
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 // ── Audit Log ─────────────────────────────────────────────────────────────────

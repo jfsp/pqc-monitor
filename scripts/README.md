@@ -1,0 +1,106 @@
+# PQC-Monitor — Operational Scripts
+
+All scripts are run from the **project root** (not from inside `scripts/`):
+
+```bash
+cd /opt/pqc-monitor
+python3 scripts/<script>.py [options]
+```
+
+They load `config/config.yaml` automatically. Override with `--config`.
+
+---
+
+## bulk_org_assign.py
+
+Bulk-assign domains to an organisation by TLD pattern.
+
+Given an organisation name and one or more TLD patterns, the script scans
+every domain in the database (from `assessments` and `domain_lists`) and
+assigns any that match to the named organisation, creating it if it does
+not already exist.
+
+**Matching rule:** domain `D` matches TLD `T` when `D == T` (exact) or
+`D` ends with `.<T>` (any subdomain at any depth).
+
+### Options
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--tld TLD` | Yes (repeatable) | Apex domain to match (e.g. `bde.es`) |
+| `--org NAME` | Yes | Organisation name — created if absent |
+| `--sector TEXT` | — | Sector label (e.g. `Financial Services`) |
+| `--region TEXT` | — | Region label (e.g. `EU/Spain`) |
+| `--description TEXT` | — | Free-text notes |
+| `--no-update` | — | Do not update sector/region if org already exists |
+| `--dry-run` / `-n` | — | Show changes without writing to the DB |
+| `--verbose` / `-v` | — | Print every matched domain |
+| `--config PATH` | — | Path to config.yaml |
+| `--db PATH` | — | Direct path to SQLite file (overrides config) |
+
+### Examples
+
+```bash
+# Preview — no changes written
+python3 scripts/bulk_org_assign.py \
+    --tld bde.es \
+    --org "Banco de España" \
+    --sector "Financial Services" \
+    --region "EU/Spain" \
+    --dry-run
+
+# Live assign
+python3 scripts/bulk_org_assign.py \
+    --tld bde.es \
+    --org "Banco de España" \
+    --sector "Financial Services" \
+    --region "EU/Spain"
+
+# Multiple TLDs for the same org
+python3 scripts/bulk_org_assign.py \
+    --tld bde.es --tld bancodeespana.es \
+    --org "Banco de España" \
+    --sector "Financial Services" \
+    --region "EU/Spain"
+
+# Verbose — prints every matched domain
+python3 scripts/bulk_org_assign.py \
+    --tld example.com --org "Example Corp" --dry-run --verbose
+```
+
+### Notes
+
+- Assignments are **additive** — existing org domains are never removed.
+- The org's sector and region are updated if they differ (unless `--no-update`).
+- Domains must already exist in the database (scanned or in a domain list).
+  Run a scan first if the database is empty.
+
+---
+
+## diagnose.py
+
+Checks Shodan and DNSDumpster integration against a live domain.
+
+```bash
+python3 scripts/diagnose.py \
+    --config config/config.yaml \
+    --domain bde.es
+```
+
+Reports:
+1. Config loading — confirms API keys are read correctly
+2. Shodan API — calls `api.info()` and `api.host()`, shows SSL services
+3. CLI flags — verifies `--shodan` and `--dns-enumerate` exist on `scan`
+4. DNSDumpster API — live test with correct `X-API-Key` header, shows response structure
+
+### Notes on Shodan free plan (`oss`)
+
+`query_credits: 0` is **normal** on the free plan — it uses rate limiting,
+not a credit bucket. `api.host()` still works. The diagnostic will tell
+you if it actually fails.
+
+### Notes on DNSDumpster
+
+The API uses `X-API-Key` header (not `Authorization: Bearer`).
+Rate limit: 1 request per 2 seconds. Free plan: 50 records.
+Plus plan: 200 records/page with `?page=N` pagination.

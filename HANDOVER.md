@@ -89,6 +89,10 @@ pqc-monitor/
 ├── VERSION                     # "1.3.0" — ONLY file to edit when releasing
 ├── version.py                  # reads VERSION, exports VERSION/__version__
 ├── pqc_monitor.py              # CLI entry point (12 commands)
+├── scripts/
+│   ├── README.md               # Script usage reference
+│   ├── bulk_org_assign.py      # Bulk-assign domains to an org by TLD pattern
+│   └── diagnose.py             # Shodan + DNSDumpster integration diagnostic
 ├── app_factory.py              # Flask app factory — the production entry point
 ├── app_routes.py               # Analyst /app/* Blueprint (24 routes)
 │
@@ -970,4 +974,62 @@ sudo systemctl start pqc-monitor.target
 6. **New tests** → add to appropriate `tests/test_*.py`  
 7. **Version bump** → edit `VERSION` file, add CHANGELOG entry  
 8. **RBAC** → add new permission strings to `PERMISSIONS` dict in `auth/models.py` if needed
+
+---
+
+## Appendix D — Operational Scripts
+
+Scripts live in `scripts/` and are run from the project root:
+
+```bash
+cd /opt/pqc-monitor
+python3 scripts/<script>.py --help
+```
+
+All scripts load `config/config.yaml` automatically; override with `--config`.
+See `scripts/README.md` for full usage.
+
+### bulk_org_assign.py — Bulk domain → organisation assignment
+
+Assigns every domain in the database that matches a TLD pattern to a named
+organisation, creating the org if it does not already exist. Assignments are
+**additive** — existing org domains are never removed by this script.
+
+```bash
+# Preview (--dry-run writes nothing)
+python3 scripts/bulk_org_assign.py \
+    --tld bde.es \
+    --org "Banco de España" \
+    --sector "Financial Services" \
+    --region "EU/Spain" \
+    --dry-run
+
+# Apply
+python3 scripts/bulk_org_assign.py \
+    --tld bde.es \
+    --org "Banco de España" \
+    --sector "Financial Services" \
+    --region "EU/Spain"
+
+# Multiple TLDs in one pass
+python3 scripts/bulk_org_assign.py \
+    --tld bde.es --tld bancodeespana.es \
+    --org "Banco de España" --sector "Finance" --region "EU/Spain"
+```
+
+Domain sources searched: `assessments` table ∪ `domain_lists` table.
+Matching rule: exact match or any subdomain at any depth.
+
+### diagnose.py — API integration diagnostic
+
+Tests Shodan and DNSDumpster connectivity from the production environment:
+
+```bash
+python3 scripts/diagnose.py \
+    --config config/config.yaml \
+    --domain bde.es
+```
+
+Checks: config key loading, Shodan `api.info()` + `api.host()`, CLI flag
+presence, DNSDumpster live API call with correct `X-API-Key` header.
 

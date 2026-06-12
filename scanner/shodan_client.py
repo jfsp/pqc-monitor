@@ -45,8 +45,16 @@ class ShodanClient:
             self.api = shodan_lib.Shodan(api_key)
             info = self.api.info()
             self.available = True
+            credits = info.get('query_credits', 0)
             logger.info(f"Shodan API ready. Plan: {info.get('plan','unknown')}, "
-                        f"Credits: {info.get('query_credits','?')}")
+                        f"Credits: {credits}")
+            if credits == 0:
+                logger.warning(
+                    "Shodan query credits are 0 — host lookups will fail and the "
+                    "scanner will fall back to direct probing. Credits reset monthly."
+                )
+            elif credits < 10:
+                logger.warning(f"Shodan query credits low ({credits} remaining).")
         except Exception as e:
             logger.warning(f"Shodan API init failed: {e}")
 
@@ -141,9 +149,13 @@ class ShodanClient:
                 results.append(svc)
 
         except shodan_lib.APIError as e:
-            logger.debug(f"Shodan API error for {domain}: {e}")
+            err_str = str(e).lower()
+            if "no information available" in err_str:
+                logger.debug(f"Shodan: no data for {domain} ({e})")
+            else:
+                logger.warning(f"Shodan API error for {domain}: {e}")
         except Exception as e:
-            logger.debug(f"Shodan lookup error for {domain}: {e}")
+            logger.warning(f"Shodan lookup error for {domain}: {e}")
 
         return results
 

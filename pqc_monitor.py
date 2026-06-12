@@ -147,8 +147,11 @@ def discover(ctx, query, max_domains, no_validate, output):
 @click.option("--sector", default="", help="Sector name")
 @click.option("--region", default="", help="Region name")
 @click.option("--shodan", is_flag=True, help="Use Shodan API if available")
+@click.option("--dns-enumerate", "dns_enumerate", is_flag=True,
+              help="Run DNS deep-dive enumeration before scanning (CT SANs, "
+                   "wordlist, DNSDumpster if key configured)")
 @click.pass_context
-def scan(ctx, domains, domain, sector, region, shodan):
+def scan(ctx, domains, domain, sector, region, shodan, dns_enumerate):
     """Scan domains for cryptographic posture and PQC readiness.
 
     Examples:
@@ -172,6 +175,45 @@ def scan(ctx, domains, domain, sector, region, shodan):
 
     click.echo(f"🔬 Scanning {len(domain_list)} domains...")
     orchestrator = ScanOrchestrator(cfg)
+
+    # ── Optional DNS deep-dive before scanning ─────────────────────────────
+    if dns_enumerate:
+        from scanner.dns_enumerator import enumerate_domain
+        from data.database import Database as _DB
+        dd_key  = cfg.get("dnsdumpster_api_key", "")
+        use_wl  = cfg.get("dns_use_wordlist", True)
+        use_ct  = cfg.get("dns_use_ct", True)
+        use_dd  = bool(dd_key)
+        click.echo(f"🔍 DNS enumeration (CT={'on' if use_ct else 'off'}, "
+                   f"wordlist={'on' if use_wl else 'off'}, "
+                   f"dnsdumpster={'on' if use_dd else 'off — no key'})...")
+        discovered: set = set(domain_list)
+        for dom in list(domain_list):
+            try:
+                result = enumerate_domain(
+                    dom,
+                    use_wordlist=use_wl,
+                    use_ct=use_ct,
+                    use_dnsdumpster=use_dd,
+                    dnsdumpster_api_key=dd_key,
+                )
+                new_hosts = [
+                    c["host"] for c in result.tls_candidates
+                    if c["host"] not in discovered
+                ]
+                if new_hosts:
+                    click.echo(f"  {dom}: +{len(new_hosts)} new hosts "
+                               f"({len(result.subdomains)} subdomains found)")
+                    discovered.update(new_hosts)
+                else:
+                    click.echo(f"  {dom}: no new hosts beyond input list")
+                if result.errors:
+                    for err in result.errors:
+                        click.echo(f"  ⚠️  {err}", err=True)
+            except Exception as exc:
+                click.echo(f"  ⚠️  DNS enumeration failed for {dom}: {exc}", err=True)
+        domain_list = sorted(discovered)
+        click.echo(f"  → {len(domain_list)} total hosts to scan after enumeration")
 
     completed = 0
     def progress(done, total, current_domain):

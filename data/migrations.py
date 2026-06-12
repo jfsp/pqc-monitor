@@ -201,6 +201,36 @@ CREATE INDEX IF NOT EXISTS idx_udl_user   ON user_domain_lists(user_id)""",
         "Add service_type column to assessments (T2-1)",
         "ALTER TABLE assessments ADD COLUMN service_type TEXT",
     ),
+    (
+        14,
+        "Add organisations, domain_organisations, user_organisations tables",
+        """CREATE TABLE IF NOT EXISTS organisations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    sector      TEXT DEFAULT '',
+    region      TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    created_at  TEXT NOT NULL,
+    created_by  INTEGER REFERENCES users(id)
+);
+CREATE TABLE IF NOT EXISTS domain_organisations (
+    domain      TEXT NOT NULL,
+    org_id      INTEGER NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
+    assigned_at TEXT NOT NULL,
+    assigned_by INTEGER REFERENCES users(id),
+    PRIMARY KEY (domain, org_id)
+);
+CREATE TABLE IF NOT EXISTS user_organisations (
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    org_id      INTEGER NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
+    granted_at  TEXT NOT NULL,
+    granted_by  INTEGER REFERENCES users(id),
+    PRIMARY KEY (user_id, org_id)
+);
+CREATE INDEX IF NOT EXISTS idx_domain_org     ON domain_organisations(org_id);
+CREATE INDEX IF NOT EXISTS idx_domain_org_dom ON domain_organisations(domain);
+CREATE INDEX IF NOT EXISTS idx_user_org       ON user_organisations(user_id)""",
+    ),
 ]
 
 

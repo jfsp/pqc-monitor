@@ -290,22 +290,32 @@ class Database:
                 assessment.get("service_type"),
             ))
 
-    def get_latest_assessments(self, run_id: str = None) -> list:
-        """Get the most recent assessment per domain."""
+    def get_latest_assessments(self, run_id: str = None,
+                                org_id: int = None) -> list:
+        """Get the most recent assessment per domain, optionally filtered by org."""
+        if org_id is not None:
+            return self.get_assessments_by_org(org_id, run_id=run_id)
         with self._connect() as conn:
             if run_id:
-                rows = conn.execute(
-                    "SELECT * FROM assessments WHERE run_id=? ORDER BY domain",
-                    (run_id,)
-                ).fetchall()
+                rows = conn.execute("""
+                    SELECT a.*, o.id as org_id, o.name as org_name, o.region as org_region
+                    FROM assessments a
+                    LEFT JOIN domain_organisations do2 ON do2.domain = a.domain
+                    LEFT JOIN organisations o ON o.id = do2.org_id
+                    WHERE a.run_id=?
+                    ORDER BY a.domain
+                """, (run_id,)).fetchall()
             else:
                 rows = conn.execute("""
-                    SELECT a.* FROM assessments a
+                    SELECT a.*, o.id as org_id, o.name as org_name, o.region as org_region
+                    FROM assessments a
                     INNER JOIN (
                         SELECT domain, MAX(assessed_at) as max_ts
                         FROM assessments GROUP BY domain
                     ) latest ON a.domain=latest.domain AND a.assessed_at=latest.max_ts
-                    ORDER BY score ASC
+                    LEFT JOIN domain_organisations do2 ON do2.domain = a.domain
+                    LEFT JOIN organisations o ON o.id = do2.org_id
+                    ORDER BY a.score ASC
                 """).fetchall()
         return [self._parse_assessment_row(r) for r in rows]
 
@@ -498,6 +508,174 @@ class Database:
             rows = conn.execute(
                 "SELECT DISTINCT domain FROM assessments ORDER BY domain"
             ).fetchall()
+        return [r["domain"] for r in rows]
+
+    # ─── Organisations ────────────────────────────────────────────
+
+    def create_organisation(self, name: str, sector: str = "",
+                             region: str = "", description: str = "",
+                             created_by: int = None) -> int:
+        """Create a new organisation. Returns new org id."""
+        ts = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO organisations (name, sector, region, description, "
+                "created_at, created_by) VALUES (?,?,?,?,?,?)",
+                (name.strip(), sector, region, description, ts, created_by)
+            )
+        return cur.lastrowid
+
+    def get_organisations(self) -> list[dict]:
+        """Return all organisations with their domain counts and domain lists."""
+        with self._connect() as conn:
+            org_rows = conn.execute("""
+                SELECT o.*,
+                       COUNT(DISTINCT do2.domain) as domain_count
+                FROM organisations o
+                LEFT JOIN domain_organisations do2 ON do2.org_id = o.id
+                GROUP BY o.id
+                ORDER BY o.name
+            """).fetchall()
+        orgs = []
+        for row in org_rows:
+            d = dict(row)
+            d["domains"] = self.get_org_domains(d["id"])
+            orgs.append(d)
+        return orgs
+
+    def get_organisation(self, org_id: int) -> Optional[dict]:
+        """Return a single organisation record or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM organisations WHERE id=?", (org_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_organisation(self, org_id: int, **fields) -> bool:
+        """Update name, sector, region, or description. Returns False if not found."""
+        allowed = {"name", "sector", "region", "description"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return True
+        cols = ", ".join(f"{k}=?" for k in updates)
+        vals = list(updates.values()) + [org_id]
+        with self._connect() as conn:
+            cur = conn.execute(f"UPDATE organisations SET {cols} WHERE id=?", vals)
+        return cur.rowcount > 0
+
+    def delete_organisation(self, org_id: int) -> bool:
+        """Delete org and cascade to domain/user assignments."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM organisations WHERE id=?", (org_id,)
+            ).fetchone()
+            if not row:
+                return False
+            conn.execute("DELETE FROM organisations WHERE id=?", (org_id,))
+        return True
+
+    # ─── Domain ↔ Org assignments ──────────────────────────────────
+
+    def set_org_domains(self, org_id: int, domains: list[str],
+                        assigned_by: int = None):
+        """Replace all domain assignments for an org atomically."""
+        ts = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM domain_organisations WHERE org_id=?", (org_id,)
+            )
+            for domain in domains:
+                conn.execute(
+                    "INSERT OR IGNORE INTO domain_organisations "
+                    "(domain, org_id, assigned_at, assigned_by) VALUES (?,?,?,?)",
+                    (domain.lower().strip(), org_id, ts, assigned_by)
+                )
+
+    def get_org_domains(self, org_id: int) -> list[str]:
+        """Return all domains assigned to an org."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT domain FROM domain_organisations WHERE org_id=? ORDER BY domain",
+                (org_id,)
+            ).fetchall()
+        return [r["domain"] for r in rows]
+
+    def get_domain_org(self, domain: str) -> Optional[dict]:
+        """Return the org a domain belongs to (first if multiple), or None."""
+        with self._connect() as conn:
+            row = conn.execute("""
+                SELECT o.* FROM organisations o
+                JOIN domain_organisations do2 ON do2.org_id = o.id
+                WHERE do2.domain = ?
+                ORDER BY o.name LIMIT 1
+            """, (domain,)).fetchone()
+        return dict(row) if row else None
+
+    def get_assessments_by_org(self, org_id: int,
+                                run_id: str = None) -> list[dict]:
+        """Return latest assessments for all domains in an org."""
+        domains = self.get_org_domains(org_id)
+        if not domains:
+            return []
+        placeholders = ",".join("?" * len(domains))
+        with self._connect() as conn:
+            if run_id:
+                rows = conn.execute(
+                    f"SELECT * FROM assessments WHERE run_id=? "
+                    f"AND domain IN ({placeholders}) ORDER BY domain",
+                    [run_id] + domains
+                ).fetchall()
+            else:
+                rows = conn.execute(f"""
+                    SELECT a.* FROM assessments a
+                    INNER JOIN (
+                        SELECT domain, MAX(assessed_at) as max_ts
+                        FROM assessments GROUP BY domain
+                    ) latest ON a.domain=latest.domain AND a.assessed_at=latest.max_ts
+                    WHERE a.domain IN ({placeholders})
+                    ORDER BY a.score ASC
+                """, domains).fetchall()
+        return [self._parse_assessment_row(r) for r in rows]
+
+    # ─── User ↔ Org assignments ────────────────────────────────────
+
+    def set_user_orgs(self, user_id: int, org_ids: list[int],
+                      granted_by: int = None):
+        """Replace all org assignments for a user atomically."""
+        ts = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM user_organisations WHERE user_id=?", (user_id,)
+            )
+            for oid in org_ids:
+                conn.execute(
+                    "INSERT OR IGNORE INTO user_organisations "
+                    "(user_id, org_id, granted_at, granted_by) VALUES (?,?,?,?)",
+                    (user_id, oid, ts, granted_by)
+                )
+
+    def get_user_org_ids(self, user_id: int) -> list[int]:
+        """Return org IDs assigned to a user."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT org_id FROM user_organisations WHERE user_id=?",
+                (user_id,)
+            ).fetchall()
+        return [r["org_id"] for r in rows]
+
+    def get_org_domains_for_user(self, user_id: int) -> list[str]:
+        """
+        Return the flat list of domains the user can access via their org
+        assignments. Used by the RBAC scoping layer.
+        """
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT DISTINCT do2.domain
+                FROM user_organisations uo
+                JOIN domain_organisations do2 ON do2.org_id = uo.org_id
+                WHERE uo.user_id = ?
+                ORDER BY do2.domain
+            """, (user_id,)).fetchall()
         return [r["domain"] for r in rows]
 
     # ─── Enrichment data (chain / cipher_enum / cdn) ──────────────

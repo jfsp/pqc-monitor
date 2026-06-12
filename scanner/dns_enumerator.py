@@ -252,7 +252,8 @@ def _dnsdumpster_subdomains(
     If *api_key* is provided, uses the official REST API:
         GET https://api.dnsdumpster.com/domain/{domain}
         X-API-Key: <api_key>
-    The response is JSON; we harvest the 'host_records' list.
+    Rate limit: 1 request per 2 seconds (respected internally).
+    Free plan: up to 50 records. Plus plan: up to 200/page with pagination.
 
     Without an API key, falls back to a best-effort HTML scrape of
     dnsdumpster.com (unofficial, CSRF-token based, may break without warning).
@@ -270,39 +271,122 @@ def _dnsdumpster_subdomains(
     return _dnsdumpster_scrape(domain, timeout)
 
 
-def _dnsdumpster_api(domain: str, api_key: str, timeout: int) -> list[str]:
-    """Use the official DNSDumpster API (requires paid key)."""
-    url = f"https://api.dnsdumpster.com/domain/{domain}"
-    try:
-        resp = requests.get(
-            url,
-            headers={
-                "X-API-Key": api_key,
-                "Accept": "application/json",
-                "User-Agent": "PQC-Monitor/1.3 (security research)",
-            },
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as exc:
-        logger.warning(f"DNSDumpster API failed for {domain}: {exc}")
-        return []
+def _dnsdumpster_api(
+    domain: str,
+    api_key: str,
+    timeout: int,
+    paginate: bool = True,
+) -> list[str]:
+    """
+    Query the DNSDumpster REST API.
 
+    Authentication : X-API-Key header
+    Endpoint       : GET https://api.dnsdumpster.com/domain/{domain}
+    Rate limit     : 1 request per 2 seconds (enforced here with a sleep)
+    Pagination     : ?page=N  (Plus plan; free plan max 50 records)
+
+    Response structure (from https://dnsdumpster.com/developer/):
+      {
+        "a":     [ {"host": "...", "ips": [{...}]}, ... ],
+        "cname": [ ... ],
+        "mx":    [ ... ],
+        "ns":    [ ... ],
+        "txt":   [ "v=spf1 ...", ... ],
+        "total_a_recs": N
+      }
+
+    We harvest unique FQDNs that are children of *domain* from all record
+    sections.  TXT records are strings (no host field) so they are skipped
+    for FQDN extraction but logged for SPF/DMARC awareness.
+    """
+    import time
+
+    base_url = f"https://api.dnsdumpster.com/domain/{domain}"
+    headers  = {
+        "X-API-Key":    api_key,
+        "Accept":       "application/json",
+        "User-Agent":   "PQC-Monitor/1.3 (security research)",
+    }
     fqdns: set[str] = set()
-    # host_records is a list of {host, ips, ttl, type, ...}
-    for record in data.get("host_records", []):
-        host = record.get("host", "").lower().strip().rstrip(".")
-        if host and (host.endswith(f".{domain}") or host == domain):
-            fqdns.add(host)
-    # Also harvest from a/aaaa/mx/ns/cname sections if present
-    for section in ("a", "aaaa", "mx", "ns", "cname"):
-        for record in data.get(section, []):
-            host = record.get("host", "").lower().strip().rstrip(".")
-            if host and host.endswith(f".{domain}"):
-                fqdns.add(host)
+    page = 1
 
-    logger.debug(f"DNSDumpster API returned {len(fqdns)} hosts for {domain}")
+    while True:
+        url = base_url if page == 1 else f"{base_url}?page={page}"
+        try:
+            resp = requests.get(url, headers=headers, timeout=timeout)
+        except Exception as exc:
+            logger.warning(f"DNSDumpster request failed for {domain} (page {page}): {exc}")
+            break
+
+        if resp.status_code == 429:
+            logger.warning(
+                f"DNSDumpster rate limit hit for {domain} — "
+                "respecting 2-second limit between requests"
+            )
+            time.sleep(2)
+            continue  # retry same page
+
+        if resp.status_code == 401:
+            logger.warning("DNSDumpster API key rejected (401) — check X-API-Key value")
+            break
+
+        if resp.status_code == 403:
+            logger.warning("DNSDumpster 403 — plan restriction for this endpoint")
+            break
+
+        if not resp.ok:
+            logger.warning(
+                f"DNSDumpster API error for {domain} (page {page}): "
+                f"HTTP {resp.status_code}"
+            )
+            break
+
+        try:
+            data = resp.json()
+        except Exception as exc:
+            logger.warning(f"DNSDumpster returned non-JSON for {domain}: {exc}")
+            break
+
+        # Harvest FQDNs from all record sections that carry a 'host' field
+        # Actual keys: a, cname, mx, ns  (aaaa not documented but harmless to try)
+        found_this_page = 0
+        for section in ("a", "aaaa", "cname", "mx", "ns"):
+            for record in data.get(section, []):
+                host = record.get("host", "").lower().strip().rstrip(".")
+                if host and (host == domain or host.endswith(f".{domain}")):
+                    if host not in fqdns:
+                        fqdns.add(host)
+                        found_this_page += 1
+
+        # TXT records are plain strings — log SPF/DMARC but no FQDNs to harvest
+        for txt in data.get("txt", []):
+            if txt.startswith("v=spf1") or txt.startswith("v=DMARC1"):
+                logger.debug(f"DNSDumpster TXT for {domain}: {txt[:80]}")
+
+        total = data.get("total_a_recs", 0)
+        logger.debug(
+            f"DNSDumpster page {page} for {domain}: "
+            f"{found_this_page} new FQDNs (total_a_recs={total})"
+        )
+
+        # Paginate only if Plus plan has more records and pagination is enabled
+        # Free plan: 50 records; Plus plan: 200/page.  Stop when page returns nothing new.
+        if not paginate or found_this_page == 0:
+            break
+
+        # Respect the 2-second rate limit between paginated requests
+        time.sleep(2)
+        page += 1
+
+        # Safety cap: never fetch more than 10 pages (2000 records)
+        if page > 10:
+            logger.debug(f"DNSDumpster: reached page cap for {domain}")
+            break
+
+    logger.info(
+        f"DNSDumpster API: {len(fqdns)} unique FQDNs for {domain} "
+        f"({page} page(s) fetched)"
+    )
     return sorted(fqdns)
 
 

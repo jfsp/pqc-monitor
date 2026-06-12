@@ -153,32 +153,44 @@ dd_key = cfg.get("dnsdumpster_api_key", "")
 
 if dd_key:
     sep(f"4. DNSDumpster API test for {args.domain}")
+    print("  Auth header    : X-API-Key")
+    print("  Rate limit     : 1 req / 2 seconds")
+    print("  Free plan      : up to 50 records")
+    print("  Plus plan      : up to 200/page, paginated via ?page=N")
+    print()
     try:
         import requests
         url = f"https://api.dnsdumpster.com/domain/{args.domain}"
-        # Correct header is X-API-Key (not Authorization: Bearer)
         r = requests.get(
             url,
-            headers={
-                "X-API-Key": dd_key,
-                "Accept": "application/json",
-            },
+            headers={"X-API-Key": dd_key, "Accept": "application/json"},
             timeout=15,
         )
-        print(f"  HTTP status: {r.status_code}")
+        print(f"  HTTP status    : {r.status_code}")
         if r.status_code == 200:
             data = r.json()
-            # Response has host_records list
-            hosts = data.get("host_records", [])
-            print(f"  ✅ API call OK — {len(hosts)} host records")
-            for h in hosts[:5]:
-                ips = [i.get("ip") for i in h.get("ips", [])]
-                print(f"    {h.get('host')} → {ips}")
-            print(f"  Top-level keys: {list(data.keys())[:10]}")
+            print(f"  Top-level keys : {list(data.keys())}")
+            # Actual sections per API docs: a, cname, mx, ns, txt
+            total = 0
+            for section in ("a", "cname", "mx", "ns"):
+                records = data.get(section, [])
+                total += len(records)
+                if records:
+                    print(f"  {section.upper():6s}: {len(records)} records")
+                    for rec in records[:2]:
+                        ips = [i.get("ip") for i in rec.get("ips", [])]
+                        print(f"         {rec.get('host')} → {ips}")
+            for txt in data.get("txt", [])[:3]:
+                print(f"  TXT   : {txt[:80]}")
+            print(f"  total_a_recs   : {data.get('total_a_recs', 'n/a')}")
+            if total > 0:
+                print(f"  ✅ {total} host records across all sections")
+            else:
+                print("  ℹ️  0 records — domain may not be indexed yet")
         elif r.status_code == 401:
-            print("  ❌ 401 Unauthorized — check your API key value")
-        elif r.status_code == 403:
-            print("  ❌ 403 Forbidden — key valid but plan restriction")
+            print("  ❌ 401 Unauthorized — X-API-Key value invalid")
+        elif r.status_code == 429:
+            print("  ❌ 429 Rate limited — wait 2 seconds between requests")
         else:
             print(f"  ❌ HTTP {r.status_code}: {r.text[:300]}")
     except Exception as e:

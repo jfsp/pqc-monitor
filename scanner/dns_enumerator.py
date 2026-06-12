@@ -251,7 +251,7 @@ def _dnsdumpster_subdomains(
 
     If *api_key* is provided, uses the official REST API:
         GET https://api.dnsdumpster.com/domain/{domain}
-        Authorization: Bearer <api_key>
+        X-API-Key: <api_key>
     The response is JSON; we harvest the 'host_records' list.
 
     Without an API key, falls back to a best-effort HTML scrape of
@@ -277,16 +277,16 @@ def _dnsdumpster_api(domain: str, api_key: str, timeout: int) -> list[str]:
         resp = requests.get(
             url,
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "X-API-Key": api_key,
                 "Accept": "application/json",
-                "User-Agent": "PQC-Monitor/1.2 (security research)",
+                "User-Agent": "PQC-Monitor/1.3 (security research)",
             },
             timeout=timeout,
         )
         resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
-        logger.debug(f"DNSDumpster API failed for {domain}: {exc}")
+        logger.warning(f"DNSDumpster API failed for {domain}: {exc}")
         return []
 
     fqdns: set[str] = set()

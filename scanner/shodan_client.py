@@ -45,15 +45,18 @@ class ShodanClient:
             self.api = shodan_lib.Shodan(api_key)
             info = self.api.info()
             self.available = True
-            credits = info.get('query_credits', 0)
-            logger.info(f"Shodan API ready. Plan: {info.get('plan','unknown')}, "
-                        f"Credits: {credits}")
-            if credits == 0:
+            plan    = info.get("plan", "unknown")
+            credits = info.get("query_credits", 0)
+            logger.info(f"Shodan API ready. Plan: {plan}, Credits: {credits}")
+            # The free 'oss' plan always reports query_credits=0 — this is normal;
+            # it means the plan uses rate limits rather than a credit bucket.
+            # api.host() still works. Only warn when credits are low on a paid plan.
+            if plan != "oss" and credits == 0:
                 logger.warning(
-                    "Shodan query credits are 0 — host lookups will fail and the "
-                    "scanner will fall back to direct probing. Credits reset monthly."
+                    "Shodan query_credits = 0 on a paid plan — host lookups may "
+                    "fail. Credits reset on the 1st of each month."
                 )
-            elif credits < 10:
+            elif plan != "oss" and credits < 10:
                 logger.warning(f"Shodan query credits low ({credits} remaining).")
         except Exception as e:
             logger.warning(f"Shodan API init failed: {e}")

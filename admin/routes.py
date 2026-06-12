@@ -1368,7 +1368,7 @@ loadUsers();
 </script>
 
 <!-- Org create/edit modal -->
-<div class="modal-overlay" id="modal-org">
+<div class="modal-bg" id="modal-org">
   <div class="modal">
     <div class="modal-hdr">
       <span id="modal-org-title">Organisation</span>
@@ -1393,7 +1393,7 @@ loadUsers();
 </div>
 
 <!-- Org domain assignment modal -->
-<div class="modal-overlay" id="modal-org-domains" data-org-id="">
+<div class="modal-bg" id="modal-org-domains" data-org-id="">
   <div class="modal">
     <div class="modal-hdr">
       <span id="modal-org-domains-title">Assign Domains</span>

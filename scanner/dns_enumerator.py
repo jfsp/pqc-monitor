@@ -241,54 +241,109 @@ def _ct_sans(domain: str) -> list[str]:
     return sorted(fqdns)
 
 
-def _dnsdumpster_subdomains(domain: str, timeout: int = 15) -> list[str]:
+def _dnsdumpster_subdomains(
+    domain: str,
+    api_key: str = "",
+    timeout: int = 15,
+) -> list[str]:
     """
-    Scrape DNSDumpster for additional subdomains (unofficial, best-effort).
-    Returns a list of FQDNs; empty list on any failure.
+    Query DNSDumpster for additional subdomains.
+
+    If *api_key* is provided, uses the official REST API:
+        GET https://api.dnsdumpster.com/domain/{domain}
+        Authorization: Bearer <api_key>
+    The response is JSON; we harvest the 'host_records' list.
+
+    Without an API key, falls back to a best-effort HTML scrape of
+    dnsdumpster.com (unofficial, CSRF-token based, may break without warning).
+    The scrape path is kept for development/testing only — the API path is
+    strongly preferred for production use.
+
+    Returns a sorted, deduplicated list of FQDNs that are children of *domain*.
+    Empty list on any failure.
     """
     if not HAS_REQUESTS:
         return []
+
+    if api_key:
+        return _dnsdumpster_api(domain, api_key, timeout)
+    return _dnsdumpster_scrape(domain, timeout)
+
+
+def _dnsdumpster_api(domain: str, api_key: str, timeout: int) -> list[str]:
+    """Use the official DNSDumpster API (requires paid key)."""
+    url = f"https://api.dnsdumpster.com/domain/{domain}"
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+                "User-Agent": "PQC-Monitor/1.2 (security research)",
+            },
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.debug(f"DNSDumpster API failed for {domain}: {exc}")
+        return []
+
+    fqdns: set[str] = set()
+    # host_records is a list of {host, ips, ttl, type, ...}
+    for record in data.get("host_records", []):
+        host = record.get("host", "").lower().strip().rstrip(".")
+        if host and (host.endswith(f".{domain}") or host == domain):
+            fqdns.add(host)
+    # Also harvest from a/aaaa/mx/ns/cname sections if present
+    for section in ("a", "aaaa", "mx", "ns", "cname"):
+        for record in data.get(section, []):
+            host = record.get("host", "").lower().strip().rstrip(".")
+            if host and host.endswith(f".{domain}"):
+                fqdns.add(host)
+
+    logger.debug(f"DNSDumpster API returned {len(fqdns)} hosts for {domain}")
+    return sorted(fqdns)
+
+
+def _dnsdumpster_scrape(domain: str, timeout: int) -> list[str]:
+    """
+    Fallback HTML scrape of dnsdumpster.com (unofficial, best-effort).
+    Uses CSRF-token extraction then a POST to the free search form.
+    May break at any time if DNSDumpster changes their front-end.
+    """
     session = requests.Session()
     base = "https://dnsdumpster.com"
     try:
-        # Fetch CSRF token from landing page
         r = session.get(base, timeout=timeout,
-                        headers={"User-Agent": "PQC-Monitor/1.1 (DNS research)"})
+                        headers={"User-Agent": "PQC-Monitor/1.2 (DNS research)"})
         r.raise_for_status()
 
         csrf = None
         for line in r.text.splitlines():
             if "csrfmiddlewaretoken" in line and "value=" in line:
-                # <input type="hidden" name="csrfmiddlewaretoken" value="...">
                 start = line.find('value="') + 7
                 end   = line.find('"', start)
                 csrf  = line[start:end]
                 break
         if not csrf:
-            logger.debug("DNSDumpster: could not extract CSRF token")
+            logger.debug("DNSDumpster scrape: could not extract CSRF token")
             return []
 
-        # Submit search
         post = session.post(
             base,
             data={"csrfmiddlewaretoken": csrf, "targetip": domain, "user": "free"},
-            headers={
-                "Referer": base,
-                "User-Agent": "PQC-Monitor/1.1 (DNS research)",
-            },
+            headers={"Referer": base, "User-Agent": "PQC-Monitor/1.2 (DNS research)"},
             timeout=timeout,
         )
         post.raise_for_status()
         html = post.text
-
     except Exception as exc:
-        logger.debug(f"DNSDumpster request failed for {domain}: {exc}")
+        logger.debug(f"DNSDumpster scrape failed for {domain}: {exc}")
         return []
 
-    # Extract FQDNs from table cells — each subdomain row starts with the FQDN
-    fqdns: set[str] = set()
     import re
-    # Pattern: table cell content that looks like a subdomain of target
+    fqdns: set[str] = set()
     for match in re.finditer(
         r'<td[^>]*>\s*([a-zA-Z0-9._-]+\.' + re.escape(domain) + r')\s*</td>',
         html
@@ -297,7 +352,7 @@ def _dnsdumpster_subdomains(domain: str, timeout: int = 15) -> list[str]:
         if fqdn.endswith(f".{domain}"):
             fqdns.add(fqdn)
 
-    logger.debug(f"DNSDumpster returned {len(fqdns)} subdomains for {domain}")
+    logger.debug(f"DNSDumpster scrape returned {len(fqdns)} hosts for {domain}")
     return sorted(fqdns)
 
 
@@ -351,7 +406,8 @@ def enumerate_domain(
     domain: str,
     use_wordlist: bool = True,
     use_ct: bool = True,
-    use_dnsdumpster: bool = True,
+    use_dnsdumpster: bool = False,
+    dnsdumpster_api_key: str = "",
     wordlist: list[str] = None,
     max_workers: int = 30,
     timeout: float = 5.0,
@@ -361,13 +417,18 @@ def enumerate_domain(
 
     Parameters
     ----------
-    domain          Root domain to enumerate (e.g. "example.com")
-    use_wordlist    Brute-force with built-in wordlist (default True)
-    use_ct          Harvest SANs from crt.sh CT logs (default True)
-    use_dnsdumpster Scrape DNSDumpster (default True, best-effort)
-    wordlist        Override built-in wordlist
-    max_workers     Concurrency for wordlist resolution
-    timeout         Per-query DNS timeout in seconds
+    domain              Root domain to enumerate (e.g. "example.com")
+    use_wordlist        Brute-force with built-in wordlist (default True)
+    use_ct              Harvest SANs from crt.sh CT logs (default True)
+    use_dnsdumpster     Query DNSDumpster (default False — requires explicit opt-in).
+                        If *dnsdumpster_api_key* is set, uses the official API;
+                        otherwise falls back to a fragile HTML scrape.
+    dnsdumpster_api_key Optional API key for api.dnsdumpster.com.
+                        Configure via dns_enumeration.dnsdumpster_api_key in
+                        config.yaml or the PQC_DNSDUMPSTER_KEY env variable.
+    wordlist            Override built-in wordlist
+    max_workers         Concurrency for wordlist resolution
+    timeout             Per-query DNS timeout in seconds
 
     Returns
     -------
@@ -426,7 +487,7 @@ def enumerate_domain(
     # ── DNSDumpster ───────────────────────────────────────────────
     if use_dnsdumpster:
         try:
-            dd_subs = _dnsdumpster_subdomains(domain)
+            dd_subs = _dnsdumpster_subdomains(domain, api_key=dnsdumpster_api_key)
             logger.debug(f"{domain}: DNSDumpster found {len(dd_subs)} subdomains")
             all_subs.update(dd_subs)
         except Exception as exc:

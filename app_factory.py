@@ -98,6 +98,11 @@ def create_app(config: dict = None) -> Flask:
     )
     app.config["ORCHESTRATOR"] = orchestrator
     app.config["DISCOVERY"]    = discovery
+    app.config["DNS_ENUM_CONFIG"] = {
+        "dnsdumpster_api_key": cfg.get("dnsdumpster_api_key", ""),
+        "use_wordlist":        cfg.get("dns_use_wordlist", True),
+        "use_ct":              cfg.get("dns_use_ct", True),
+    }
 
     # ── Blueprints ────────────────────────────────────────────────────────────
     app.register_blueprint(auth_bp)

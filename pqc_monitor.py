@@ -65,6 +65,13 @@ def load_config(config_path: str = None) -> dict:
         # Set https_enabled: true in config.yaml only when TLS is terminated
         # by a reverse proxy. Must be false when running over plain HTTP.
         "https_enabled": raw.get("dashboard", {}).get("https_enabled", False),
+        # DNS enumeration options
+        "dnsdumpster_api_key": os.environ.get(
+            "PQC_DNSDUMPSTER_KEY",
+            raw.get("dns_enumeration", {}).get("dnsdumpster_api_key", "")
+        ),
+        "dns_use_wordlist": raw.get("dns_enumeration", {}).get("use_wordlist", True),
+        "dns_use_ct":       raw.get("dns_enumeration", {}).get("use_ct", True),
     }
 
 

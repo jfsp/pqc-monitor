@@ -37,6 +37,15 @@ ai:
   anthropic_api_key: ""       # For natural-language domain discovery
   model: "claude-sonnet-4-20250514"
 
+dns_enumeration:
+  # DNSDumpster integration for subdomain discovery.
+  # Leave api_key blank to disable DNSDumpster (recommended default).
+  # Obtain a key at https://dnsdumpster.com/api/
+  # Can also be set via the PQC_DNSDUMPSTER_KEY environment variable.
+  dnsdumpster_api_key: ""
+  use_wordlist: true          # built-in 120-prefix brute-force
+  use_ct: true                # crt.sh Certificate Transparency harvest
+
 guidelines:
   active:
     - nist_800_131a

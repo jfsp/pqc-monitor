@@ -266,6 +266,108 @@ def api_known_domains():
     return jsonify(_db().get_all_known_domains())
 
 
+# ── Organisation CRUD ─────────────────────────────────────────────────────────
+
+@admin_bp.route("/api/organisations")
+@require_admin
+def api_list_orgs():
+    return jsonify(_db().get_organisations())
+
+
+@admin_bp.route("/api/organisations", methods=["POST"])
+@require_admin
+def api_create_org():
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+    try:
+        org_id = _db().create_organisation(
+            name=name,
+            sector=data.get("sector", ""),
+            region=data.get("region", ""),
+            description=data.get("description", ""),
+            created_by=current_user().id,
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 400
+    _audit("org.created", resource=name)
+    return jsonify(_db().get_organisation(org_id)), 201
+
+
+@admin_bp.route("/api/organisations/<int:org_id>")
+@require_admin
+def api_get_org(org_id):
+    org = _db().get_organisation(org_id)
+    if not org:
+        return jsonify({"error": "not found"}), 404
+    org["domains"] = _db().get_org_domains(org_id)
+    return jsonify(org)
+
+
+@admin_bp.route("/api/organisations/<int:org_id>", methods=["PATCH"])
+@require_admin
+def api_update_org(org_id):
+    data = request.get_json() or {}
+    ok   = _db().update_organisation(org_id, **{
+        k: data[k] for k in ("name", "sector", "region", "description") if k in data
+    })
+    if not ok:
+        return jsonify({"error": "not found"}), 404
+    _audit("org.updated", resource=str(org_id))
+    return jsonify(_db().get_organisation(org_id))
+
+
+@admin_bp.route("/api/organisations/<int:org_id>", methods=["DELETE"])
+@require_admin
+def api_delete_org(org_id):
+    org = _db().get_organisation(org_id)
+    if not org:
+        return jsonify({"error": "not found"}), 404
+    _db().delete_organisation(org_id)
+    _audit("org.deleted", resource=org.get("name", str(org_id)))
+    return jsonify({"ok": True})
+
+
+@admin_bp.route("/api/organisations/<int:org_id>/domains", methods=["PUT"])
+@require_admin
+def api_set_org_domains(org_id):
+    """Replace all domain assignments for an org."""
+    data    = request.get_json() or {}
+    domains = data.get("domains", [])
+    if not isinstance(domains, list):
+        return jsonify({"error": "domains must be a list"}), 400
+    _db().set_org_domains(org_id, domains, assigned_by=current_user().id)
+    _audit("org.domains_updated", resource=str(org_id),
+           detail=f"{len(domains)} domains")
+    return jsonify({"ok": True, "domain_count": len(domains)})
+
+
+@admin_bp.route("/api/users/<int:uid>/orgs")
+@require_admin
+def api_get_user_orgs(uid):
+    user = _store().get_user_by_id(uid)
+    if not user:
+        return jsonify({"error": "not found"}), 404
+    orgs = _db().get_organisations()
+    for o in orgs:
+        o["assigned"] = o["id"] in user.org_ids
+    return jsonify(orgs)
+
+
+@admin_bp.route("/api/users/<int:uid>/orgs", methods=["PUT"])
+@require_admin
+def api_set_user_orgs(uid):
+    data    = request.get_json() or {}
+    org_ids = data.get("org_ids", [])
+    if not isinstance(org_ids, list):
+        return jsonify({"error": "org_ids must be a list"}), 400
+    _store().set_user_orgs(uid, org_ids, granted_by=current_user().id)
+    _audit("user.orgs_updated", resource=str(uid),
+           detail=f"org_ids={org_ids}")
+    return jsonify({"ok": True, "org_ids": org_ids})
+
+
 # ── Audit log ─────────────────────────────────────────────────────────────────
 
 @admin_bp.route("/api/audit-log")
@@ -449,6 +551,7 @@ select option { background:var(--panel); }
     <div class="section-label">Management</div>
     <a href="#" onclick="showView('users')"    class="active" id="nav-users">👤 Users</a>
     <a href="#" onclick="showView('lists')"    id="nav-lists">📋 Domain Lists</a>
+    <a href="#" onclick="showView('orgs')"     id="nav-orgs">🏢 Organisations</a>
     <div class="section-label">Monitoring</div>
     <a href="#" onclick="showView('audit')"    id="nav-audit">📜 Audit Log</a>
   </nav>
@@ -501,6 +604,23 @@ select option { background:var(--panel); }
             <tbody id="lists-tbody">
               <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:2rem">Loading…</td></tr>
             </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Organisations view ── -->
+    <div id="view-orgs" class="view" style="display:none">
+      <div class="page-hdr">
+        <div class="page-title">Organisations</div>
+        <button class="btn-primary btn-sm" onclick="openCreateOrg()">+ New Organisation</button>
+      </div>
+      <div id="orgs-alert"></div>
+      <div class="card">
+        <div class="card-body" style="padding:0">
+          <table class="tbl" id="tbl-orgs">
+            <thead><tr><th>#</th><th>Name</th><th>Sector</th><th>Region</th><th>Domains</th><th>Actions</th></tr></thead>
+            <tbody id="tbody-orgs"></tbody>
           </table>
         </div>
       </div>
@@ -569,6 +689,10 @@ select option { background:var(--panel); }
     <div class="form-group" style="margin-top:1rem" id="f-domain-lists-group">
       <label>Assigned Domain Lists (Analyst only)</label>
       <div class="check-list" id="f-domain-lists"></div>
+    </div>
+    <div class="form-group" style="margin-top:1rem" id="f-user-orgs-group">
+      <label>Assigned Organisations (Analyst only)</label>
+      <div class="check-list" id="f-user-orgs"></div>
     </div>
     <div class="form-actions">
       <button class="btn btn-ghost" onclick="closeModal('modal-user')">Cancel</button>
@@ -686,6 +810,7 @@ function showView(name) {
   document.getElementById('nav-' + name)?.classList.add('active');
   if (name === 'users')  loadUsers();
   if (name === 'lists')  loadDomainLists();
+  if (name === 'orgs')   loadOrgs();
   if (name === 'audit')  loadAudit();
 }
 
@@ -724,6 +849,7 @@ function openCreateUser() {
   document.getElementById('f-username').disabled = false;
   hideAlert('modal-alert');
   loadDomainListCheckboxes(null);
+  loadOrgCheckboxes(null);
   document.getElementById('modal-user').classList.add('open');
 }
 
@@ -743,6 +869,7 @@ async function openEditUser(uid) {
   document.getElementById('f-password').value = '';
   hideAlert('modal-alert');
   loadDomainListCheckboxes(u);
+  loadOrgCheckboxes(u);
   document.getElementById('modal-user').classList.add('open');
 }
 
@@ -763,10 +890,29 @@ async function loadDomainListCheckboxes(user) {
   ).join('') || '<div style="color:var(--muted);font-size:.82rem;padding:.5rem">No domain lists yet. Create one via the Scanner.</div>';
 }
 
+async function loadOrgCheckboxes(user) {
+  const container = document.getElementById('f-user-orgs');
+  if (!container) return;
+  const r = await fetch('/admin/api/organisations');
+  const orgs = await r.json();
+  const assigned = new Set((user?.org_ids) || []);
+  const role = document.getElementById('f-role').value;
+  document.getElementById('f-user-orgs-group').style.display =
+    (role === 'analyst') ? 'block' : 'none';
+  container.innerHTML = orgs.map(o =>
+    `<label class="check-item">
+      <input type="checkbox" value="${o.id}" ${assigned.has(o.id) ? 'checked' : ''}>
+      <span>${esc(o.name)}</span>
+      <span style="color:var(--muted);font-size:.72rem;margin-left:auto">${o.region||''}</span>
+    </label>`
+  ).join('') || '<div style="color:var(--muted);font-size:.82rem;padding:.5rem">No organisations yet.</div>';
+}
+
 document.getElementById('f-role')?.addEventListener('change', () => {
   const role = document.getElementById('f-role').value;
-  document.getElementById('f-domain-lists-group').style.display =
-    role === 'analyst' ? 'block' : 'none';
+  const show = role === 'analyst' ? 'block' : 'none';
+  document.getElementById('f-domain-lists-group').style.display = show;
+  document.getElementById('f-user-orgs-group').style.display = show;
 });
 
 async function submitUserModal() {
@@ -806,6 +952,14 @@ async function submitUserModal() {
       body: JSON.stringify({domain_list_ids: selectedLists})
     });
 
+    // Update org assignments
+    const selectedOrgs = [...document.querySelectorAll('#f-user-orgs input:checked')]
+      .map(cb => parseInt(cb.value));
+    await fetch(`/admin/api/users/${_editUserId}/orgs`, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({org_ids: selectedOrgs})
+    });
+
     closeModal('modal-user');
     showPageAlert('users-alert', 'User updated successfully.', 'ok');
     loadUsers();
@@ -826,6 +980,17 @@ async function submitUserModal() {
         body: JSON.stringify({domain_list_ids: selectedLists})
       });
     }
+
+    // Assign orgs
+    const newOrgs = [...document.querySelectorAll('#f-user-orgs input:checked')]
+      .map(cb => parseInt(cb.value));
+    if (newOrgs.length) {
+      await fetch(`/admin/api/users/${d.id}/orgs`, {
+        method:'PUT', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({org_ids: newOrgs})
+      });
+    }
+
     closeModal('modal-user');
     showPageAlert('users-alert', `User "${username}" created.`, 'ok');
     loadUsers();
@@ -1102,9 +1267,155 @@ function showPageAlert(id, msg, type) {
   setTimeout(() => hideAlert(id), 4000);
 }
 
+// ── Organisations ─────────────────────────────────────────────────────────────
+let _editOrgId = null;
+
+async function loadOrgs() {
+  const r = await fetch('/admin/api/organisations');
+  const orgs = await r.json();
+  const tbody = document.getElementById('tbody-orgs');
+  if (!tbody) return;
+  tbody.innerHTML = orgs.map(o => `<tr>
+    <td style="color:var(--muted);font-size:.78rem">#${o.id}</td>
+    <td><strong>${esc(o.name)}</strong></td>
+    <td style="color:var(--muted)">${esc(o.sector||'—')}</td>
+    <td style="color:var(--muted)">${esc(o.region||'—')}</td>
+    <td><span style="background:rgba(0,212,255,.1);color:var(--accent);padding:.1rem .45rem;border-radius:3px;font-size:.75rem">${o.domain_count||0} domains</span></td>
+    <td>
+      <button class="btn btn-outline btn-sm" onclick="openEditOrg(${o.id})">Edit</button>
+      <button class="btn btn-outline btn-sm" onclick="openOrgDomains(${o.id},'${esc(o.name)}')">Domains</button>
+      <button class="btn btn-danger btn-sm" onclick="deleteOrg(${o.id},'${esc(o.name)}')">Delete</button>
+    </td>
+  </tr>`).join('') || '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:1.5rem">No organisations yet.</td></tr>';
+}
+
+function openCreateOrg() {
+  _editOrgId = null;
+  document.getElementById('modal-org-title').textContent = 'New Organisation';
+  document.getElementById('modal-org-submit').textContent = 'Create';
+  ['f-org-name','f-org-sector','f-org-region','f-org-desc'].forEach(id =>
+    document.getElementById(id).value = '');
+  hideAlert('modal-org-alert');
+  document.getElementById('modal-org').classList.add('open');
+}
+
+async function openEditOrg(orgId) {
+  _editOrgId = orgId;
+  const r = await fetch(`/admin/api/organisations/${orgId}`);
+  const o = await r.json();
+  document.getElementById('modal-org-title').textContent = `Edit: ${o.name}`;
+  document.getElementById('modal-org-submit').textContent = 'Save';
+  document.getElementById('f-org-name').value   = o.name   || '';
+  document.getElementById('f-org-sector').value = o.sector || '';
+  document.getElementById('f-org-region').value = o.region || '';
+  document.getElementById('f-org-desc').value   = o.description || '';
+  hideAlert('modal-org-alert');
+  document.getElementById('modal-org').classList.add('open');
+}
+
+async function submitOrgModal() {
+  const body = {
+    name:        document.getElementById('f-org-name').value.trim(),
+    sector:      document.getElementById('f-org-sector').value.trim(),
+    region:      document.getElementById('f-org-region').value.trim(),
+    description: document.getElementById('f-org-desc').value.trim(),
+  };
+  if (!body.name) { showAlert('modal-org-alert','Name is required.','error'); return; }
+  const url    = _editOrgId ? `/admin/api/organisations/${_editOrgId}` : '/admin/api/organisations';
+  const method = _editOrgId ? 'PATCH' : 'POST';
+  const r = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const d = await r.json();
+  if (d.error) { showAlert('modal-org-alert', d.error, 'error'); return; }
+  closeModal('modal-org');
+  showPageAlert('orgs-alert', _editOrgId ? 'Organisation updated.' : 'Organisation created.', 'ok');
+  loadOrgs();
+}
+
+async function openOrgDomains(orgId, orgName) {
+  const r = await fetch(`/admin/api/organisations/${orgId}`);
+  const o = await r.json();
+  document.getElementById('modal-org-domains-title').textContent = `Domains: ${orgName}`;
+  document.getElementById('f-org-domains').value = (o.domains || []).join('\n');
+  document.getElementById('modal-org-domains').dataset.orgId = orgId;
+  hideAlert('modal-org-domains-alert');
+  document.getElementById('modal-org-domains').classList.add('open');
+}
+
+async function submitOrgDomains() {
+  const orgId   = document.getElementById('modal-org-domains').dataset.orgId;
+  const raw     = document.getElementById('f-org-domains').value;
+  const domains = raw.split(/[\n,]+/).map(d => d.trim().toLowerCase()).filter(Boolean);
+  const r = await fetch(`/admin/api/organisations/${orgId}/domains`, {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({domains})
+  });
+  const d = await r.json();
+  if (d.error) { showAlert('modal-org-domains-alert', d.error, 'error'); return; }
+  closeModal('modal-org-domains');
+  showPageAlert('orgs-alert', `${domains.length} domains assigned.`, 'ok');
+  loadOrgs();
+}
+
+async function deleteOrg(orgId, name) {
+  if (!confirm(`Delete organisation "${name}"?\nUser and domain assignments will be removed. Scan data is not affected.`)) return;
+  await fetch(`/admin/api/organisations/${orgId}`, {method:'DELETE'});
+  showPageAlert('orgs-alert', 'Organisation deleted.', 'ok');
+  loadOrgs();
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 loadUsers();
 </script>
+
+<!-- Org create/edit modal -->
+<div class="modal-overlay" id="modal-org">
+  <div class="modal">
+    <div class="modal-hdr">
+      <span id="modal-org-title">Organisation</span>
+      <button class="btn-ghost btn-sm" onclick="closeModal('modal-org')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="modal-org-alert" class="alert"></div>
+      <label>Name *</label>
+      <input type="text" id="f-org-name" placeholder="e.g. Banco Santander" style="width:100%;margin-bottom:.75rem">
+      <label>Sector</label>
+      <input type="text" id="f-org-sector" placeholder="e.g. Financial Services" style="width:100%;margin-bottom:.75rem">
+      <label>Region</label>
+      <input type="text" id="f-org-region" placeholder="e.g. EU, Spain, LATAM" style="width:100%;margin-bottom:.75rem">
+      <label>Description</label>
+      <input type="text" id="f-org-desc" placeholder="Optional notes" style="width:100%;margin-bottom:.75rem">
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('modal-org')">Cancel</button>
+      <button class="btn" id="modal-org-submit" onclick="submitOrgModal()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Org domain assignment modal -->
+<div class="modal-overlay" id="modal-org-domains" data-org-id="">
+  <div class="modal">
+    <div class="modal-hdr">
+      <span id="modal-org-domains-title">Assign Domains</span>
+      <button class="btn-ghost btn-sm" onclick="closeModal('modal-org-domains')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="modal-org-domains-alert" class="alert"></div>
+      <label>Domains (one per line or comma-separated)</label>
+      <textarea id="f-org-domains" rows="10"
+        style="width:100%;background:var(--input-bg);border:1px solid var(--border);color:var(--text);padding:.5rem;border-radius:4px;font-family:monospace;font-size:.82rem;margin-top:.4rem;resize:vertical"
+        placeholder="example.com&#10;mail.example.com&#10;api.example.com"></textarea>
+      <div style="color:var(--muted);font-size:.75rem;margin-top:.4rem">
+        Domains can belong to only one organisation. Assigning here replaces any previous assignment.
+      </div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeModal('modal-org-domains')">Cancel</button>
+      <button class="btn" onclick="submitOrgDomains()">Save Domains</button>
+    </div>
+  </div>
+</div>
+
 <footer style="text-align:center;padding:1.25rem;color:var(--muted);font-size:.7rem;border-top:1px solid var(--border);margin-top:2rem">
   PQC-Monitor v{{ version }} &nbsp;·&nbsp; GPL-3.0-or-later &nbsp;·&nbsp; AI-assisted (Claude/Anthropic)
 </footer>

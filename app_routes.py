@@ -120,11 +120,46 @@ def api_assessments():
     user         = current_user()
     run_id       = request.args.get("run_id")
     service_type = request.args.get("service_type")  # T2-1 filter
+    org_id_raw   = request.args.get("org_id")
+    region       = request.args.get("region")         # filter by org.region
+
+    org_id = int(org_id_raw) if org_id_raw and org_id_raw.isdigit() else None
+
     if service_type:
-        all_ = db.get_assessments_by_service_type(run_id=run_id, service_type=service_type)
+        all_ = db.get_assessments_by_service_type(run_id=run_id,
+                                                    service_type=service_type)
+    elif org_id is not None:
+        all_ = db.get_assessments_by_org(org_id, run_id=run_id)
     else:
         all_ = db.get_latest_assessments(run_id)
+
+    # Region filter: match org.region via a domain→org join in memory
+    # (avoids a complex SQL join; assessment lists are typically <10k rows)
+    if region:
+        region_lc = region.lower().strip()
+        # Build domain→org map for the visible set
+        def _org_for(domain):
+            return db.get_domain_org(domain) or {}
+        all_ = [
+            a for a in all_
+            if (_org_for(a.get("domain", "")).get("region", "")).lower() == region_lc
+        ]
+
     return jsonify(filter_assessments(all_, user))
+
+
+@app_bp.route("/api/organisations")
+@require_auth
+def api_organisations():
+    """Return organisations visible to the current user."""
+    user = current_user()
+    db   = _db()
+    if user.is_admin:
+        return jsonify(db.get_organisations())
+    # Analysts see only their assigned orgs
+    org_ids = user.org_ids
+    orgs = [db.get_organisation(oid) for oid in org_ids if oid]
+    return jsonify([o for o in orgs if o])
 
 
 @app_bp.route("/api/domain/<domain>")
@@ -207,9 +242,15 @@ def api_dns_enumerate():
     data    = request.get_json() or {}
     domains = data.get("domains", [])
     run_id  = data.get("run_id")
-    use_wl  = data.get("use_wordlist", True)
-    use_ct  = data.get("use_ct", True)
-    use_dd  = data.get("use_dnsdumpster", True)
+
+    # Merge request flags with server-side config defaults
+    dns_cfg = _dns_config()
+    use_wl  = data.get("use_wordlist", dns_cfg.get("use_wordlist", True))
+    use_ct  = data.get("use_ct",       dns_cfg.get("use_ct", True))
+    # DNSDumpster is opt-in: only enabled if an API key is configured
+    # OR the caller explicitly passes use_dnsdumpster=true
+    dd_key  = dns_cfg.get("dnsdumpster_api_key", "")
+    use_dd  = data.get("use_dnsdumpster", bool(dd_key))
 
     if not domains:
         return jsonify({"error": "domains list is required"}), 400
@@ -225,6 +266,7 @@ def api_dns_enumerate():
                 use_wordlist=use_wl,
                 use_ct=use_ct,
                 use_dnsdumpster=use_dd,
+                dnsdumpster_api_key=dd_key,
             )
             results[domain] = enum_result.to_dict()
             if run_id:

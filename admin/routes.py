@@ -610,7 +610,7 @@ select option { background:var(--panel); }
     </div>
 
     <!-- ── Organisations view ── -->
-    <div id="view-orgs" class="view" style="display:none">
+    <div id="view-orgs" class="view">
       <div class="page-hdr">
         <div class="page-title">Organisations</div>
         <button class="btn-primary btn-sm" onclick="openCreateOrg()">+ New Organisation</button>

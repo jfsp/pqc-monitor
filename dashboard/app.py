@@ -1216,9 +1216,6 @@ function renderDistChart(s) {
 }
 
 // ─── Assessments table ───────────────────────────────────────────────────────
-let _orgsCache = [];   // [{id, name, region}, ...]
-let _activeOrg = '';
-let _activeRegion = '';
 
 async function loadAssessments(runId) {
   const url = runId ? `/api/assessments?run_id=${runId}` : '/api/assessments';

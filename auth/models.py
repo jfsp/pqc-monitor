@@ -36,6 +36,8 @@ PERMISSIONS = {
         "admin.panel",          # access the /admin section
         "audit.view",           # read audit log
         "settings.manage",      # system configuration
+        "org.manage",           # create / edit / delete organisations
+        "org.view_all",         # see all organisations and their members
     },
     ROLE_ANALYST: {
         "domain_list.view_own", # see only assigned domain lists
@@ -43,6 +45,7 @@ PERMISSIONS = {
         "ct.view_own",          # CT data for assigned domains
         "roadmap.view_own",     # roadmaps for assigned domains
         "report.export",        # download reports (scoped to own domains)
+        "org.view_own",         # see own org assignments only
     },
 }
 
@@ -64,6 +67,7 @@ class User:
     created_at: str = ""
     last_login: str = ""
     domain_list_ids: list = field(default_factory=list)  # assigned list IDs
+    org_ids: list         = field(default_factory=list)  # assigned org IDs
 
     # Never serialise password_hash outside auth layer
     password_hash: str = field(default="", repr=False)
@@ -86,6 +90,7 @@ class User:
             "created_at":      self.created_at,
             "last_login":      self.last_login,
             "domain_list_ids": self.domain_list_ids,
+            "org_ids":         self.org_ids,
         }
         if include_sensitive:
             d["password_hash"] = self.password_hash

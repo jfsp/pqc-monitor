@@ -196,7 +196,12 @@ class AuthStore:
                 "SELECT domain_list_id FROM user_domain_lists WHERE user_id=?",
                 (d["id"],)
             ).fetchall()
-        dl_ids = [r["domain_list_id"] for r in dl_rows]
+            org_rows = conn.execute(
+                "SELECT org_id FROM user_organisations WHERE user_id=?",
+                (d["id"],)
+            ).fetchall()
+        dl_ids  = [r["domain_list_id"] for r in dl_rows]
+        org_ids = [r["org_id"] for r in org_rows]
         return User(
             id=d["id"],
             username=d["username"],
@@ -208,7 +213,68 @@ class AuthStore:
             last_login=d.get("last_login") or "",
             password_hash=d["password_hash"],
             domain_list_ids=dl_ids,
+            org_ids=org_ids,
         )
+
+    def set_user_orgs(self, user_id: int, org_ids: list,
+                       granted_by: int = None):
+        """Replace a user's full org assignment atomically."""
+        ts = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM user_organisations WHERE user_id=?", (user_id,)
+            )
+            for oid in org_ids:
+                conn.execute(
+                    "INSERT OR IGNORE INTO user_organisations "
+                    "(user_id, org_id, granted_at, granted_by) VALUES (?,?,?,?)",
+                    (user_id, oid, ts, granted_by)
+                )
+
+    def get_user_domains(self, user_id: int) -> list[str]:
+        """
+        Return the flat list of domain strings accessible to a user,
+        derived from:
+          1. domain lists directly assigned to the user
+          2. domain_organisations rows for orgs the user belongs to
+        Results are deduplicated and sorted.
+        """
+        import json
+        domains: list[str] = []
+        seen: set[str] = set()
+
+        with self._connect() as conn:
+            # Domain-list path (existing)
+            dl_rows = conn.execute("""
+                SELECT dl.domains_json
+                FROM user_domain_lists udl
+                JOIN domain_lists dl ON dl.id = udl.domain_list_id
+                WHERE udl.user_id = ?
+            """, (user_id,)).fetchall()
+            for row in dl_rows:
+                try:
+                    for d in json.loads(row["domains_json"]):
+                        if d not in seen:
+                            seen.add(d)
+                            domains.append(d)
+                except Exception:
+                    pass
+
+            # Organisation path (new)
+            org_rows = conn.execute("""
+                SELECT DISTINCT do2.domain
+                FROM user_organisations uo
+                JOIN domain_organisations do2 ON do2.org_id = uo.org_id
+                WHERE uo.user_id = ?
+                ORDER BY do2.domain
+            """, (user_id,)).fetchall()
+            for row in org_rows:
+                d = row["domain"]
+                if d not in seen:
+                    seen.add(d)
+                    domains.append(d)
+
+        return sorted(domains)
 
     # ── Authentication ────────────────────────────────────────────────────────
 
@@ -303,31 +369,6 @@ class AuthStore:
                     "(user_id, domain_list_id, granted_at, granted_by) VALUES (?,?,?,?)",
                     (user_id, dl_id, ts, granted_by)
                 )
-
-    def get_user_domains(self, user_id: int) -> list[str]:
-        """
-        Return the flat list of domain strings accessible to a user,
-        derived from all their assigned domain lists.
-        """
-        import json
-        with self._connect() as conn:
-            rows = conn.execute("""
-                SELECT dl.domains_json
-                FROM user_domain_lists udl
-                JOIN domain_lists dl ON dl.id = udl.domain_list_id
-                WHERE udl.user_id = ?
-            """, (user_id,)).fetchall()
-        domains: list[str] = []
-        seen: set[str] = set()
-        for row in rows:
-            try:
-                for d in json.loads(row["domains_json"]):
-                    if d not in seen:
-                        seen.add(d)
-                        domains.append(d)
-            except Exception:
-                pass
-        return domains
 
     # ── Audit log ─────────────────────────────────────────────────────────────
 

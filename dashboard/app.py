@@ -613,7 +613,15 @@ footer {
         <div class="panel-title">Domain Assessments
           <span id="filter-badge" style="display:none;margin-left:.6rem;background:rgba(0,212,255,.15);color:var(--accent);padding:.15rem .5rem;border-radius:4px;font-size:.72rem;font-family:var(--font-sans)"></span>
         </div>
-        <div style="display:flex;gap:.5rem;align-items:center">
+        <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+          <select id="filter-org" onchange="applyDropdownFilters()"
+            style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:.25rem .5rem;border-radius:4px;font-size:.78rem">
+            <option value="">All Organisations</option>
+          </select>
+          <select id="filter-region" onchange="applyDropdownFilters()"
+            style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:.25rem .5rem;border-radius:4px;font-size:.78rem">
+            <option value="">All Regions</option>
+          </select>
           <button class="btn-outline" id="btn-clear-filter" style="display:none" onclick="setFilter(null)">✕ Clear filter</button>
           <button class="btn-outline" onclick="loadAssessments()">↻ Refresh</button>
         </div>
@@ -1141,6 +1149,9 @@ let discoveredDomains = [];
 let charts = {};
 let _allAssessments  = [];   // full unfiltered dataset
 let _activeFilter    = null; // 'critical'|'weak'|'moderate'|'ready'|'pqc'|null
+let _orgsCache       = [];   // populated by loadAssessments
+let _activeOrg       = '';
+let _activeRegion    = '';
 let _sortCol         = 'score';
 let _sortDir         = 'asc'; // 'asc'|'desc'
 
@@ -1205,15 +1216,50 @@ function renderDistChart(s) {
 }
 
 // ─── Assessments table ───────────────────────────────────────────────────────
+let _orgsCache = [];   // [{id, name, region}, ...]
+let _activeOrg = '';
+let _activeRegion = '';
+
 async function loadAssessments(runId) {
   const url = runId ? `/api/assessments?run_id=${runId}` : '/api/assessments';
-  const r = await fetch(url);
+  const [r, orgsR] = await Promise.all([
+    fetch(url),
+    fetch('/api/organisations').catch(() => ({ json: () => [] }))
+  ]);
   const data = await r.json();
+  _orgsCache = await orgsR.json().catch(() => []);
   _allAssessments = data;
   _activeFilter   = null;
+  _activeOrg      = '';
+  _activeRegion   = '';
+  populateOrgDropdown();
+  populateRegionDropdown();
   updateFilterUI();
   applyFilterAndSort();
   renderTLSChart(data);
+}
+
+function populateOrgDropdown() {
+  const sel = document.getElementById('filter-org');
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All Organisations</option>' +
+    _orgsCache.map(o => `<option value="${o.id}" ${current == o.id ? 'selected' : ''}>${esc(o.name)}</option>`).join('');
+}
+
+function populateRegionDropdown() {
+  const sel = document.getElementById('filter-region');
+  if (!sel) return;
+  const regions = [...new Set(_orgsCache.map(o => o.region).filter(Boolean))].sort();
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All Regions</option>' +
+    regions.map(r => `<option value="${r}" ${current === r ? 'selected' : ''}>${r}</option>`).join('');
+}
+
+function applyDropdownFilters() {
+  _activeOrg    = document.getElementById('filter-org')?.value    || '';
+  _activeRegion = document.getElementById('filter-region')?.value || '';
+  applyFilterAndSort();
 }
 
 function setFilter(level) {
@@ -1272,6 +1318,28 @@ function applyFilterAndSort() {
     items = items.filter(a => a.has_pqc);
   } else if (_activeFilter) {
     items = items.filter(a => (a.level || '').toLowerCase() === _activeFilter);
+  }
+
+  // Org filter (client-side using cached org→domain mapping)
+  if (_activeOrg) {
+    const orgId = parseInt(_activeOrg);
+    const org = _orgsCache.find(o => o.id === orgId);
+    // Ask server to give us org-filtered data
+    // For instant client-side filtering, we rely on the domain_org_id field
+    // that the server now attaches (or fall back to refetch)
+    items = items.filter(a => a.org_id == orgId);
+  }
+
+  // Region filter (via org metadata)
+  if (_activeRegion) {
+    const domainsByRegion = new Set(
+      _orgsCache
+        .filter(o => o.region === _activeRegion)
+        .flatMap(o => o.domains || [])
+    );
+    if (domainsByRegion.size > 0) {
+      items = items.filter(a => domainsByRegion.has(a.domain));
+    }
   }
 
   // Sort
@@ -1663,6 +1731,7 @@ function tryJSON(v) {
   try { return JSON.parse(v); } catch { return null; }
 }
 function ucfirst(s) { return s ? s[0].toUpperCase() + s.slice(1) : ''; }
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function scoreClass(s) {
   if (s <= 25) return 'critical'; if (s <= 50) return 'weak';
   if (s <= 75) return 'moderate'; return 'ready';

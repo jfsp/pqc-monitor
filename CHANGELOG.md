@@ -12,6 +12,72 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.0] — 2026-06-12
+
+### Added
+
+**DNSDumpster API key support**
+
+- `scanner/dns_enumerator.py`: split `_dnsdumpster_subdomains()` into two paths:
+  `_dnsdumpster_api()` (official REST endpoint, requires paid key) and
+  `_dnsdumpster_scrape()` (unofficial CSRF/HTML fallback, development only).
+  The top-level wrapper routes based on whether a key is present.
+- `use_dnsdumpster` now defaults to `False` in `enumerate_domain()`. It is
+  automatically enabled when `dnsdumpster_api_key` is configured; otherwise
+  callers must opt in explicitly.
+- `config/config.yaml.example`: new `dns_enumeration` block with
+  `dnsdumpster_api_key`, `use_wordlist`, `use_ct` keys.
+- `pqc_monitor.py` `load_config()`: reads `dns_enumeration.*` keys;
+  `PQC_DNSDUMPSTER_KEY` environment variable overrides config file.
+- `app_factory.py`: populates `DNS_ENUM_CONFIG` dict in `app.config`.
+- `app_routes.py` `POST /api/dns-enumerate`: reads server config defaults;
+  `use_dnsdumpster` is derived from key presence rather than defaulting True.
+
+**Organisation grouping (T-ORG)**
+
+- Migration v14: three new tables — `organisations` (name, sector, region,
+  description), `domain_organisations` (domain↔org many-to-one), and
+  `user_organisations` (user↔org many-to-many). Cascading deletes on all FK
+  relationships.
+- `data/database.py`: full organisation CRUD (`create_organisation`,
+  `get_organisations`, `get_organisation`, `update_organisation`,
+  `delete_organisation`); domain assignment (`set_org_domains`,
+  `get_org_domains`, `get_domain_org`, `get_assessments_by_org`);
+  user assignment helpers (`set_user_orgs`, `get_user_org_ids`,
+  `get_org_domains_for_user`).
+  `get_latest_assessments()` now includes `org_id`, `org_name`, `org_region`
+  columns via LEFT JOIN; `get_organisations()` includes the `domains` list.
+- `auth/models.py`: `org.manage` and `org.view_all` added to admin permissions;
+  `org.view_own` added to analyst permissions. `User` dataclass gains
+  `org_ids: list` field; `to_dict()` includes `org_ids`.
+- `auth/store.py`: `_row_to_user()` loads `org_ids`; `set_user_orgs()` method
+  for atomic org assignment; `get_user_domains()` now unions domain-list access
+  and org-derived access, deduplicating results.
+- `admin/routes.py`: 7 new admin API endpoints (`GET/POST /api/organisations`,
+  `GET/PATCH/DELETE /api/organisations/<id>`,
+  `PUT /api/organisations/<id>/domains`,
+  `GET/PUT /api/users/<uid>/orgs`).
+  Admin panel: new "🏢 Organisations" sidebar tab with create/edit/delete/domain-
+  assignment modals; user edit modal gains an Organisations checkbox group.
+- `app_routes.py`: `GET /api/assessments` gains `?org_id=` and `?region=`
+  query filters; new `GET /api/organisations` endpoint (admin sees all, analysts
+  see only their assigned orgs).
+- `dashboard/app.py`: Org and Region `<select>` dropdowns added to the Domain
+  Assessments toolbar; `loadAssessments()` fetches `/api/organisations` in
+  parallel and populates both dropdowns; `applyDropdownFilters()` and
+  `populateOrgDropdown()` / `populateRegionDropdown()` wired up; `esc()`
+  helper added.
+
+### Migration notes
+
+Schema now at v14. Existing databases auto-upgrade on first connection.
+All new tables are nullable/optional — no existing data is affected.
+Analyst access model: users inherit domain visibility from *both* their
+domain list assignments (existing) and their org assignments (new). The
+union is deduplicated.
+
+---
+
 ## [1.2.0] — 2026-06-11
 
 ### Added

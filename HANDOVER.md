@@ -1,8 +1,8 @@
 # PQC-Monitor — Developer Handover Document
 
-**Version:** 1.2.0  
+**Version:** 1.3.0  
 **Date:** 2026-06-11  
-**Status:** 408/408 tests passing  
+**Status:** 452/452 tests passing  
 **Purpose:** Context transfer for continuing development in a new session  
 **Repository:** https://github.com/jfsp/pqc-monitor
 
@@ -78,6 +78,7 @@ Types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`
 | 1.1.2 | Fix: CT/Roadmap/Settings tabs empty (stray `return app` before blueprint registration); fix: `showView` used implicit `event.target`; added dashboard card filtering and sortable columns |
 | 1.1.3 | Fix: CT/Roadmap/Settings still empty — `</div>` missing from `view-trends`, making CT/Roadmap/Settings children of trends in DOM |
 | 1.2.0 | T2-1: `service_type` column on assessments (migration v13), port→service_type map, `?service_type=` filter on `GET /api/assessments`; T3-1: `scanner/dns_enumerator.py` (CT SANs + wordlist + DNSDumpster), `POST /api/dns-enumerate`, `dns_enumerate` flag on `POST /api/save-domains` |
+| 1.3.0 | DNSDumpster official API key support (`dns_enumeration.dnsdumpster_api_key` in config, `PQC_DNSDUMPSTER_KEY` env var; `use_dnsdumpster` now defaults to `False`); Organisation grouping (migration v14: `organisations`, `domain_organisations`, `user_organisations` tables; full CRUD API; admin "🏢 Organisations" panel tab; `?org_id=` and `?region=` filters on assessments; org/region dropdowns in dashboard; analyst org scoping in RBAC) |
 
 ---
 
@@ -85,7 +86,7 @@ Types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`
 
 ```
 pqc-monitor/
-├── VERSION                     # "1.2.0" — ONLY file to edit when releasing
+├── VERSION                     # "1.3.0" — ONLY file to edit when releasing
 ├── version.py                  # reads VERSION, exports VERSION/__version__
 ├── pqc_monitor.py              # CLI entry point (12 commands)
 ├── app_factory.py              # Flask app factory — the production entry point
@@ -587,6 +588,47 @@ if not user.is_admin:
 
 ---
 
+### 9.6 DNSDumpster integration
+
+The DNS enumerator (`scanner/dns_enumerator.py`) supports two paths:
+
+**Official API (recommended for production):**
+Set `dns_enumeration.dnsdumpster_api_key` in `config.yaml` or export
+`PQC_DNSDUMPSTER_KEY`. The module calls `https://api.dnsdumpster.com/domain/{domain}`
+with `Authorization: Bearer <key>`. Obtain a key at https://dnsdumpster.com/api/
+
+**HTML scrape (fallback, development only):**
+When no key is configured, the module falls back to a CSRF-token extraction
+and HTML POST to `dnsdumpster.com`. This is fragile, unofficial, and may break
+without notice. It is disabled by default (`use_dnsdumpster=False` unless a key
+is present or the caller explicitly passes `use_dnsdumpster=True`).
+
+In the UI, DNSDumpster is used via:
+- `POST /app/api/dns-enumerate` — the server reads the key from `DNS_ENUM_CONFIG`;
+  `use_dnsdumpster` is True only when a key is configured.
+- `POST /app/api/save-domains` with `dns_enumerate: true` — same logic.
+
+There is no UI field for the API key; it is a server-side configuration only.
+Exposing API keys in the browser would allow any logged-in user to enumerate
+arbitrary domains against the operator's paid quota.
+
+### 9.7 Organisation scoping interaction with domain lists
+
+Analyst access is the **union** of two sources:
+1. Domain lists explicitly assigned to the user (`user_domain_lists` table)
+2. Domains belonging to organisations the user is assigned to (`user_organisations` →
+   `domain_organisations`)
+
+The union is deduplicated in `AuthStore.get_user_domains()`. This means an admin
+can assign access via either mechanism without conflict. If a domain is in both
+sources it appears only once.
+
+The `?org_id=` filter on `GET /api/assessments` is an **additional** filter
+on top of RBAC scoping — a user cannot use it to see domains outside their
+allowed set.
+
+---
+
 ## 10. Planned Features — Prioritised Backlog
 
 Features are ordered from smallest to largest change surface. Items marked
@@ -785,6 +827,73 @@ instead of `render_template_string()`.
 
 ---
 
+### Tier 1 additions — Config / data changes only
+
+**[T1-5] Asset Criticality Weighting** *(Tier 1 — High Value / Low-Medium Complexity)*
+
+**Business value:** Currently `assessments` treats `www.bank.es:443` and `intranet-wiki.bank.es:80` identically. CISOs need the roadmap to reflect real business risk. A domain tagged "Critical Payment Gateway" should surface at the top of Phase 1 regardless of its raw score.
+
+**Implementation:**
+- Migration: `ALTER TABLE assessments ADD COLUMN criticality TEXT DEFAULT 'normal'` — values: `critical | high | normal | low`.
+- Admin UI: add criticality dropdown to the domain detail panel (or a bulk-edit modal).
+- `roadmap/generator.py`: multiply phase assignment score threshold by criticality factor (e.g. critical assets enter Phase 1 at a higher score threshold, forcing earlier action).
+- Dashboard: add criticality colour indicator column to the domain table; filter pill.
+- `GET /api/assessments`: add `?criticality=` filter.
+
+**Code surface:** 3-4 files, ~150 lines, 1 migration. No new modules. Directly unlocks more useful roadmap output.
+
+---
+
+### Tier 2 additions — New modules, high value
+
+**[T2-4] Executive PDF Reporting** *(Tier 2 — High Value / Medium Complexity)*
+
+**Business value:** CISOs present to boards. The current exports (CSV, JSON) are engineer-facing. A one-page PDF that says "42% of critical services are not PQC-ready, deadline BSI 2026" with a traffic-light table eliminates manual PowerPoint work.
+
+**Implementation:**
+- New module: `reports/pdf_report.py` using `reportlab` (already commonly available) or `weasyprint` (HTML→PDF, easier to style).
+- Template: cover page (org name, date, score summary), executive traffic-light table (domain | criticality | level | expiry), phase summary card, regulatory deadline countdown (BSI 2026, NIST 2030).
+- `GET /api/export?format=pdf` route in `app_routes.py`.
+- Admin: "Export PDF" button in dashboard toolbar.
+- Optional: per-org PDF (filter by org before rendering).
+
+**Dependencies:** `reportlab` or `weasyprint` + `Pillow`. Requires `pdf` skill.
+
+**Code surface:** 1 new module (~250 lines), 1 route addition, dashboard button. No schema change. Medium effort due to layout work; low risk.
+
+**[T2-5] Budget and Resource Estimation Integration** *(Tier 2 — High Value / High Complexity)*
+
+**Business value:** The roadmap already outputs phases and effort-day estimates. The missing step for a CISO is translating "Phase 1: 45-90 days effort" into "€180,000-360,000 at blended day rate" and "3 FTE for 6 months". This makes PQC migration a line item in the budget cycle rather than an abstract security recommendation.
+
+**Implementation:**
+- New config block: `budget.day_rate_eur`, `budget.currency`, `budget.fte_days_per_year`.
+- `roadmap/generator.py`: add `cost_min_eur`, `cost_max_eur`, `fte_months` to `RoadmapItem` and `DomainRoadmap` dataclasses.
+- New `roadmap/budget_estimator.py`: maps task type (cert replacement, TLS config, library upgrade, HSM procurement) to effort multipliers and procurement cost bands.
+- `GET /api/roadmap/export?format=budget_csv` — one row per phase, columns: phase, task_type, effort_days, cost_eur_min, cost_eur_max, fte_months, regulatory_deadline.
+- Dashboard: add cost column to roadmap table (hidden by default, shown when budget config is set).
+
+**Code surface:** 1 new module (~200 lines), extend `generator.py` (~100 lines), 1 config block, 1 export route, optional dashboard column. Schema: add 3 columns to `roadmaps` table. High complexity in the cost modelling logic; the rest is straightforward.
+
+---
+
+### Tier 3 additions — Medium value
+
+**[T3-4] Sector Benchmarking** *(Tier 3 — Medium Value / Low-Medium Complexity)*
+
+**Business value:** The `scan_runs` table already stores `sector` and `region`. An aggregated benchmarking view lets a CISO say "our average PQC score is 61, the Financial Services EU average is 48 — we are ahead of our peers". This is a powerful justification tool for security investment.
+
+**Implementation:**
+- `data/database.py`: new `get_sector_benchmarks()` method — aggregate `AVG(score)`, `SUM(has_pqc)`, level distribution by `(sector, region)` across all scan runs.
+- `GET /api/benchmarks` endpoint returning sector aggregates.
+- New dashboard view `view-benchmarks`: bar chart (Chart.js, already loaded) of sector averages; highlight the current organisation's position.
+- Optional: anonymisation guard — only show benchmark if ≥3 distinct organisations contribute (avoids de-anonymisation in small sectors).
+
+**Note:** Benchmarking is only meaningful when multiple organisations are scanned from the same instance (enterprise/sector-wide deployment). For single-org deployments, this view would be empty or trivial. The feature is most valuable in a managed-service or sector-regulator deployment model.
+
+**Code surface:** 1 new DB method, 1 new route, 1 new dashboard view (~150 lines JS/HTML). No schema change. Low implementation risk; medium strategic value depending on deployment model.
+
+---
+
 ## Appendix A — Running the Test Suite
 
 ```bash
@@ -800,7 +909,7 @@ python3 tests/seed_demo_data.py --runs 3
 python3 pqc_monitor.py dashboard  # → http://localhost:5000  admin/changeme123
 ```
 
-**Test count:** 366 (as of v1.1.3)  
+**Test count:** 452 (as of v1.3.0)  
 **Test files and what they cover:**
 
 | File | Coverage |
@@ -811,6 +920,8 @@ python3 pqc_monitor.py dashboard  # → http://localhost:5000  admin/changeme123
 | `test_roadmap.py` | Phase assignment, effort calculation, score projection, text rendering, DB storage, API endpoints |
 | `test_scan_quality.py` | Chain validator, cipher enum, CDN detector, domain_extra DB |
 | `test_scanner.py` | TLS probe, crypto extractor, STARTTLS probe |
+| `test_t2_t3_features.py` | T2-1 service_type tagging + T3-1 DNS enumerator (42 tests) |
+| `test_orgs_and_dns.py` | Organisation CRUD, user↔org RBAC, admin API, assessment filters, DNSDumpster API key (44 tests) |
 
 ---
 

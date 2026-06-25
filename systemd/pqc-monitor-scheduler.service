@@ -43,7 +43,7 @@ Environment=PYTHONUNBUFFERED=1
 # Wait up to 60 s for the web service to create the database file before
 # launching the scheduler. Path and timeout are positional args to the script
 # so systemd never needs to expand shell variables in this directive.
-ExecStartPre=/opt/pqc-monitor/scripts/wait-for-db.sh /opt/pqc-monitor/data/pqc_monitor.db 60
+ExecStartPre=/opt/pqc-monitor/scripts/wait-for-db.sh /var/lib/pqc-monitor/pqc_monitor.db 60
 
 ExecStart=/opt/pqc-monitor/.venv/bin/python3 \
     /opt/pqc-monitor/pqc_monitor.py scheduler-daemon
@@ -53,7 +53,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/opt/pqc-monitor/data /var/log/pqc-monitor
+ReadWritePaths=/var/lib/pqc-monitor /var/log/pqc-monitor
 CapabilityBoundingSet=
 AmbientCapabilities=
 # Scheduler makes outbound TCP connections for scanning

@@ -31,6 +31,8 @@ scheduler:
   default_interval_days: 90   # every ~3 months
 
 database:
+  # Production: /var/lib/pqc-monitor/pqc_monitor.db (set by install.sh)
+  # Development: leave as-is (relative to project root)
   path: "data/pqc_monitor.db"
 
 ai:
@@ -54,4 +56,6 @@ guidelines:
 
 logging:
   level: INFO
+  # Production: /var/log/pqc-monitor/pqc_monitor.log (set by install.sh)
+  # Development: relative to project root
   file: "data/pqc_monitor.log"

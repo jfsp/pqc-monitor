@@ -5,7 +5,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-DB="${1:-/opt/pqc-monitor/data/pqc_monitor.db}"
+DB="${1:-/var/lib/pqc-monitor/pqc_monitor.db}"
 LIMIT="${2:-60}"
 waited=0
 

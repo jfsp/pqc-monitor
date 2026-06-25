@@ -290,7 +290,7 @@ Edit `/etc/pqc-monitor/config.yaml`:
 
 ```yaml
 database:
-  path: "/opt/pqc-monitor/data/pqc_monitor.db"
+  path: "/var/lib/pqc-monitor/pqc_monitor.db"
 
 scanning:
   timeout: 10

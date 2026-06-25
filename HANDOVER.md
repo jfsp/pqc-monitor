@@ -1,9 +1,9 @@
 # PQC-Monitor — Developer Handover Document
 
-**Version:** 1.3.0  
-**Date:** 2026-06-11  
-**Status:** 452/452 tests passing  
-**Purpose:** Context transfer for continuing development in a new session  
+**Version:** 1.3.1
+**Date:** 2026-06-25
+**Status:** 452/452 tests passing
+**Purpose:** Context transfer for continuing development in a new session
 **Repository:** https://github.com/jfsp/pqc-monitor
 
 ---
@@ -27,13 +27,13 @@
 
 PQC-Monitor is an open-source platform for assessing the Post-Quantum Cryptography (PQC) readiness of internet-facing services within a sector or region. It performs passive TLS/certificate reconnaissance, scores each domain against regulatory guidelines (NIST SP 800-131Ar3, BSI TR-02102-1, CCN-STIC-221), tracks migration progress over time, and generates actionable migration roadmaps.
 
-**Technology stack:**  
+**Technology stack:**
 Python 3.10+ · Flask 3.x · SQLite (WAL mode) · Gunicorn (production) · Werkzeug password hashing · APScheduler · Chart.js (dashboard) · Jinja2 templates
 
-**Deployment model:**  
-Two systemd services — `pqc-monitor-web` (Gunicorn) and `pqc-monitor-scheduler` (APScheduler daemon) — managed by `pqc-monitor.target`. Nginx reverse proxy for TLS termination. Runs as the `pqcmonitor` system user under `/opt/pqc-monitor`.
+**Deployment model:**
+Two systemd services — `pqc-monitor-web` (Gunicorn) and `pqc-monitor-scheduler` (APScheduler daemon) — managed by `pqc-monitor.target`. Nginx reverse proxy for TLS termination. Runs as the `pqcmonitor` system user under `/opt/pqc-monitor`. Runtime data stored under `/var/lib/pqc-monitor/`.
 
-**License:** GPL-3.0-or-later  
+**License:** GPL-3.0-or-later
 **AI-assisted:** Substantial portions generated with Claude (Anthropic). All code reviewed by developer.
 
 ### Source Repository
@@ -45,7 +45,7 @@ Two systemd services — `pqc-monitor-web` (Gunicorn) and `pqc-monitor-scheduler
 When continuing work with Claude, the expected workflow is:
 
 1. Share the updated zip **or** paste individual files that need changing
-2. Claude delivers modified files **plus** ready-to-apply git commits  
+2. Claude delivers modified files **plus** ready-to-apply git commits
    (one logical commit per concern, conventional commit format: `type(scope): message`)
 3. Stage and commit each change:
    ```bash
@@ -78,7 +78,116 @@ Types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`
 | 1.1.2 | Fix: CT/Roadmap/Settings tabs empty (stray `return app` before blueprint registration); fix: `showView` used implicit `event.target`; added dashboard card filtering and sortable columns |
 | 1.1.3 | Fix: CT/Roadmap/Settings still empty — `</div>` missing from `view-trends`, making CT/Roadmap/Settings children of trends in DOM |
 | 1.2.0 | T2-1: `service_type` column on assessments (migration v13), port→service_type map, `?service_type=` filter on `GET /api/assessments`; T3-1: `scanner/dns_enumerator.py` (CT SANs + wordlist + DNSDumpster), `POST /api/dns-enumerate`, `dns_enumerate` flag on `POST /api/save-domains` |
-| 1.3.0 | DNSDumpster official API key support (`dns_enumeration.dnsdumpster_api_key` in config, `PQC_DNSDUMPSTER_KEY` env var; `use_dnsdumpster` now defaults to `False`); Organisation grouping (migration v14: `organisations`, `domain_organisations`, `user_organisations` tables; full CRUD API; admin "🏢 Organisations" panel tab; `?org_id=` and `?region=` filters on assessments; org/region dropdowns in dashboard; analyst org scoping in RBAC) |
+| 1.3.0 | DNSDumpster official API key support; Organisation grouping (migration v14); full org CRUD API; admin panel tab; `?org_id=` and `?region=` filters; analyst org scoping in RBAC |
+| 1.3.1 | Fix: production deployment — systemd unit errors, database path, session persistence, reverse proxy headers. See §2.1 for full details. |
+
+### 2.1 v1.3.1 — Deployment fixes (2026-06-25)
+
+This release contains no functional changes. All changes fix production deployment issues discovered on first deployment to a Ubuntu server behind nginx.
+
+**Files changed:** `systemd/pqc-monitor-web.service`, `systemd/pqc-monitor-scheduler.service`, `scripts/wait-for-db.sh` (new), `data/database.py`, `app_factory.py`, `pqc_monitor.py`, `install.sh`, `config/config.yaml.example`
+
+#### Fix 1 — systemd `${VAR:-default}` syntax not supported (`pqc-monitor-web.service`)
+
+`ExecStart` arguments go directly to `execve()` — no shell involved. The bash `${VAR:-default}` fallback syntax is not understood by systemd's own `${}` expansion. Gunicorn received the literal string `${PQC_WEB_WORKERS:-2}` as the worker count, and `${PQC_BIND:-127.0.0.1:5000}` was mangled to `-127.0.0.1:5000`.
+
+**Fix:** Declare defaults as `Environment=` lines before `EnvironmentFile=`. systemd processes them in order, so the `.env` file overrides the built-in defaults when the variable is set there — same semantic, correct syntax.
+
+```ini
+Environment=PQC_BIND=127.0.0.1:5000
+Environment=PQC_WEB_WORKERS=2
+EnvironmentFile=/etc/pqc-monitor/pqc-monitor.env
+```
+
+#### Fix 2 — `StartLimitIntervalSec`/`StartLimitBurst` in wrong section (both service files)
+
+These keys belong in `[Unit]`, not `[Service]`. They were moved from `[Service]` in systemd v230. Modern systemd ignores them in `[Service]` with a warning. Moved to `[Unit]` in both service files.
+
+#### Fix 3 — Scheduler fails if web service has not yet created the database
+
+The scheduler called `Database(db_path)` at startup, which calls `sqlite3.connect()`. If the web service had not yet run to create the DB, this failed with `OperationalError: unable to open database file`.
+
+**Fix:** New script `scripts/wait-for-db.sh` is invoked as `ExecStartPre` in the scheduler unit. It polls for the DB file every 2 seconds (up to 60 seconds) before `ExecStart` runs. The script is a separate file rather than an inline shell command because systemd expands `${...}` in `ExecStartPre` directives before passing to bash, destroying bash variables like `$waited` and arithmetic like `$((waited % 10))`.
+
+Additionally added `Requires=pqc-monitor-web.service` so systemd does not attempt to start the scheduler if the web service is not running.
+
+#### Fix 4 — Database path resolution is CWD-dependent (`data/database.py`)
+
+`Database.__init__` stored the raw `db_path` string in `self.db_path`, then called `sqlite3.connect(self.db_path)` on every `_connect()`. The `os.makedirs()` call used `os.path.abspath()` (resolving against the master process CWD) but that resolved path was discarded. When gunicorn forked workers their CWD differed, so `sqlite3.connect("data/pqc_monitor.db")` resolved to a different path.
+
+**Fix:** Resolve to absolute path once at construction time:
+```python
+def __init__(self, db_path: str = DEFAULT_DB_PATH):
+    self.db_path = os.path.abspath(db_path)
+    os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+```
+
+#### Fix 5 — `app_factory.create_app()` ignores `config.yaml` when called by gunicorn (`app_factory.py`)
+
+Gunicorn calls `create_app()` with no arguments (`cfg = {}`), so `db_path` fell back to the hardcoded string `"data/pqc_monitor.db"`, ignoring `/etc/pqc-monitor/config.yaml` entirely.
+
+**Fix:** Load config when no dict is passed:
+```python
+def create_app(config: dict = None) -> Flask:
+    if config is None:
+        try:
+            from pqc_monitor import load_config
+            cfg = load_config()
+        except Exception:
+            cfg = {}
+    else:
+        cfg = config
+```
+
+#### Fix 6 — Relative `db_path` in `load_config()` is CWD-dependent (`pqc_monitor.py`)
+
+CLI commands using a relative `db_path` from config resolved it against the process CWD at each `Database()` call. Now resolved against `ROOT` (the app directory) at config load time:
+
+```python
+raw_db_path = raw.get("database", {}).get("path", "data/pqc_monitor.db")
+db_path = raw_db_path if os.path.isabs(raw_db_path) \
+          else os.path.join(ROOT, raw_db_path)
+```
+
+#### Fix 7 — Database stored alongside code in `/opt/pqc-monitor/data/` (`install.sh`)
+
+Runtime-writable data should not live inside the code directory. `ProtectSystem=full` makes the app directory read-only at runtime, then `ReadWritePaths=/opt/pqc-monitor/data` punched a writable hole back in.
+
+**Fix:** Runtime data moved to `/var/lib/pqc-monitor/`:
+- `install.sh` creates `/var/lib/pqc-monitor/` (owned `pqcmonitor:pqcmonitor 750`)
+- `install.sh` no longer creates `$INSTALL_DIR/data/` subdirectories
+- `install.sh` patches `config.yaml` database path to `/var/lib/pqc-monitor/pqc_monitor.db`
+- `install.sh` patches `config.yaml` log path to `/var/log/pqc-monitor/pqc_monitor.log`
+- `install.sh` initialises the database as `pqcmonitor` before starting services
+- Both service units: `ReadWritePaths=/var/lib/pqc-monitor /var/log/pqc-monitor`
+
+#### Fix 8 — Gunicorn control socket tries to write to `/home/pqcmonitor` (`pqc-monitor-web.service`)
+
+The `pqcmonitor` service user is created with `--no-create-home`. Gunicorn's worker heartbeat mechanism creates a temporary socket file in the process home directory as a fallback. `PrivateTmp=true` already provides a private `/tmp`.
+
+**Fix:** `--worker-tmp-dir /tmp` added to the gunicorn `ExecStart` invocation.
+
+#### Fix 9 — `Type=notify` with plain gunicorn causes systemd timeout (`pqc-monitor-web.service`)
+
+`Type=notify` tells systemd to wait for an `sd_notify(READY=1)` signal before marking the service started. Standard gunicorn does not send this signal. The service started correctly but systemd would eventually time out waiting.
+
+**Fix:** Changed to `Type=simple`. Gunicorn is a long-running foreground process — `simple` is the correct type.
+
+#### Fix 10 — Login loop: session cookie not persisting after successful auth (`app_factory.py`)
+
+Symptom: POST /login returns 302, GET /app/ immediately redirects back to /login. Login succeeds but the browser drops the session cookie on the redirect.
+
+Root cause: Flask sits behind nginx (TLS termination). Without `ProxyFix`, Flask sees all traffic as plain HTTP from the loopback, so `request.url` in `require_auth` generates `http://pqc-monitor.ddns.net/app/` as the `next=` parameter. After login, `auth_routes.py` correctly strips this to the path `/app/` and redirects. The browser follows, `require_auth` fires again, generates another `http://` next URL — infinite loop. Separately, if `https_enabled: true` is set, the `Secure` cookie flag means the browser will not send the cookie on what it considers a plain-HTTP redirect target.
+
+**Fix:** Added `ProxyFix` middleware so Flask correctly reads `X-Forwarded-Proto` from nginx:
+```python
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+```
+
+`ProxyFix` is part of Werkzeug (already a Flask dependency — no new package required). Nginx must pass `proxy_set_header X-Forwarded-Proto $scheme;` (standard in most configs).
+
+After applying this fix, set `https_enabled: true` in `/etc/pqc-monitor/config.yaml` to enable `Secure` cookies and HSTS headers.
 
 ---
 
@@ -86,11 +195,12 @@ Types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`
 
 ```
 pqc-monitor/
-├── VERSION                     # "1.3.0" — ONLY file to edit when releasing
+├── VERSION                     # "1.3.1" — ONLY file to edit when releasing
 ├── version.py                  # reads VERSION, exports VERSION/__version__
 ├── pqc_monitor.py              # CLI entry point (12 commands)
 ├── scripts/
 │   ├── README.md               # Script usage reference
+│   ├── wait-for-db.sh          # NEW: polls for DB file existence (used by scheduler unit ExecStartPre)
 │   ├── bulk_org_assign.py      # Bulk-assign domains to an org by TLD pattern
 │   └── diagnose.py             # Shodan + DNSDumpster integration diagnostic
 ├── app_factory.py              # Flask app factory — the production entry point
@@ -135,7 +245,7 @@ pqc-monitor/
 │
 ├── data/
 │   ├── database.py             # Database class: 27 public methods, SQLite WAL
-│   └── migrations.py           # 11 incremental schema migrations (v1-v11)
+│   └── migrations.py           # 14 incremental schema migrations (v1-v14)
 │
 ├── scheduler/
 │   └── scan_scheduler.py       # APScheduler wrapper; persists schedules in DB
@@ -150,8 +260,8 @@ pqc-monitor/
 │
 ├── systemd/                    # Production deployment
 │   ├── pqc-monitor.target      # Groups both services
-│   ├── pqc-monitor-web.service # Gunicorn; hardened with NoNewPrivileges etc.
-│   ├── pqc-monitor-scheduler.service
+│   ├── pqc-monitor-web.service # Gunicorn; Type=simple; --worker-tmp-dir /tmp
+│   ├── pqc-monitor-scheduler.service  # Requires web service; ExecStartPre wait-for-db.sh
 │   ├── pqc-monitor.env         # Environment template → /etc/pqc-monitor/
 │   └── nginx-pqc-monitor.conf  # Sample nginx reverse proxy
 │
@@ -182,13 +292,14 @@ pqc-monitor/
 
 ```
 Browser
-  └─ HTTPS → nginx → Gunicorn
-       └─ Flask app_factory.create_app()
-            ├─ auth_bp   (/login, /logout, /change-password)
-            ├─ admin_bp  (/admin/*, /admin/api/*)
-            └─ app_bp    (/app/, /app/api/*)
-                  └─ require_auth decorator
-                       └─ filter_assessments(data, user)  ← domain scoping
+  └─ HTTPS → nginx (X-Forwarded-Proto: https) → Gunicorn
+       └─ ProxyFix (werkzeug) — rewrites request.url to https://
+            └─ Flask app_factory.create_app()
+                 ├─ auth_bp   (/login, /logout, /change-password)
+                 ├─ admin_bp  (/admin/*, /admin/api/*)
+                 └─ app_bp    (/app/, /app/api/*)
+                       └─ require_auth decorator
+                            └─ filter_assessments(data, user)  ← domain scoping
 ```
 
 ### 4.2 Scan pipeline (per domain, in `orchestrator._scan_domain`)
@@ -233,12 +344,29 @@ Edit only `VERSION`. The string is read by:
 - `GET /api/version` endpoint
 - All Jinja2 templates via the `version` context variable
 
+### 4.6 Production filesystem layout
+
+```
+/opt/pqc-monitor/        root:pqcmonitor  755  — application code (read-only at runtime)
+/etc/pqc-monitor/        root:pqcmonitor  750  — configuration
+  config.yaml                                    — app config (640 root:pqcmonitor)
+  pqc-monitor.env                                — secrets/env (640 root:pqcmonitor)
+/var/lib/pqc-monitor/    pqcmonitor       750  — runtime data (writable)
+  pqc_monitor.db                                 — SQLite database
+/var/log/pqc-monitor/    pqcmonitor       750  — logs (writable)
+```
+
+The code directory is intentionally read-only at runtime. `ProtectSystem=full` in
+the service units enforces this. `ReadWritePaths` grants write access only to
+`/var/lib/pqc-monitor` and `/var/log/pqc-monitor` — not to the app tree.
+
 ---
 
 ## 5. Database Schema
 
-**SQLite file:** `data/pqc_monitor.db` (production: `/opt/pqc-monitor/data/pqc_monitor.db`)  
-**Current migration:** v11  
+**SQLite file:** `/var/lib/pqc-monitor/pqc_monitor.db`
+**Development:** `data/pqc_monitor.db` (relative to project root)
+**Current migration:** v14
 **Connection mode:** WAL (Write-Ahead Logging) for concurrent reads
 
 ### Tables
@@ -257,6 +385,9 @@ Edit only `VERSION`. The string is read by:
 | `users` | RBAC users: username, email, password_hash, role, is_active, lockout state |
 | `user_domain_lists` | Many-to-many: which users can see which domain lists |
 | `audit_log` | Login/logout/action events with IP and user-agent |
+| `organisations` | Named organisations grouping domains |
+| `domain_organisations` | Many-to-many: domain → org assignments |
+| `user_organisations` | Many-to-many: user → org assignments |
 
 ### Migration history
 
@@ -272,6 +403,9 @@ v8   Add domain_extra (chain analysis, cipher enum, CDN enrichment)
 v9   Add roadmaps table
 v10  Add users, user_domain_lists, audit_log (RBAC)
 v11  Add updated_at to domain_lists
+v12  Add service_type to assessments
+v13  Add dns_enumerator results to domain_extra
+v14  Add organisations, domain_organisations, user_organisations
 ```
 
 New migrations are appended to `data/migrations.py` MIGRATIONS list.
@@ -316,8 +450,8 @@ db.get_roadmaps(run_id=None, domain=None) → list
 
 ## 6. API Reference
 
-All routes under `/app/api/*` require authentication (`require_auth`).  
-All routes under `/admin/api/*` require admin role (`require_admin`).  
+All routes under `/app/api/*` require authentication (`require_auth`).
+All routes under `/admin/api/*` require admin role (`require_admin`).
 Domain-scoped routes filter results via `filter_assessments(data, user)`.
 
 ### Analyst API (`/app/api/`)
@@ -347,7 +481,7 @@ Domain-scoped routes filter results via `filter_assessments(data, user)`.
 | GET | `/api/schedules` | Periodic scan schedules |
 | POST | `/api/schedules` | Add schedule (admin only) |
 | GET | `/api/me` | Current user info |
-| GET | `/api/version` | `{"version":"1.1.3","name":"PQC-Monitor"}` |
+| GET | `/api/version` | `{"version":"1.3.1","name":"PQC-Monitor"}` |
 
 ### Admin API (`/admin/api/`)
 
@@ -392,14 +526,20 @@ returns domain data calls `filter_assessments(data, user)` which:
 - Returns all data unchanged for admins
 - Returns only rows where `row["domain"] in allowed_domains` for analysts
 
+Analyst access is the **union** of two sources:
+1. Domain lists explicitly assigned to the user (`user_domain_lists` table)
+2. Domains belonging to organisations the user is assigned to (`user_organisations` → `domain_organisations`)
+
+The union is deduplicated in `AuthStore.get_user_domains()`.
+
 ### Session model
 
 - Flask signed cookies (`itsdangerous` HMAC), 8-hour lifetime
-- `SESSION_COOKIE_SECURE = False` by default (plain HTTP safe)
-- Set `https_enabled: true` in config.yaml **only** after nginx TLS is working
+- `SESSION_COOKIE_SECURE = False` by default; set `https_enabled: true` in config when nginx+TLS is in front
+- `ProxyFix` middleware reads `X-Forwarded-Proto` from nginx — nginx must pass `proxy_set_header X-Forwarded-Proto $scheme;`
 - 10 failed logins → 15-minute account lockout
 - 10 login attempts/IP/minute rate limiting
-- Default credentials: `admin` / `changeme123`
+- Default credentials: `admin` / `changeme123` — **change immediately after first login**
 
 ### AuthProvider interface
 
@@ -409,14 +549,14 @@ class AuthProvider:
     def get_user(self, user_id) -> Optional[User]: ...
 ```
 
-`LocalAuthProvider` (currently active) uses `AuthStore`.  
+`LocalAuthProvider` (currently active) uses `AuthStore`.
 To add SAML/OIDC: implement `SAMLAuthProvider`, swap in `app_factory.py`.
 
 ### Decorators
 
 ```python
 @require_auth          # any authenticated user; 401 JSON for /api/ paths
-@require_role("admin") # specific role; 403 for /api/ paths  
+@require_role("admin") # specific role; 403 for /api/ paths
 @require_admin         # shorthand for @require_role("admin")
 ```
 
@@ -431,21 +571,21 @@ The ZIP distribution is flagged by some AV engines. Root causes in priority orde
 1. **`scanner/cipher_enum.py`** — Primary trigger. Contains `ssl.CERT_NONE` +
    `check_hostname = False` + `ctx.set_ciphers()` in a loop with explicit strings
    `RC4-SHA`, `NULL-SHA`, `EXP-RC4-MD5`, `ADH-`, `AECDH-` etc. This pattern
-   matches SSL stripping / MITM tool signatures exactly.  
+   matches SSL stripping / MITM tool signatures exactly.
    *Fix: move cipher name strings to a JSON file; rename `_probe_cipher` to
    something less suggestive; add a prominent comment block explaining purpose.*
 
-2. **`app_factory.py`** — `importlib.reload()` is a known malware evasion technique.  
+2. **`app_factory.py`** — `importlib.reload()` is a known malware evasion technique.
    *Fix: implement `make_blueprint()` factory functions in each blueprint module
    and call those instead. Each call returns a fresh Blueprint with all routes
    registered.*
 
 3. **`install.sh`** — `useradd`, `chown -R`, writes to `/etc/systemd/` in sequence
-   matches dropper/persistence heuristics.  
+   matches dropper/persistence heuristics.
    *Fix: not much can be done; could split into separate archive.*
 
 4. **`ct/ct_monitor.py` and `scanner/chain_validator.py`** — `__import__()` dynamic
-   imports flagged as obfuscation.  
+   imports flagged as obfuscation.
    *Fix: replace with standard top-level imports with try/except ImportError.*
 
 ### 8.2 `dashboard/app.py` is a 2180-line monolith
@@ -472,12 +612,6 @@ limit for internet-facing deployments.
 
 Domain membership lookup iterates all lists. Fine for <1000 domains. Will slow
 down at larger scale. Consider a `domain_list_members` join table.
-
-### 8.6 assessments table has no `service_type` column
-
-Currently a domain maps to one aggregated assessment. The planned multi-resource
-model (web, SMTP, etc.) requires the assessments table to carry a `service_type`
-or `resource_type` column and the dashboard to aggregate across resources per domain.
 
 ---
 
@@ -553,17 +687,23 @@ fetch_rewrite = """<script>
 Any new JS fetch calls in the dashboard must use `/api/...` paths (not `/app/api/...`)
 so they work both in the standalone dev server and under the auth shell.
 
-### 9.4 Config: https_enabled vs cookie_secure
+### 9.4 Config: https_enabled and ProxyFix
 
 ```yaml
-# config.yaml — set this ONLY after nginx+TLS is confirmed working
+# config.yaml — set this after nginx+TLS is confirmed working
 dashboard:
-  https_enabled: false   # default; safe for plain HTTP
+  https_enabled: true   # set true when behind nginx with TLS
 ```
 
 When `https_enabled: true`, `SESSION_COOKIE_SECURE = True` and HSTS headers are sent.
-Setting this while serving over plain HTTP causes a login loop (the browser
-silently discards Secure cookies over HTTP).
+`ProxyFix` middleware (added in v1.3.1) makes Flask trust `X-Forwarded-Proto: https`
+from nginx, so `request.url` reflects `https://` and the `Secure` cookie flag is
+consistent with what the browser sees.
+
+**nginx must pass:** `proxy_set_header X-Forwarded-Proto $scheme;`
+
+Without `ProxyFix`: Flask generates `http://` next-param URLs after login → infinite
+redirect loop. This was the primary deployment failure in v1.3.0 → v1.3.1.
 
 ### 9.5 Domain-list scoping in new endpoints
 
@@ -590,8 +730,6 @@ if not user.is_admin:
         return jsonify({"error": "forbidden"}), 403
 ```
 
----
-
 ### 9.6 DNSDumpster integration
 
 The DNS enumerator (`scanner/dns_enumerator.py`) supports two paths:
@@ -606,15 +744,6 @@ When no key is configured, the module falls back to a CSRF-token extraction
 and HTML POST to `dnsdumpster.com`. This is fragile, unofficial, and may break
 without notice. It is disabled by default (`use_dnsdumpster=False` unless a key
 is present or the caller explicitly passes `use_dnsdumpster=True`).
-
-In the UI, DNSDumpster is used via:
-- `POST /app/api/dns-enumerate` — the server reads the key from `DNS_ENUM_CONFIG`;
-  `use_dnsdumpster` is True only when a key is configured.
-- `POST /app/api/save-domains` with `dns_enumerate: true` — same logic.
-
-There is no UI field for the API key; it is a server-side configuration only.
-Exposing API keys in the browser would allow any logged-in user to enumerate
-arbitrary domains against the operator's paid quota.
 
 ### 9.7 Organisation scoping interaction with domain lists
 
@@ -631,6 +760,24 @@ The `?org_id=` filter on `GET /api/assessments` is an **additional** filter
 on top of RBAC scoping — a user cannot use it to see domains outside their
 allowed set.
 
+### 9.8 systemd unit constraints
+
+**Do not use `${VAR:-default}` in `ExecStart` or `ExecStartPre`.**
+systemd expands `${}` before passing arguments to the process — bash fallback
+syntax is not supported. Declare defaults as `Environment=` lines before the
+`EnvironmentFile=` directive; the env file overrides them when the variable is set.
+
+**Do not put `StartLimitIntervalSec`/`StartLimitBurst` in `[Service]`.**
+These keys belong in `[Unit]` since systemd v230.
+
+**Do not use inline shell commands with bash variables in `ExecStartPre`.**
+Systemd expands `${}` in the directive before bash gets it, destroying variables
+like `$waited` and arithmetic like `$((waited % 10))`. Put any non-trivial shell
+logic in a separate script and call that script from `ExecStartPre`.
+
+**`Type=simple` is correct for gunicorn.** `Type=notify` requires gunicorn to
+emit `sd_notify(READY=1)`, which standard gunicorn does not do.
+
 ---
 
 ## 10. Planned Features — Prioritised Backlog
@@ -643,258 +790,102 @@ recommendations.
 
 ### Tier 1 — Config / data changes only (no new modules)
 
-**[T1-1] Fix AV false positives**  
+**[T1-1] Fix AV false positives**
 Move cipher name strings in `cipher_enum.py` to a JSON data file. Replace
 `__import__()` calls in `ct/ct_monitor.py` and `scanner/chain_validator.py` with
 top-level try/except imports. Replace `importlib.reload()` in `app_factory.py`
 with `make_blueprint()` factory functions. *Low risk, self-contained.*
 
-**[T1-2] Geography / region on domain lists** *(requested)*  
-Add `region` and `country_code` columns to `domain_lists` (migration v12).
+**[T1-2] Geography / region on domain lists** *(requested)*
+Add `region` and `country_code` columns to `domain_lists` (migration v15).
 Surface region in the domain list editor modal. The RBAC scoping model already
 supports domain-list-scoped access — adding region to lists means analysts can
 be assigned a regional list (e.g. "EU Finance") and automatically see only
-relevant geography. This is the smallest change that enables regional filtering.
+relevant geography.
 
-**[T1-3] Expiry and certificate age warnings in dashboard**  
+**[T1-3] Expiry and certificate age warnings in dashboard**
 The assessments table already stores `cert_expiry_days`. Add a dashboard filter
 for "expiring within 30/60/90 days" using the existing card-filter mechanism.
 Zero new backend code needed — purely a JS/HTML addition to the dashboard.
 
-**[T1-4] Export roadmap as PDF/DOCX** *(discussed in development session)*  
+**[T1-4] Export roadmap as PDF/DOCX** *(discussed in development session)*
 The `roadmap/generator.py` already has `render_roadmap_text()` and
 `render_sector_roadmap_text()`. Add `render_roadmap_docx()` using the existing
 `docx` skill. Expose via `GET /api/roadmap/export?format=docx`.
+
+**[T1-5] Asset Criticality Weighting** *(High Value / Low-Medium Complexity)*
+Migration: add `criticality TEXT DEFAULT 'normal'` to `assessments`.
+Admin UI: criticality dropdown on domain detail panel.
+`roadmap/generator.py`: phase assignment weighted by criticality.
+Dashboard: criticality colour column; filter pill.
 
 ---
 
 ### Tier 2 — New columns + existing module extension
 
-**[T2-1] Resource type tagging on assessments** *(requested)*  
-Add `service_type` column to `assessments` (migration v12 or v13):
-`web_primary`, `web_secondary`, `smtp`, `imap`, `pop3`, `ldap`, `api`, `other`.
+**[T2-1] Resource type tagging on assessments** *(requested — schema delivered in v1.2.0)*
+`service_type` column exists. Dashboard filtering by service type is the remaining UI work.
 
-This is the prerequisite for the multi-resource domain view and all resource-type
-filtering. The orchestrator already probes SMTP/IMAP/LDAP via STARTTLS — the
-scan result just needs to carry a `service_type` label. The assessor stores it.
+**[T2-2] Per-domain resource aggregation view** *(requested)*
+Domain detail panel grouping all resources (web, SMTP, IMAP, LDAP) with per-service
+score rows. Requires T2-1 complete.
+- `GET /api/domain/<domain>/resources` → assessments grouped by service_type
+- Dashboard: extend `showDomainDetail()` to show resource table
 
-Changes needed:
-- Migration: `ALTER TABLE assessments ADD COLUMN service_type TEXT`
-- `orchestrator._scan_domain`: derive `service_type` from port number
-  (`443→web_primary`, `25/587→smtp`, `993→imap`, etc.)
-- `crypto_assessor.assess_domain`: accept and store `service_type`
-- `app_routes.api_assessments`: add `?service_type=` filter parameter
-- Dashboard: add service-type filter pills above domain table
+**[T2-3] Geographic coordinates on domain assessments**
+Add `country_code`, `latitude`, `longitude` to `assessments`. Populate from
+ip-api.com (free, no key) during scan. Prerequisite for the map view (T3-2).
 
-**[T2-2] Per-domain resource aggregation view** *(requested)*  
-Once `service_type` exists, add a domain detail panel that groups all resources
-for a domain (web, SMTP, IMAP, LDAP) with a row per service showing its
-individual score, TLS version, and findings. Clicking a row drills into the
-existing `showDomainDetail()` but scoped to that resource.
+**[T2-4] Executive PDF Reporting** *(High Value / Medium Complexity)*
+New module: `reports/pdf_report.py` using `weasyprint` (HTML→PDF).
+Cover page, traffic-light table, phase summary, regulatory deadline countdown.
+`GET /api/export?format=pdf`. Admin "Export PDF" button.
 
-Changes needed (backend minimal, mostly dashboard JS):
-- `GET /api/domain/<domain>/resources` → list of assessments grouped by service_type
-- Dashboard: extend `showDomainDetail()` to show a resource table before the
-  findings list
-
-**[T2-3] Geographic coordinates on domain assessments**  
-Add `country_code`, `latitude`, `longitude` columns to `assessments`.
-Populate from IP geolocation during scan (MaxMind GeoLite2-free, or
-ip-api.com — free, no API key required for non-commercial use).
-
-Prerequisite for the map view. The `cdn_detector.py` already resolves IPs —
-geolocation is a small addition to the CDN detection step.
-
-Changes needed:
-- `requirements.txt`: add `geoip2` or use `requests` to call ip-api.com
-- Migration: add three columns to `assessments`
-- `scanner/cdn_detector.py` or new `scanner/geo_resolver.py`
-- `scanner/orchestrator.py`: call geo resolver after CDN detection
+**[T2-5] Budget and Resource Estimation** *(High Value / High Complexity)*
+Extend roadmap with cost estimates: `cost_min_eur`, `cost_max_eur`, `fte_months`.
+New `roadmap/budget_estimator.py` mapping task types to effort multipliers.
+`GET /api/roadmap/export?format=budget_csv`.
 
 ---
 
 ### Tier 3 — New modules, moderate complexity
 
-**[T3-1] DNS deep-dive on domain add** *(requested)*  
-When a domain is added to a list (or discovered), enumerate all sub-services:
-query A/AAAA, MX, NS, CNAME chains, TXT (SPF, DMARC), SRV records. This
-produces a list of candidate hosts to probe for TLS. The existing
-`service_discovery.py` probes ports but doesn't walk DNS — this adds the DNS
-enumeration layer.
+**[T3-1] DNS deep-dive on domain add** *(requested — delivered in v1.2.0)*
+`scanner/dns_enumerator.py` exists. Integration with domain add flow is the remaining work.
 
-New module: `scanner/dns_enumerator.py`
+**[T3-2] Geographic map view** *(requested)*
+Choropleth + dot map showing PQC readiness by country. Requires T2-3.
+Leaflet.js (CDN, no API key). New `view-map` dashboard view.
 
-```python
-@dataclass
-class DnsEnumerationResult:
-    domain: str
-    a_records: list[str]          # IPv4 addresses
-    aaaa_records: list[str]       # IPv6 addresses  
-    mx_hosts: list[str]           # mail servers
-    ns_hosts: list[str]           # nameservers
-    cname_chain: list[str]        # CNAME targets
-    spf_record: Optional[str]
-    dmarc_record: Optional[str]
-    subdomains: list[str]         # from certificate SANs + brute-force wordlist
-    tls_candidates: list[dict]    # {host, port, service_type} for scanning
-```
+**[T3-3] SSL Labs integration** *(discussed)*
+Optional enrichment via Qualys SSL Labs API v4. Default OFF. Results in `domain_extra`
+as type `ssl_labs`. Async polling required (assessments take 60-120s).
+New module: `scanner/ssl_labs_client.py`.
 
-Integration points:
-- `domain_discovery/domain_finder.py`: call DNS enumeration after NL discovery
-- `scanner/orchestrator.py`: call DNS enumeration before port scanning to expand
-  the scan target list
-- New `domain_extra` data type `dns_enum` to store results
-- Admin domain-list editor: show DNS-discovered hosts alongside manually added domains
-
-External tool option: DNSDumpster has an informal API (scraping-based, no key).
-More reliable: use `dnspython` (already in requirements) directly. For
-subdomain discovery, CT log SANs via crt.sh (already in `ct/ct_monitor.py`)
-are a good passive source.
-
-**[T3-2] Geographic map view** *(requested)*  
-A choropleth or dot map showing PQC readiness by country. Requires T2-3
-(coordinates on assessments) and T1-2 (regions on domain lists).
-
-Recommended approach: Leaflet.js (free, no API key) with GeoJSON country
-boundaries. The dashboard already loads Chart.js from CDN — add Leaflet similarly.
-
-New dashboard view `view-map`:
-- Choropleth layer: countries coloured by average PQC score (green/yellow/orange/red)
-- Dot layer: individual domain markers, click to open domain detail
-- Filter panel: by region, service type, readiness level
-
-**[T3-3] SSL Labs integration (discussed in session)**  
-Optional enrichment layer: after a primary scan, query the Qualys SSL Labs API
-v4 (requires registered email in HTTP header) for the standard A-F grade and
-vulnerability flags (ROBOT, POODLE, Heartbleed etc.). SSL Labs does not assess
-PQC readiness so this supplements rather than replaces existing scanning.
-
-Key design constraints established in the discussion:
-- Must default to OFF (`ssl_labs_api_email:` absent in config)
-- Must use `publish=off` parameter
-- Results stored in `domain_extra` table (already exists) as type `ssl_labs`
-- Async polling (assessments take 60-120s) — store `pending` state, poll later
-- Rate-limit compliance: honour `X-Max-Assessments` and `X-Current-Assessments` headers
-- Terms of service: only scan domains the operator controls or is authorised to assess
-
-New module: `scanner/ssl_labs_client.py`
+**[T3-4] Sector Benchmarking** *(Medium Value / Low-Medium Complexity)*
+Aggregate `AVG(score)` by `(sector, region)` across all scan runs.
+`GET /api/benchmarks`. New `view-benchmarks` dashboard view.
+Only meaningful in multi-organisation deployments.
 
 ---
 
 ### Tier 4 — Significant architectural changes
 
-**[T4-1] Multi-resource domain model** *(requested)*  
-The full realisation of the "domain as a container of resources" concept.
-Currently each domain has one aggregated assessment. The target model:
+**[T4-1] Multi-resource domain model** *(requested)*
+Domain as container of resources (web, SMTP, IMAP, LDAP) with per-resource scores
+and a weighted aggregate. Requires T2-1 + T3-1. Full dashboard refactor.
 
-```
-Domain: bancosantander.es
-  ├── www.bancosantander.es:443   (web_primary)    score=82  TLSv1.3
-  ├── mail.bancosantander.es:25   (smtp)           score=61  TLSv1.2
-  ├── owa.bancosantander.es:443   (web_secondary)  score=74  TLSv1.2
-  └── ldap.bancosantander.es:636  (ldap)           score=55  TLSv1.2
-  Aggregate score: 68 (weighted by service criticality)
-```
+**[T4-2] Trend alerting and notifications**
+Email/webhook when score drops below threshold or new critical finding appears.
+New `alerting/` module, `alerts` table, APScheduler job, Settings panel.
 
-This requires:
-1. T2-1 (service_type column) as prerequisite
-2. T3-1 (DNS enumeration) to discover all resources
-3. `crypto_assessor.py` aggregate scoring across resources
-4. Dashboard domain table: show aggregate score with expand/collapse per resource
-5. RBAC: filter by domain still works (all resources for a domain are visible or hidden together)
+**[T4-3] SAML / OIDC authentication**
+`AuthProvider` interface already designed for this. Implement `SAMLAuthProvider`
+using `python3-saml` or `OIDCProvider` using `authlib`. Swap in `app_factory.py`.
 
-**[T4-2] Trend alerting and notifications**  
-Send email/webhook when a domain's score drops below a threshold or a new
-critical finding appears. Requires:
-- `alerting/` module: threshold config + email/webhook dispatch
-- New `alerts` table in DB
-- APScheduler job to check for new findings after each scan
-- UI panel in Settings to configure thresholds and notification targets
-
-**[T4-3] SAML / OIDC authentication**  
-The `AuthProvider` interface (`auth/middleware.py`) is already designed for this.
-Implement `SAMLAuthProvider(AuthProvider)` using `python3-saml` or
-`pysaml2`, or `OIDCProvider` using `authlib`. Swap in `app_factory.py`.
-The admin user management UI would need to handle externally-authenticated users
-(no local password, cannot reset via admin panel).
-
-**[T4-4] Dashboard frontend separation**  
-Extract `DASHBOARD_HTML` from `dashboard/app.py` into proper files:
-- `static/dashboard.html` (or Jinja2 template in `templates/`)
-- `static/dashboard.js`
-- `static/dashboard.css`
-
-This is a quality-of-life change for development — no functional difference —
-but it makes the JS editable with IDE support, sourcemaps, and proper diffs.
-Requires updating `app_routes.dashboard_home()` to use `render_template()`
-instead of `render_template_string()`.
-
----
-
-### Tier 1 additions — Config / data changes only
-
-**[T1-5] Asset Criticality Weighting** *(Tier 1 — High Value / Low-Medium Complexity)*
-
-**Business value:** Currently `assessments` treats `www.bank.es:443` and `intranet-wiki.bank.es:80` identically. CISOs need the roadmap to reflect real business risk. A domain tagged "Critical Payment Gateway" should surface at the top of Phase 1 regardless of its raw score.
-
-**Implementation:**
-- Migration: `ALTER TABLE assessments ADD COLUMN criticality TEXT DEFAULT 'normal'` — values: `critical | high | normal | low`.
-- Admin UI: add criticality dropdown to the domain detail panel (or a bulk-edit modal).
-- `roadmap/generator.py`: multiply phase assignment score threshold by criticality factor (e.g. critical assets enter Phase 1 at a higher score threshold, forcing earlier action).
-- Dashboard: add criticality colour indicator column to the domain table; filter pill.
-- `GET /api/assessments`: add `?criticality=` filter.
-
-**Code surface:** 3-4 files, ~150 lines, 1 migration. No new modules. Directly unlocks more useful roadmap output.
-
----
-
-### Tier 2 additions — New modules, high value
-
-**[T2-4] Executive PDF Reporting** *(Tier 2 — High Value / Medium Complexity)*
-
-**Business value:** CISOs present to boards. The current exports (CSV, JSON) are engineer-facing. A one-page PDF that says "42% of critical services are not PQC-ready, deadline BSI 2026" with a traffic-light table eliminates manual PowerPoint work.
-
-**Implementation:**
-- New module: `reports/pdf_report.py` using `reportlab` (already commonly available) or `weasyprint` (HTML→PDF, easier to style).
-- Template: cover page (org name, date, score summary), executive traffic-light table (domain | criticality | level | expiry), phase summary card, regulatory deadline countdown (BSI 2026, NIST 2030).
-- `GET /api/export?format=pdf` route in `app_routes.py`.
-- Admin: "Export PDF" button in dashboard toolbar.
-- Optional: per-org PDF (filter by org before rendering).
-
-**Dependencies:** `reportlab` or `weasyprint` + `Pillow`. Requires `pdf` skill.
-
-**Code surface:** 1 new module (~250 lines), 1 route addition, dashboard button. No schema change. Medium effort due to layout work; low risk.
-
-**[T2-5] Budget and Resource Estimation Integration** *(Tier 2 — High Value / High Complexity)*
-
-**Business value:** The roadmap already outputs phases and effort-day estimates. The missing step for a CISO is translating "Phase 1: 45-90 days effort" into "€180,000-360,000 at blended day rate" and "3 FTE for 6 months". This makes PQC migration a line item in the budget cycle rather than an abstract security recommendation.
-
-**Implementation:**
-- New config block: `budget.day_rate_eur`, `budget.currency`, `budget.fte_days_per_year`.
-- `roadmap/generator.py`: add `cost_min_eur`, `cost_max_eur`, `fte_months` to `RoadmapItem` and `DomainRoadmap` dataclasses.
-- New `roadmap/budget_estimator.py`: maps task type (cert replacement, TLS config, library upgrade, HSM procurement) to effort multipliers and procurement cost bands.
-- `GET /api/roadmap/export?format=budget_csv` — one row per phase, columns: phase, task_type, effort_days, cost_eur_min, cost_eur_max, fte_months, regulatory_deadline.
-- Dashboard: add cost column to roadmap table (hidden by default, shown when budget config is set).
-
-**Code surface:** 1 new module (~200 lines), extend `generator.py` (~100 lines), 1 config block, 1 export route, optional dashboard column. Schema: add 3 columns to `roadmaps` table. High complexity in the cost modelling logic; the rest is straightforward.
-
----
-
-### Tier 3 additions — Medium value
-
-**[T3-4] Sector Benchmarking** *(Tier 3 — Medium Value / Low-Medium Complexity)*
-
-**Business value:** The `scan_runs` table already stores `sector` and `region`. An aggregated benchmarking view lets a CISO say "our average PQC score is 61, the Financial Services EU average is 48 — we are ahead of our peers". This is a powerful justification tool for security investment.
-
-**Implementation:**
-- `data/database.py`: new `get_sector_benchmarks()` method — aggregate `AVG(score)`, `SUM(has_pqc)`, level distribution by `(sector, region)` across all scan runs.
-- `GET /api/benchmarks` endpoint returning sector aggregates.
-- New dashboard view `view-benchmarks`: bar chart (Chart.js, already loaded) of sector averages; highlight the current organisation's position.
-- Optional: anonymisation guard — only show benchmark if ≥3 distinct organisations contribute (avoids de-anonymisation in small sectors).
-
-**Note:** Benchmarking is only meaningful when multiple organisations are scanned from the same instance (enterprise/sector-wide deployment). For single-org deployments, this view would be empty or trivial. The feature is most valuable in a managed-service or sector-regulator deployment model.
-
-**Code surface:** 1 new DB method, 1 new route, 1 new dashboard view (~150 lines JS/HTML). No schema change. Low implementation risk; medium strategic value depending on deployment model.
+**[T4-4] Dashboard frontend separation**
+Extract `DASHBOARD_HTML` from `dashboard/app.py` into `static/` files.
+Quality-of-life for development; no functional change.
 
 ---
 
@@ -913,13 +904,12 @@ python3 tests/seed_demo_data.py --runs 3
 python3 pqc_monitor.py dashboard  # → http://localhost:5000  admin/changeme123
 ```
 
-**Test count:** 452 (as of v1.3.0)  
-**Test files and what they cover:**
+**Test count:** 452 (as of v1.3.0; v1.3.1 adds no new tests — deployment fixes only)
 
 | File | Coverage |
 |------|---------|
 | `test_assessor.py` | Scoring engine, guideline loading, finding generation |
-| `test_auth.py` | Full RBAC: permissions, AuthStore CRUD, authentication, endpoint protection, domain list CRUD (69 + 24 tests) |
+| `test_auth.py` | Full RBAC: permissions, AuthStore CRUD, authentication, endpoint protection, domain list CRUD |
 | `test_ct.py` | CT monitor: OID registry, certificate parsing, DB storage, Flask API endpoints |
 | `test_roadmap.py` | Phase assignment, effort calculation, score projection, text rendering, DB storage, API endpoints |
 | `test_scan_quality.py` | Chain validator, cipher enum, CDN detector, domain_extra DB |
@@ -932,7 +922,7 @@ python3 pqc_monitor.py dashboard  # → http://localhost:5000  admin/changeme123
 ## Appendix B — Deployment Quick Reference
 
 ```bash
-# Production install
+# Fresh production install
 sudo ./install.sh --production
 
 # Service management
@@ -945,9 +935,15 @@ journalctl -u pqc-monitor-scheduler -f
 /etc/pqc-monitor/config.yaml       # app config (perms: 640 root:pqcmonitor)
 /etc/pqc-monitor/pqc-monitor.env   # secrets (perms: 640 root:pqcmonitor)
 
+# Runtime data
+/var/lib/pqc-monitor/pqc_monitor.db   # SQLite database
+
 # nginx
 sudo cp /opt/pqc-monitor/systemd/nginx-pqc-monitor.conf \
         /etc/nginx/sites-available/pqc-monitor
+# Ensure nginx config includes:
+#   proxy_set_header X-Forwarded-Proto $scheme;
+#   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 sudo certbot --nginx -d your.domain.example
 sudo systemctl reload nginx
 
@@ -955,24 +951,34 @@ sudo systemctl reload nginx
 sudo systemctl stop pqc-monitor.target
 sudo ./install.sh --production
 sudo systemctl start pqc-monitor.target
+
+# Manual DB migration (existing installs upgrading from data/ to /var/lib/)
+sudo mkdir -p /var/lib/pqc-monitor
+sudo chown pqcmonitor:pqcmonitor /var/lib/pqc-monitor
+sudo chmod 750 /var/lib/pqc-monitor
+sudo mv /opt/pqc-monitor/data/pqc_monitor.db /var/lib/pqc-monitor/
+sudo chown pqcmonitor:pqcmonitor /var/lib/pqc-monitor/pqc_monitor.db
+sudo sed -i 's|data/pqc_monitor.db|/var/lib/pqc-monitor/pqc_monitor.db|' \
+    /etc/pqc-monitor/config.yaml
+sudo systemctl daemon-reload && sudo systemctl restart pqc-monitor.target
 ```
 
 ---
 
 ## Appendix C — Adding a New Feature: Checklist
 
-1. **New DB columns** → add migration to `data/migrations.py`, bump version number  
-2. **New DB methods** → add to `data/database.py` `Database` class  
-3. **New scan step** → add module in `scanner/`, wire into `orchestrator._scan_domain`  
-4. **New API endpoint** → add to `app_routes.py` (analyst) or `admin/routes.py` (admin)  
-   - Always add `@require_auth` (or `@require_admin`)  
-   - Always call `filter_assessments()` for domain data  
-5. **New dashboard view** → add HTML view div inside `<div class="main">` in `dashboard/app.py`  
-   - Add nav button with `onclick="showView('newview',this)"`  
-   - Add data-loading call in `showView()` function  
-   - Verify all view divs are at depth=2 using the verification script in §9.2  
-6. **New tests** → add to appropriate `tests/test_*.py`  
-7. **Version bump** → edit `VERSION` file, add CHANGELOG entry  
+1. **New DB columns** → add migration to `data/migrations.py`, bump version number
+2. **New DB methods** → add to `data/database.py` `Database` class
+3. **New scan step** → add module in `scanner/`, wire into `orchestrator._scan_domain`
+4. **New API endpoint** → add to `app_routes.py` (analyst) or `admin/routes.py` (admin)
+   - Always add `@require_auth` (or `@require_admin`)
+   - Always call `filter_assessments()` for domain data
+5. **New dashboard view** → add HTML view div inside `<div class="main">` in `dashboard/app.py`
+   - Add nav button with `onclick="showView('newview',this)"`
+   - Add data-loading call in `showView()` function
+   - Verify all view divs are at depth=2 using the verification script in §9.2
+6. **New tests** → add to appropriate `tests/test_*.py`
+7. **Version bump** → edit `VERSION` file, add CHANGELOG entry
 8. **RBAC** → add new permission strings to `PERMISSIONS` dict in `auth/models.py` if needed
 
 ---
@@ -989,47 +995,36 @@ python3 scripts/<script>.py --help
 All scripts load `config/config.yaml` automatically; override with `--config`.
 See `scripts/README.md` for full usage.
 
-### bulk_org_assign.py — Bulk domain → organisation assignment
+### wait-for-db.sh — Database readiness check (NEW in v1.3.1)
 
-Assigns every domain in the database that matches a TLD pattern to a named
-organisation, creating the org if it does not already exist. Assignments are
-**additive** — existing org domains are never removed by this script.
+Invoked by `pqc-monitor-scheduler.service` as `ExecStartPre`. Polls for the
+SQLite database file every 2 seconds, logging progress every 10 seconds. Exits 1
+after 60 seconds if the file has not appeared.
 
 ```bash
-# Preview (--dry-run writes nothing)
+# Usage (args are positional, both optional)
+scripts/wait-for-db.sh [db_path] [timeout_seconds]
+# Default: /var/lib/pqc-monitor/pqc_monitor.db  60
+```
+
+### bulk_org_assign.py — Bulk domain → organisation assignment
+
+Assigns every domain matching a TLD pattern to a named organisation. Assignments
+are additive — existing org domains are never removed.
+
+```bash
 python3 scripts/bulk_org_assign.py \
     --tld bde.es \
     --org "Banco de España" \
     --sector "Financial Services" \
     --region "EU/Spain" \
-    --dry-run
-
-# Apply
-python3 scripts/bulk_org_assign.py \
-    --tld bde.es \
-    --org "Banco de España" \
-    --sector "Financial Services" \
-    --region "EU/Spain"
-
-# Multiple TLDs in one pass
-python3 scripts/bulk_org_assign.py \
-    --tld bde.es --tld bancodeespana.es \
-    --org "Banco de España" --sector "Finance" --region "EU/Spain"
+    --dry-run   # preview without writing
 ```
-
-Domain sources searched: `assessments` table ∪ `domain_lists` table.
-Matching rule: exact match or any subdomain at any depth.
 
 ### diagnose.py — API integration diagnostic
 
-Tests Shodan and DNSDumpster connectivity from the production environment:
+Tests Shodan and DNSDumpster connectivity from the production environment.
 
 ```bash
-python3 scripts/diagnose.py \
-    --config config/config.yaml \
-    --domain bde.es
+python3 scripts/diagnose.py --config config/config.yaml --domain bde.es
 ```
-
-Checks: config key loading, Shodan `api.info()` + `api.host()`, CLI flag
-presence, DNSDumpster live API call with correct `X-API-Key` header.
-

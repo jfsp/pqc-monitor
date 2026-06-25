@@ -21,7 +21,7 @@ StartLimitIntervalSec=90
 StartLimitBurst=5
 
 [Service]
-Type=notify
+Type=simple
 
 # ── Identity ─────────────────────────────────────────────────────────────────
 User=pqcmonitor
@@ -44,6 +44,7 @@ ExecStart=/opt/pqc-monitor/.venv/bin/gunicorn \
     --bind ${PQC_BIND} \
     --workers ${PQC_WEB_WORKERS} \
     --worker-class sync \
+    --worker-tmp-dir /tmp \
     --timeout 120 \
     --keep-alive 5 \
     --access-logfile - \

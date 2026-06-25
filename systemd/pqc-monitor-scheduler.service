@@ -18,7 +18,12 @@ Description=PQC-Monitor Scheduler Service
 Documentation=https://github.com/your-org/pqc-monitor
 After=network-online.target pqc-monitor-web.service
 Wants=network-online.target
+# Hard dependency: scheduler is useless without the web service, which
+# owns DB initialisation. If the web service stops, stop the scheduler too.
+Requires=pqc-monitor-web.service
 PartOf=pqc-monitor.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -31,8 +36,25 @@ WorkingDirectory=/opt/pqc-monitor
 # ── Environment ──────────────────────────────────────────────────────────────
 EnvironmentFile=/etc/pqc-monitor/pqc-monitor.env
 Environment=PYTHONUNBUFFERED=1
+Environment=PQC_DB_PATH=data/pqc_monitor.db
 
 # ── Startup ───────────────────────────────────────────────────────────────────
+# Wait up to 60 s for the web service to create the database file before
+# launching the scheduler.  Polls every 2 s; logs a line every 10 s.
+# Uses PQC_DB_PATH from the env block above (overridable via pqc-monitor.env).
+ExecStartPre=/bin/bash -c '\
+  db="/opt/pqc-monitor/${PQC_DB_PATH:-data/pqc_monitor.db}"; \
+  waited=0; limit=60; \
+  while [ ! -f "$db" ]; do \
+    if [ $waited -ge $limit ]; then \
+      echo "Timed out waiting for $db after ${limit}s" >&2; exit 1; \
+    fi; \
+    [ $((waited % 10)) -eq 0 ] && \
+      echo "Waiting for database $db (${waited}s elapsed)..." >&2; \
+    sleep 2; waited=$((waited+2)); \
+  done; \
+  echo "Database found at $db after ${waited}s" >&2'
+
 ExecStart=/opt/pqc-monitor/.venv/bin/python3 \
     /opt/pqc-monitor/pqc_monitor.py scheduler-daemon
 
@@ -51,8 +73,6 @@ SystemCallErrorNumber=EPERM
 # ── Restart policy ────────────────────────────────────────────────────────────
 Restart=on-failure
 RestartSec=30
-StartLimitIntervalSec=120
-StartLimitBurst=3
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 StandardOutput=journal

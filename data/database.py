@@ -30,8 +30,8 @@ class Database:
     """
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
-        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-        self.db_path = db_path
+        self.db_path = os.path.abspath(db_path)
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._init_schema()
         # Apply any pending schema migrations
         try:

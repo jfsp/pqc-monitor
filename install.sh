@@ -121,19 +121,19 @@ else
     echo "✓ System user '$RUN_USER' already exists"
 fi
 
-# Install directory
+# Install directory (code only — no mutable data here)
 echo "→ Installing to $INSTALL_DIR …"
-install -d -m 755 -o root   -g "$RUN_USER" "$INSTALL_DIR"
-install -d -m 750 -o "$RUN_USER" -g "$RUN_USER" "$INSTALL_DIR/data"
-install -d -m 750 -o "$RUN_USER" -g "$RUN_USER" "$INSTALL_DIR/data/scans"
-install -d -m 750 -o "$RUN_USER" -g "$RUN_USER" "$INSTALL_DIR/data/trends"
+install -d -m 755 -o root -g "$RUN_USER" "$INSTALL_DIR"
+
+# Mutable runtime data lives under /var/lib, not alongside the code
+install -d -m 750 -o "$RUN_USER" -g "$RUN_USER" /var/lib/pqc-monitor
 
 # Copy project files (exclude dev artifacts)
 rsync -a --delete \
     --exclude='.venv' \
     --exclude='__pycache__' \
     --exclude='*.pyc' \
-    --exclude='data/*.db' \
+    --exclude='data/' \
     --exclude='.git' \
     "$SCRIPT_DIR/" "$INSTALL_DIR/"
 
@@ -154,6 +154,11 @@ install -d -m 750 -o root -g "$RUN_USER" /etc/pqc-monitor
 if [ ! -f /etc/pqc-monitor/config.yaml ]; then
     install -m 640 -o root -g "$RUN_USER" \
         "$INSTALL_DIR/config/config.yaml.example" \
+        /etc/pqc-monitor/config.yaml
+    # Set the production DB and log paths
+    sed -i 's|path: "data/pqc_monitor.db"|path: "/var/lib/pqc-monitor/pqc_monitor.db"|' \
+        /etc/pqc-monitor/config.yaml
+    sed -i 's|file: "data/pqc_monitor.log"|file: "/var/log/pqc-monitor/pqc_monitor.log"|' \
         /etc/pqc-monitor/config.yaml
     echo "✓ Config installed at /etc/pqc-monitor/config.yaml"
     echo "  ⚠  Edit /etc/pqc-monitor/config.yaml before starting the service"
@@ -180,6 +185,17 @@ install -d -m 750 -o "$RUN_USER" -g "$RUN_USER" /var/log/pqc-monitor
 
 # Symlink config into install dir so the app finds it
 ln -sfn /etc/pqc-monitor/config.yaml "$INSTALL_DIR/config/config.yaml" 2>/dev/null || true
+
+# Initialise the database (creates schema, runs migrations, sets correct ownership)
+# This must run before the services start so workers never race to create it.
+echo "→ Initialising database …"
+sudo -u "$RUN_USER" "$INSTALL_DIR/.venv/bin/python3" - <<'PYEOF'
+import sys, os
+sys.path.insert(0, "/opt/pqc-monitor")
+from data.database import Database
+db = Database("/var/lib/pqc-monitor/pqc_monitor.db")
+print(f"  ✓ Database initialised at {db.db_path}")
+PYEOF
 
 # Systemd units
 echo "→ Installing systemd units …"

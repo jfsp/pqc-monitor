@@ -5,6 +5,8 @@
 #
 # Installation:
 #   sudo cp systemd/pqc-monitor-scheduler.service /etc/systemd/system/
+#   sudo cp scripts/wait-for-db.sh /opt/pqc-monitor/scripts/
+#   sudo chmod +x /opt/pqc-monitor/scripts/wait-for-db.sh
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now pqc-monitor-scheduler
 #
@@ -36,24 +38,12 @@ WorkingDirectory=/opt/pqc-monitor
 # ── Environment ──────────────────────────────────────────────────────────────
 EnvironmentFile=/etc/pqc-monitor/pqc-monitor.env
 Environment=PYTHONUNBUFFERED=1
-Environment=PQC_DB_PATH=data/pqc_monitor.db
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 # Wait up to 60 s for the web service to create the database file before
-# launching the scheduler.  Polls every 2 s; logs a line every 10 s.
-# Uses PQC_DB_PATH from the env block above (overridable via pqc-monitor.env).
-ExecStartPre=/bin/bash -c '\
-  db="/opt/pqc-monitor/${PQC_DB_PATH:-data/pqc_monitor.db}"; \
-  waited=0; limit=60; \
-  while [ ! -f "$db" ]; do \
-    if [ $waited -ge $limit ]; then \
-      echo "Timed out waiting for $db after ${limit}s" >&2; exit 1; \
-    fi; \
-    [ $((waited % 10)) -eq 0 ] && \
-      echo "Waiting for database $db (${waited}s elapsed)..." >&2; \
-    sleep 2; waited=$((waited+2)); \
-  done; \
-  echo "Database found at $db after ${waited}s" >&2'
+# launching the scheduler. Path and timeout are positional args to the script
+# so systemd never needs to expand shell variables in this directive.
+ExecStartPre=/opt/pqc-monitor/scripts/wait-for-db.sh /opt/pqc-monitor/data/pqc_monitor.db 60
 
 ExecStart=/opt/pqc-monitor/.venv/bin/python3 \
     /opt/pqc-monitor/pqc_monitor.py scheduler-daemon

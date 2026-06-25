@@ -17,6 +17,8 @@ Documentation=https://github.com/your-org/pqc-monitor
 After=network-online.target
 Wants=network-online.target
 PartOf=pqc-monitor.target
+StartLimitIntervalSec=90
+StartLimitBurst=5
 
 [Service]
 Type=notify
@@ -27,15 +29,20 @@ Group=pqcmonitor
 WorkingDirectory=/opt/pqc-monitor
 
 # ── Environment ──────────────────────────────────────────────────────────────
+# Defaults below are overridden by values in pqc-monitor.env if set there.
+# systemd does not support bash ${VAR:-default} syntax in ExecStart;
+# declare the defaults here instead.
 EnvironmentFile=/etc/pqc-monitor/pqc-monitor.env
 Environment=PYTHONUNBUFFERED=1
+Environment=PQC_BIND=127.0.0.1:5000
+Environment=PQC_WEB_WORKERS=2
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 # Gunicorn listens on 127.0.0.1:5000 by default.
 # Put nginx or caddy in front for TLS termination.
 ExecStart=/opt/pqc-monitor/.venv/bin/gunicorn \
-    --bind ${PQC_BIND:-127.0.0.1:5000} \
-    --workers ${PQC_WEB_WORKERS:-2} \
+    --bind ${PQC_BIND} \
+    --workers ${PQC_WEB_WORKERS} \
     --worker-class sync \
     --timeout 120 \
     --keep-alive 5 \
@@ -61,8 +68,6 @@ SystemCallErrorNumber=EPERM
 # ── Restart policy ────────────────────────────────────────────────────────────
 Restart=on-failure
 RestartSec=10
-StartLimitIntervalSec=90
-StartLimitBurst=5
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 StandardOutput=journal

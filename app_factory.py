@@ -37,7 +37,16 @@ logger = logging.getLogger(__name__)
 
 
 def create_app(config: dict = None) -> Flask:
-    cfg = config or {}
+    # When called by gunicorn with no arguments, load config from the standard
+    # location so db_path and other settings are not left as relative defaults.
+    if config is None:
+        try:
+            from pqc_monitor import load_config
+            cfg = load_config()
+        except Exception:
+            cfg = {}
+    else:
+        cfg = config
 
     # Import blueprint modules inside create_app and reload them so that each
     # call gets fresh Blueprint instances. This is required for test isolation —

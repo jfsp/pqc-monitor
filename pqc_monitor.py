@@ -46,8 +46,14 @@ def load_config(config_path: str = None) -> dict:
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
 
+    raw_db_path = raw.get("database", {}).get("path", "data/pqc_monitor.db")
+    # Resolve relative paths against the app root so they are CWD-independent.
+    # Absolute paths (e.g. /var/lib/pqc-monitor/...) are left unchanged.
+    db_path = raw_db_path if os.path.isabs(raw_db_path) \
+              else os.path.join(ROOT, raw_db_path)
+
     return {
-        "db_path": raw.get("database", {}).get("path", "data/pqc_monitor.db"),
+        "db_path": db_path,
         "secret_key": raw.get("dashboard", {}).get("secret_key", "dev"),
         "anthropic_api_key": os.environ.get("ANTHROPIC_API_KEY",
                               raw.get("ai", {}).get("anthropic_api_key", "")),

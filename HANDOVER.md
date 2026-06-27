@@ -101,6 +101,7 @@ The script uses `git diff --diff-filter=AMRC` to identify changed files, skips p
 | 1.5.1 | Feature: Country + region on scan runs — TLD-based auto-inference via `data/tld_geo.csv`; schema v16; `--country-code`/`--country` on `scan` and `schedule` CLI commands; `list-runs` shows country column. See §2.4 for full details. |
 | 1.5.2 | Fix: country edits not persisting — `update_organisation()` whitelist missing `country_code`/`country`; `syncCountryName()` undefined in admin UI; migration failures silently swallowed (now ERROR + re-raise). See §2.5 for full details. |
 | 1.6.0 | Feature: Community concept — group organisations for scoped access and reporting; `ROLE_COMMUNITY_MANAGER`; Group Report tab (community + region views, PDF/CSV export, country filter); 8 new API endpoints; `community` CLI group (7 subcommands); weasyprint PDF; 31 new tests; schema v17. See §2.6 for full details. |
+| 1.6.1 | Fix: `scripts/deploy.sh` — `data/` was in PROTECTED list, blocking `data/database.py`, `data/migrations.py`, `data/geo_inference.py`, `data/tld_geo.csv` from being deployed. Live DB lives in `/var/lib/` and is never in git. Removed `data/` from PROTECTED; added explanatory comment. |
 
 ### 2.1 v1.3.1 — Deployment fixes (2026-06-25)
 

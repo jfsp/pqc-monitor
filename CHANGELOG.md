@@ -6,6 +6,20 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.6.1] — 2026-06-27
+
+### Fixed
+- **`scripts/deploy.sh`**: `data/` was listed in `PROTECTED` paths, causing
+  `data/database.py`, `data/migrations.py`, `data/geo_inference.py`, and
+  `data/tld_geo.csv` to be silently skipped on every deployment. The live
+  database (`pqc_monitor.db`) and scan artefacts live in `/var/lib/pqc-monitor/`
+  — a completely separate path that is never tracked by git — so they were
+  never at risk of being overwritten. Removed `data/` from `PROTECTED`; added
+  explanatory comment. `data/` remains in `WEB_TRIGGERS` and
+  `SCHEDULER_TRIGGERS` so service restarts still fire correctly when DB or
+  migration code changes.
+
+---
 ## [1.6.0] — 2026-06-27
 
 ### Added

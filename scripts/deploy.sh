@@ -36,10 +36,21 @@ FROM_COMMIT=""
 DRY_RUN=false
 RESTART=true
 
-# Files/dirs that must never be overwritten in production
+# Files/dirs that must never be overwritten in production.
+#
+# NOTE: data/database.py, data/migrations.py, data/geo_inference.py,
+# data/tld_geo.csv etc. are Python/config SOURCE files that live in
+# /opt/pqc-monitor/data/ and MUST be deployed.
+#
+# The live SQLite database (pqc_monitor.db) and runtime scan artefacts
+# live in /var/lib/pqc-monitor/ — a completely separate path that is
+# never part of the git repo, so they cannot appear in `git diff` and
+# need no protection here.
+#
+# Only protect files that (a) exist in the repo AND (b) contain
+# instance-specific secrets or local overrides.
 PROTECTED=(
     "config/config.yaml"
-    "data/"
     ".env"
     ".venv/"
 )

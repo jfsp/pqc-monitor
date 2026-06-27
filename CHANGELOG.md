@@ -6,6 +6,44 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.7.0] — 2026-06-27
+
+### Added
+- **Group Report: By Country view** — new "By Country" option in the view
+  selector; `/app/api/countries` lists distinct countries from visible orgs;
+  `/app/api/countries/<cc>/report[.csv/.pdf]` return aggregate reports;
+  `get_country_aggregate()` and `get_countries()` added to `data/database.py`
+- **Group Report: Charts** — two inline SVG charts rendered above the table
+  on report load: donut chart (org count by readiness level with legend) and
+  horizontal bar chart (score per organisation, colour-coded by level, sorted
+  by descending score)
+- **Group Report: Sortable table** — clicking any column header sorts
+  ascending/descending with ▲/▼ indicator; level column sorts by severity
+  order (Critical → Weak → Moderate → Ready → N/A); text columns default to
+  ascending, numeric columns default to descending on first click
+- **`scripts/bulk_assign.py`** — standalone bulk-assignment tool:
+  given a list of org names (file or stdin), sets a region and/or creates
+  (if absent) and populates a community; supports `--dry-run`; case-insensitive
+  org name matching; unmatched names reported as warnings; skips already-assigned
+
+### Changed
+- Group Report view: `grClearTable()` also hides the chart area on reset;
+  country filter is still shown only when group spans >1 country
+
+---
+## [1.6.3] — 2026-06-27
+
+### Fixed
+- **`scripts/deploy.sh`**: `restart_service()` called `systemctl is-active --quiet`
+  as a pre-flight guard before `systemctl restart`. On this server, running as a
+  non-root user, `is-active --quiet` returns non-zero for active system services
+  despite the service genuinely running — causing the deploy script to print
+  "not running — skipping restart" and silently skip the restart.
+  Fixed by removing the guard entirely: `systemctl restart` is idempotent and
+  works on running, stopped, or failed units. If the unit doesn't exist it fails
+  with a clear error message.
+
+---
 ## [1.6.2] — 2026-06-27
 
 ### Fixed

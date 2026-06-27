@@ -720,7 +720,36 @@ class Database:
         orgs = self.get_community_orgs(community_id)
         return self._build_group_aggregate(orgs)
 
-    def get_region_aggregate(self, region: str) -> dict:
+    def get_country_aggregate(self, country_code: str) -> list:
+        """
+        Return per-org PQC readiness summary for all orgs with the given
+        ISO 3166-1 alpha-2 country_code (case-insensitive).
+        """
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT o.*,
+                       COUNT(DISTINCT do2.domain) as domain_count
+                FROM organisations o
+                LEFT JOIN domain_organisations do2 ON do2.org_id = o.id
+                WHERE UPPER(o.country_code) = UPPER(?)
+                GROUP BY o.id
+                ORDER BY o.name
+            """, (country_code,)).fetchall()
+        orgs = [dict(r) for r in rows]
+        return self._build_group_aggregate(orgs)
+
+    def get_countries(self) -> list[dict]:
+        """Return distinct country_code + country pairs from organisations."""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT DISTINCT country_code, country
+                FROM organisations
+                WHERE country_code IS NOT NULL AND TRIM(country_code) != ''
+                ORDER BY country_code
+            """).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_region_aggregate(self, region: str) -> list:
         """
         Return per-org PQC readiness summary for all orgs in a region.
         """

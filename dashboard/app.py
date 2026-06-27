@@ -1110,6 +1110,7 @@ footer {
                padding:.3rem .6rem;border-radius:4px;font-size:.82rem">
         <option value="community">By Community</option>
         <option value="region">By Region</option>
+        <option value="country">By Country</option>
       </select>
       <select id="gr-group-sel" onchange="grLoadReport()"
         style="background:var(--panel);border:1px solid var(--border);color:var(--text);
@@ -1132,17 +1133,32 @@ footer {
       style="display:none;background:rgba(14,165,233,.06);border-left:3px solid var(--accent);
              padding:.75rem 1rem;border-radius:0 6px 6px 0;font-size:.82rem;
              line-height:1.6;margin-bottom:1.25rem"></div>
+    <!-- Charts row -->
+    <div id="gr-charts" style="display:none;display:flex;gap:1.5rem;margin-bottom:1.25rem;flex-wrap:wrap">
+      <div style="flex:1;min-width:280px;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:1rem">
+        <div style="font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:.75rem">Readiness Distribution</div>
+        <svg id="gr-donut" width="100%" viewBox="0 0 220 160" style="display:block"></svg>
+      </div>
+      <div style="flex:2;min-width:320px;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:1rem">
+        <div style="font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:.75rem">Score by Organisation</div>
+        <svg id="gr-bars" width="100%" style="display:block"></svg>
+      </div>
+    </div>
+
     <table class="data-table" id="gr-table" style="display:none">
-      <thead><tr>
-        <th>Organisation</th><th>CC</th><th>Sector</th>
-        <th style="text-align:right">Domains</th>
-        <th style="text-align:right">Score</th><th>Level</th>
-        <th style="text-align:right" title="Critical">Crit</th>
-        <th style="text-align:right" title="Weak">Weak</th>
-        <th style="text-align:right" title="Moderate">Mod</th>
-        <th style="text-align:right" title="Ready">Ready</th>
-        <th style="text-align:right" title="No TLS">NTLS</th>
-        <th style="text-align:right" title="PQC detected">PQC</th>
+      <thead><tr id="gr-thead-row">
+        <th onclick="grSort('name')" style="cursor:pointer" title="Sort by name">Organisation <span class="gr-sort-ind" data-col="name"></span></th>
+        <th onclick="grSort('country_code')" style="cursor:pointer" title="Sort by country">CC <span class="gr-sort-ind" data-col="country_code"></span></th>
+        <th>Sector</th>
+        <th onclick="grSort('domain_count')" style="text-align:right;cursor:pointer" title="Sort by domains">Domains <span class="gr-sort-ind" data-col="domain_count"></span></th>
+        <th onclick="grSort('avg_score')" style="text-align:right;cursor:pointer" title="Sort by score">Score <span class="gr-sort-ind" data-col="avg_score"></span></th>
+        <th onclick="grSort('level')" style="cursor:pointer" title="Sort by level">Level <span class="gr-sort-ind" data-col="level"></span></th>
+        <th onclick="grSort('critical')" style="text-align:right;cursor:pointer" title="Critical">Crit <span class="gr-sort-ind" data-col="critical"></span></th>
+        <th onclick="grSort('weak')" style="text-align:right;cursor:pointer" title="Weak">Weak <span class="gr-sort-ind" data-col="weak"></span></th>
+        <th onclick="grSort('moderate')" style="text-align:right;cursor:pointer" title="Moderate">Mod <span class="gr-sort-ind" data-col="moderate"></span></th>
+        <th onclick="grSort('ready')" style="text-align:right;cursor:pointer" title="Ready">Ready <span class="gr-sort-ind" data-col="ready"></span></th>
+        <th onclick="grSort('no_tls')" style="text-align:right;cursor:pointer" title="No TLS">NTLS <span class="gr-sort-ind" data-col="no_tls"></span></th>
+        <th onclick="grSort('pqc_count')" style="text-align:right;cursor:pointer" title="PQC detected">PQC <span class="gr-sort-ind" data-col="pqc_count"></span></th>
       </tr></thead>
       <tbody id="gr-tbody"></tbody>
     </table>
@@ -2328,13 +2344,16 @@ loadRoadmapStats();
 
 // ── Group Report ──────────────────────────────────────────────────────────────
 
-let _grReport    = null;   // current report JSON
-let _grFiltered  = [];     // filtered org rows
+let _grReport    = null;
+let _grFiltered  = [];
+let _grSortCol   = null;
+let _grSortAsc   = true;
 
 const GR_LEVEL_COLOURS = {
   Critical: '#ef4444', Weak: '#f97316',
   Moderate: '#eab308', Ready: '#22c55e', 'N/A': '#6b7280'
 };
+const GR_LEVEL_ORDER = { 'critical': 0, 'weak': 1, 'moderate': 2, 'ready': 3, 'na': 4 };
 
 function grLevel(score) {
   if (score == null) return 'N/A';
@@ -2344,9 +2363,7 @@ function grLevel(score) {
   return 'Ready';
 }
 
-async function grInit() {
-  await grSwitchViewBy();
-}
+async function grInit() { await grSwitchViewBy(); }
 
 async function grSwitchViewBy() {
   const viewBy = document.getElementById('gr-view-by')?.value || 'community';
@@ -2360,14 +2377,19 @@ async function grSwitchViewBy() {
 
   if (viewBy === 'community') {
     const r = await fetch('/app/api/communities');
-    const communities = await r.json().catch(() => []);
+    const items = await r.json().catch(() => []);
     sel.innerHTML = '<option value="">— Select Community —</option>' +
-      communities.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
-  } else {
+      items.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  } else if (viewBy === 'region') {
     const r = await fetch('/app/api/regions');
-    const regions = await r.json().catch(() => []);
+    const items = await r.json().catch(() => []);
     sel.innerHTML = '<option value="">— Select Region —</option>' +
-      regions.map(rg => `<option value="${esc(rg)}">${esc(rg)}</option>`).join('');
+      items.map(rg => `<option value="${esc(rg)}">${esc(rg)}</option>`).join('');
+  } else {
+    const r = await fetch('/app/api/countries');
+    const items = await r.json().catch(() => []);
+    sel.innerHTML = '<option value="">— Select Country —</option>' +
+      items.map(c => `<option value="${esc(c.country_code)}">${esc(c.country_code)} – ${esc(c.country||c.country_code)}</option>`).join('');
   }
 }
 
@@ -2378,30 +2400,34 @@ async function grLoadReport() {
 
   const url = viewBy === 'community'
     ? `/app/api/communities/${val}/report`
-    : `/app/api/regions/${encodeURIComponent(val)}/report`;
+    : viewBy === 'region'
+    ? `/app/api/regions/${encodeURIComponent(val)}/report`
+    : `/app/api/countries/${encodeURIComponent(val)}/report`;
 
   const r = await fetch(url);
   if (!r.ok) { console.error('Group report fetch failed', r.status); return; }
-  _grReport = await r.json();
+  _grReport   = await r.json();
   _grFiltered = _grReport.organisations || [];
+  _grSortCol  = null;
+  _grSortAsc  = true;
 
-  // Country filter — only show if >1 distinct country in this group
-  const countries = [...new Set(_grFiltered
-    .map(o => o.country_code).filter(Boolean))].sort();
-  const countryFilter = document.getElementById('gr-country-filter');
+  // Country filter — only when >1 distinct country
+  const countries = [...new Set(_grFiltered.map(o => o.country_code).filter(Boolean))].sort();
+  const cf = document.getElementById('gr-country-filter');
   if (countries.length > 1) {
-    countryFilter.innerHTML = '<option value="">All Countries</option>' +
+    cf.innerHTML = '<option value="">All Countries</option>' +
       countries.map(cc => {
         const name = (_grFiltered.find(o => o.country_code === cc)||{}).country || cc;
         return `<option value="${cc}">${cc}${name ? ' – ' + esc(name) : ''}</option>`;
       }).join('');
-    countryFilter.style.display = '';
+    cf.style.display = '';
   } else {
-    countryFilter.style.display = 'none';
-    countryFilter.value = '';
+    cf.style.display = 'none';
+    cf.value = '';
   }
 
   grRenderTable();
+  grRenderCharts();
   document.getElementById('gr-btn-csv').disabled = false;
   document.getElementById('gr-btn-pdf').disabled = false;
 }
@@ -2412,6 +2438,34 @@ function grApplyFilters() {
   _grFiltered = cc
     ? (_grReport.organisations||[]).filter(o => (o.country_code||'') === cc)
     : (_grReport.organisations||[]);
+  _grSortCol = null; _grSortAsc = true;
+  grRenderTable();
+  grRenderCharts();
+}
+
+function grSort(col) {
+  if (_grSortCol === col) {
+    _grSortAsc = !_grSortAsc;
+  } else {
+    _grSortCol = col;
+    _grSortAsc = col === 'name' || col === 'country_code';  // text cols default asc
+  }
+  const asc = _grSortAsc;
+  _grFiltered = [..._grFiltered].sort((a, b) => {
+    let va = a[col], vb = b[col];
+    if (col === 'level') {
+      va = GR_LEVEL_ORDER[grLevel(a.avg_score).toLowerCase()] ?? 99;
+      vb = GR_LEVEL_ORDER[grLevel(b.avg_score).toLowerCase()] ?? 99;
+    }
+    if (va == null) va = asc ? Infinity : -Infinity;
+    if (vb == null) vb = asc ? Infinity : -Infinity;
+    if (typeof va === 'string') return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return asc ? va - vb : vb - va;
+  });
+  // Update sort indicators
+  document.querySelectorAll('.gr-sort-ind').forEach(el => {
+    el.textContent = el.dataset.col === col ? (asc ? ' ▲' : ' ▼') : '';
+  });
   grRenderTable();
 }
 
@@ -2422,16 +2476,14 @@ function grRenderTable() {
   const sumEl = document.getElementById('gr-summary');
 
   if (!_grFiltered.length) {
-    table.style.display = 'none';
-    empty.style.display = '';
-    sumEl.style.display = 'none';
+    table.style.display = 'none'; empty.style.display = ''; sumEl.style.display = 'none';
     return;
   }
 
   sumEl.textContent = _grReport.summary || '';
   sumEl.style.display = '';
 
-  const rows = _grFiltered.map(o => {
+  tbody.innerHTML = _grFiltered.map(o => {
     const lvl    = grLevel(o.avg_score);
     const colour = GR_LEVEL_COLOURS[lvl] || '#6b7280';
     const score  = o.avg_score != null ? o.avg_score.toFixed(1) : 'N/A';
@@ -2441,8 +2493,7 @@ function grRenderTable() {
       <td style="color:var(--muted)">${esc(o.sector||'')}</td>
       <td style="text-align:right">${o.domain_count||0}</td>
       <td style="text-align:right">${score}</td>
-      <td><span style="background:${colour}20;color:${colour};padding:.15rem .45rem;
-                border-radius:3px;font-size:.74rem;font-weight:600">${lvl}</span></td>
+      <td><span style="background:${colour}20;color:${colour};padding:.15rem .45rem;border-radius:3px;font-size:.74rem;font-weight:600">${lvl}</span></td>
       <td style="text-align:right;color:#ef4444">${o.critical||0}</td>
       <td style="text-align:right;color:#f97316">${o.weak||0}</td>
       <td style="text-align:right;color:#eab308">${o.moderate||0}</td>
@@ -2452,27 +2503,25 @@ function grRenderTable() {
     </tr>`;
   }).join('');
 
-  // Totals row from filtered data
+  // Totals
   const tot = {
     domain_count: _grFiltered.reduce((s,o)=>s+(o.domain_count||0),0),
-    avg_score:    (() => { const sc=_grFiltered.filter(o=>o.avg_score!=null);
-                           return sc.length ? sc.reduce((s,o)=>s+o.avg_score,0)/sc.length : null; })(),
-    critical:     _grFiltered.reduce((s,o)=>s+(o.critical||0),0),
-    weak:         _grFiltered.reduce((s,o)=>s+(o.weak||0),0),
-    moderate:     _grFiltered.reduce((s,o)=>s+(o.moderate||0),0),
-    ready:        _grFiltered.reduce((s,o)=>s+(o.ready||0),0),
-    no_tls:       _grFiltered.reduce((s,o)=>s+(o.no_tls||0),0),
-    pqc_count:    _grFiltered.reduce((s,o)=>s+(o.pqc_count||0),0),
+    avg_score: (() => { const sc=_grFiltered.filter(o=>o.avg_score!=null); return sc.length ? sc.reduce((s,o)=>s+o.avg_score,0)/sc.length : null; })(),
+    critical: _grFiltered.reduce((s,o)=>s+(o.critical||0),0),
+    weak:     _grFiltered.reduce((s,o)=>s+(o.weak||0),0),
+    moderate: _grFiltered.reduce((s,o)=>s+(o.moderate||0),0),
+    ready:    _grFiltered.reduce((s,o)=>s+(o.ready||0),0),
+    no_tls:   _grFiltered.reduce((s,o)=>s+(o.no_tls||0),0),
+    pqc_count:_grFiltered.reduce((s,o)=>s+(o.pqc_count||0),0),
   };
   const tlvl   = grLevel(tot.avg_score);
   const tcolor = GR_LEVEL_COLOURS[tlvl] || '#6b7280';
   const tscore = tot.avg_score != null ? tot.avg_score.toFixed(1) : 'N/A';
-  const totRow = `<tr style="border-top:2px solid var(--border);font-weight:600">
+  tbody.innerHTML += `<tr style="border-top:2px solid var(--border);font-weight:600">
     <td>Totals</td><td></td><td></td>
     <td style="text-align:right">${tot.domain_count}</td>
     <td style="text-align:right">${tscore}</td>
-    <td><span style="background:${tcolor}20;color:${tcolor};padding:.15rem .45rem;
-              border-radius:3px;font-size:.74rem;font-weight:600">${tlvl}</span></td>
+    <td><span style="background:${tcolor}20;color:${tcolor};padding:.15rem .45rem;border-radius:3px;font-size:.74rem;font-weight:600">${tlvl}</span></td>
     <td style="text-align:right;color:#ef4444">${tot.critical}</td>
     <td style="text-align:right;color:#f97316">${tot.weak}</td>
     <td style="text-align:right;color:#eab308">${tot.moderate}</td>
@@ -2481,9 +2530,87 @@ function grRenderTable() {
     <td style="text-align:right;color:#38bdf8">${tot.pqc_count}</td>
   </tr>`;
 
-  tbody.innerHTML = rows + totRow;
   table.style.display = '';
   empty.style.display = 'none';
+}
+
+// ── Group Report Charts ────────────────────────────────────────────────────────
+
+function grRenderCharts() {
+  if (!_grFiltered.length) {
+    document.getElementById('gr-charts').style.display = 'none';
+    return;
+  }
+  document.getElementById('gr-charts').style.display = 'flex';
+  grRenderDonut();
+  grRenderBars();
+}
+
+function grRenderDonut() {
+  const svg = document.getElementById('gr-donut');
+  if (!svg) return;
+  const W = 220, H = 160, cx = 80, cy = 80, R = 60, r = 36;
+
+  // Count orgs by level
+  const counts = { Critical: 0, Weak: 0, Moderate: 0, Ready: 0, 'N/A': 0 };
+  _grFiltered.forEach(o => { const l = grLevel(o.avg_score); counts[l] = (counts[l]||0)+1; });
+  const total = _grFiltered.length;
+  const slices = Object.entries(counts).filter(([,v])=>v>0);
+
+  let angle = -Math.PI / 2;
+  let paths = '';
+  let legend = '';
+  let ly = 28;
+  slices.forEach(([lvl, cnt]) => {
+    const sweep = (cnt / total) * 2 * Math.PI;
+    const x1 = cx + R * Math.cos(angle), y1 = cy + R * Math.sin(angle);
+    angle += sweep;
+    const x2 = cx + R * Math.cos(angle), y2 = cy + R * Math.sin(angle);
+    const xi1 = cx + r * Math.cos(angle - sweep), yi1 = cy + r * Math.sin(angle - sweep);
+    const xi2 = cx + r * Math.cos(angle),          yi2 = cy + r * Math.sin(angle);
+    const large = sweep > Math.PI ? 1 : 0;
+    const col = GR_LEVEL_COLOURS[lvl] || '#6b7280';
+    paths += `<path d="M${xi1},${yi1} L${x1},${y1} A${R},${R} 0 ${large},1 ${x2},${y2} L${xi2},${yi2} A${r},${r} 0 ${large},0 ${xi1},${yi1} Z" fill="${col}" opacity="0.85">
+      <title>${lvl}: ${cnt}</title></path>`;
+    legend += `<rect x="150" y="${ly-8}" width="9" height="9" fill="${col}" rx="2"/>
+      <text x="162" y="${ly}" fill="#94a3b8" font-size="10">${lvl} (${cnt})</text>`;
+    ly += 18;
+  });
+
+  // Centre text
+  paths += `<text x="${cx}" y="${cy-4}" text-anchor="middle" fill="#e2e8f0" font-size="20" font-weight="600">${total}</text>
+    <text x="${cx}" y="${cy+13}" text-anchor="middle" fill="#64748b" font-size="9">orgs</text>`;
+
+  svg.innerHTML = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${paths}${legend}</svg>`;
+}
+
+function grRenderBars() {
+  const svg = document.getElementById('gr-bars');
+  if (!svg) return;
+  const data  = [..._grFiltered].sort((a,b) => (b.avg_score??-1)-(a.avg_score??-1));
+  const n     = data.length;
+  const PAD_L = 12, PAD_R = 8, PAD_T = 10, BAR_H = 18, GAP = 4;
+  const W     = 500;
+  const H     = PAD_T + n * (BAR_H + GAP);
+
+  let rows = '';
+  data.forEach((o, i) => {
+    const y      = PAD_T + i * (BAR_H + GAP);
+    const score  = o.avg_score ?? 0;
+    const col    = GR_LEVEL_COLOURS[grLevel(o.avg_score)] || '#6b7280';
+    const bw     = Math.max(2, ((W - PAD_L - PAD_R - 60) * score) / 100);
+    const label  = (o.name||'').slice(0, 22);
+    rows += `
+      <text x="${PAD_L}" y="${y + BAR_H - 5}" fill="#94a3b8" font-size="9.5" font-family="system-ui">${esc(label)}</text>
+      <rect x="${PAD_L + 60}" y="${y+2}" width="${bw}" height="${BAR_H-4}" fill="${col}" opacity="0.8" rx="3">
+        <title>${o.name}: ${o.avg_score != null ? o.avg_score.toFixed(1) : 'N/A'}</title>
+      </rect>
+      <text x="${PAD_L + 64 + bw}" y="${y + BAR_H - 5}" fill="${col}" font-size="9" font-family="monospace">${o.avg_score != null ? o.avg_score.toFixed(0) : 'N/A'}</text>`;
+  });
+
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('height', H);
+  svg.innerHTML = rows;
 }
 
 function grClearTable() {
@@ -2495,6 +2622,8 @@ function grClearTable() {
   if (empty) empty.style.display = '';
   const sum = document.getElementById('gr-summary');
   if (sum) sum.style.display = 'none';
+  const charts = document.getElementById('gr-charts');
+  if (charts) charts.style.display = 'none';
 }
 
 function grExportCSV() {
@@ -2503,7 +2632,9 @@ function grExportCSV() {
   if (!val) return;
   const url = viewBy === 'community'
     ? `/app/api/communities/${val}/report.csv`
-    : `/app/api/regions/${encodeURIComponent(val)}/report.csv`;
+    : viewBy === 'region'
+    ? `/app/api/regions/${encodeURIComponent(val)}/report.csv`
+    : `/app/api/countries/${encodeURIComponent(val)}/report.csv`;
   window.location = url;
 }
 
@@ -2513,7 +2644,9 @@ function grExportPDF() {
   if (!val) return;
   const url = viewBy === 'community'
     ? `/app/api/communities/${val}/report.pdf`
-    : `/app/api/regions/${encodeURIComponent(val)}/report.pdf`;
+    : viewBy === 'region'
+    ? `/app/api/regions/${encodeURIComponent(val)}/report.pdf`
+    : `/app/api/countries/${encodeURIComponent(val)}/report.pdf`;
   window.location = url;
 }
 

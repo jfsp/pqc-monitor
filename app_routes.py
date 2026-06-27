@@ -728,6 +728,84 @@ def api_region_report_csv(region):
     )
 
 
+
+@app_bp.route("/api/countries")
+@require_community_manager
+def api_countries():
+    """List distinct country_code/country pairs from all orgs visible to user."""
+    db   = _db()
+    user = current_user()
+    countries = db.get_countries()
+    if not user.is_admin:
+        # Scope to countries present in the user's visible orgs
+        orgs = db.get_organisations()
+        allowed_org_ids = set(user.org_ids)
+        for cid in user.community_ids:
+            for o in db.get_community_orgs(cid):
+                allowed_org_ids.add(o["id"])
+        visible_orgs = [o for o in orgs if o["id"] in allowed_org_ids]
+        visible_ccs  = {o["country_code"] for o in visible_orgs if o.get("country_code")}
+        countries = [c for c in countries if c["country_code"] in visible_ccs]
+    return jsonify(countries)
+
+
+@app_bp.route("/api/countries/<string:country_code>/report")
+@require_community_manager
+def api_country_report(country_code):
+    """Return aggregate PQC-readiness report for a country as JSON."""
+    db   = _db()
+    countries = db.get_countries()
+    match = next((c for c in countries
+                  if c["country_code"].upper() == country_code.upper()), None)
+    label = match["country"] if match else country_code.upper()
+    from reports.community_report import build_report
+    rows   = db.get_country_aggregate(country_code)
+    report = build_report(label, "Country", rows)
+    return jsonify(report)
+
+
+@app_bp.route("/api/countries/<string:country_code>/report.csv")
+@require_community_manager
+def api_country_report_csv(country_code):
+    """Download country report as CSV."""
+    db   = _db()
+    countries = db.get_countries()
+    match = next((c for c in countries
+                  if c["country_code"].upper() == country_code.upper()), None)
+    label = match["country"] if match else country_code.upper()
+    from reports.community_report import build_report, export_csv
+    rows     = db.get_country_aggregate(country_code)
+    report   = build_report(label, "Country", rows)
+    csv_data = export_csv(report)
+    fname    = f"country_{country_code.upper()}.csv"
+    return current_app.response_class(
+        csv_data, mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={fname}"}
+    )
+
+
+@app_bp.route("/api/countries/<string:country_code>/report.pdf")
+@require_community_manager
+def api_country_report_pdf(country_code):
+    """Download country report as PDF."""
+    db   = _db()
+    countries = db.get_countries()
+    match = next((c for c in countries
+                  if c["country_code"].upper() == country_code.upper()), None)
+    label = match["country"] if match else country_code.upper()
+    from reports.community_report import build_report, export_pdf
+    rows   = db.get_country_aggregate(country_code)
+    report = build_report(label, "Country", rows)
+    try:
+        pdf_bytes = export_pdf(report)
+    except ImportError as e:
+        return jsonify({"error": str(e)}), 503
+    fname = f"country_{country_code.upper()}.pdf"
+    return current_app.response_class(
+        pdf_bytes, mimetype="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={fname}"}
+    )
+
 @app_bp.route("/api/regions/<path:region>/report.pdf")
 @require_community_manager
 def api_region_report_pdf(region):

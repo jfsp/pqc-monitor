@@ -102,6 +102,7 @@ The script uses `git diff --diff-filter=AMRC` to identify changed files, skips p
 | 1.5.2 | Fix: country edits not persisting — `update_organisation()` whitelist missing `country_code`/`country`; `syncCountryName()` undefined in admin UI; migration failures silently swallowed (now ERROR + re-raise). See §2.5 for full details. |
 | 1.6.0 | Feature: Community concept — group organisations for scoped access and reporting; `ROLE_COMMUNITY_MANAGER`; Group Report tab (community + region views, PDF/CSV export, country filter); 8 new API endpoints; `community` CLI group (7 subcommands); weasyprint PDF; 31 new tests; schema v17. See §2.6 for full details. |
 | 1.6.1 | Fix: `scripts/deploy.sh` — `data/` was in PROTECTED list, blocking `data/database.py`, `data/migrations.py`, `data/geo_inference.py`, `data/tld_geo.csv` from being deployed. Live DB lives in `/var/lib/` and is never in git. Removed `data/` from PROTECTED; added explanatory comment. |
+| 1.7.0 | Feature: Group Report enhancements — By Country view (DB + 4 API endpoints); inline SVG charts (donut + bar); sortable table headers; `scripts/bulk_assign.py` for bulk region/community assignment. See §2.7 for full details. |
 
 ### 2.1 v1.3.1 — Deployment fixes (2026-06-25)
 
@@ -230,6 +231,51 @@ Service restart trigger sets (restart only when these paths change):
 - `pqc-monitor-scheduler`: `pqc_monitor.py`, `version.py`, `requirements.txt`, `ct/`, `data/`, `scanner/`, `scheduler/`
 
 Files outside both sets (`scripts/`, `tests/`, `systemd/`, `guidelines/`, docs) never trigger a restart.
+
+---
+
+## 2.7 — v1.7.0 detail
+
+**Group Report enhancements + bulk assignment tool**
+
+### By Country view
+
+New "By Country" option in the Group Report view-by selector. Fetches `/app/api/countries` which returns distinct `country_code`/`country` pairs from orgs visible to the current user. Selecting a country loads the aggregate report via `/app/api/countries/<cc>/report` (same structure as community/region). CSV and PDF export work identically. DB layer: `get_country_aggregate(cc)` filters `organisations` by `UPPER(country_code) = UPPER(?)` and feeds `_build_group_aggregate()`. `get_countries()` returns distinct pairs ordered by `country_code`.
+
+### Inline charts
+
+Two SVG charts rendered above the table when a report is loaded:
+
+- **Donut chart** (`#gr-donut`): org count by readiness level (Critical/Weak/Moderate/Ready/N/A) with legend. Pure inline SVG, no external library.
+- **Bar chart** (`#gr-bars`): one horizontal bar per org, sorted descending by score, colour-coded by level. Bar width proportional to score (0–100). Clears when no report is loaded.
+
+Both charts respond to the country filter dropdown.
+
+### Sortable table
+
+Every column header in the Group Report table is clickable. `grSort(col)` sorts `_grFiltered` in place and re-renders. Sort state tracked via `_grSortCol` + `_grSortAsc`. Visual indicator (▲/▼) shown on the active column via `.gr-sort-ind` spans. Level column maps to severity order for sorting. Text columns (name, CC) default to ascending on first click; numeric columns default to descending.
+
+### `scripts/bulk_assign.py`
+
+Standalone script (no Flask context required). Usage:
+
+```bash
+# Set region on orgs from file:
+python3 scripts/bulk_assign.py --region Europe --file orgs.txt
+
+# Create/add to community:
+python3 scripts/bulk_assign.py --community "Spanish Banking" --file orgs.txt
+
+# Both at once, dry-run:
+python3 scripts/bulk_assign.py --region Europe --community "EU Finance" --file orgs.txt --dry-run
+
+# From stdin:
+echo -e "Banco Santander\nBBVA" | python3 scripts/bulk_assign.py --region Europe
+```
+
+Input: one org name per line, `#` comments, blank lines ignored. Matching is case-insensitive exact (no partial match). Unmatched names printed as warnings. Already-assigned orgs skipped. Community created if it doesn't exist. DB path auto-detected from `config.yaml` or defaults to `/var/lib/pqc-monitor/pqc_monitor.db`.
+
+**Files changed**: `data/database.py`, `app_routes.py`, `dashboard/app.py`, `scripts/bulk_assign.py` (new).
 
 ---
 

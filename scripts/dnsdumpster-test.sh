@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-DOMAIN="${1:-bundesbank.de}"
+DOMAIN="${1:-google.com}"
 CONFIG_PROD="/etc/pqc-monitor/config.yaml"
 CONFIG_DEV="$(dirname "$0")/../config/config.yaml"
 

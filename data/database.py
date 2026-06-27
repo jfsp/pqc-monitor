@@ -340,6 +340,10 @@ class Database:
         return {r["domain"] for r in rows}
 
     def get_assessments_by_service_type(
+        self, run_id: str = None, service_type: str = None
+    ) -> list:
+        """
+        Return assessments filtered by service_type.
         Both run_id and service_type are optional filters.
         service_type=None returns all; service_type='web_primary' returns only those rows.
         """

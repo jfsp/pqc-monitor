@@ -1319,6 +1319,20 @@ async function openEditOrg(orgId) {
   document.getElementById('modal-org').classList.add('open');
 }
 
+function syncCountryName() {
+  const sel = document.getElementById('f-org-country-code');
+  const inp = document.getElementById('f-org-country');
+  if (!sel || !inp) return;
+  const opt = sel.options[sel.selectedIndex];
+  if (opt && opt.value) {
+    // Extract display name from option text: "ES – Spain" → "Spain"
+    const parts = opt.text.split('–');
+    inp.value = parts.length > 1 ? parts[1].trim() : opt.text.trim();
+  } else {
+    inp.value = '';
+  }
+}
+
 async function submitOrgModal() {
   const body = {
     name:         document.getElementById('f-org-name').value.trim(),

@@ -99,6 +99,7 @@ The script uses `git diff --diff-filter=AMRC` to identify changed files, skips p
 | 1.4.0 | Fix: no-TLS domains shown as Critical → now N/A; fix: analyst sees forbidden tabs; fix: roadmap includes N/A domains; fix: scheduler service not starting (DB path mismatch); new: incremental deploy script. See §2.2 for full details. |
 | 1.5.0 | Feature: Country on organisations — `country_code` (ISO 3166-1 alpha-2) + `country` (display name) on every org; schema v15; country dropdown filter in dashboard; `?country_code=` on `/api/assessments`. See §2.3 for full details. |
 | 1.5.1 | Feature: Country + region on scan runs — TLD-based auto-inference via `data/tld_geo.csv`; schema v16; `--country-code`/`--country` on `scan` and `schedule` CLI commands; `list-runs` shows country column. See §2.4 for full details. |
+| 1.5.2 | Fix: country edits not persisting — `update_organisation()` whitelist missing `country_code`/`country`; `syncCountryName()` undefined in admin UI; migration failures silently swallowed (now ERROR + re-raise). See §2.5 for full details. |
 
 ### 2.1 v1.3.1 — Deployment fixes (2026-06-25)
 
@@ -227,6 +228,38 @@ Service restart trigger sets (restart only when these paths change):
 - `pqc-monitor-scheduler`: `pqc_monitor.py`, `version.py`, `requirements.txt`, `ct/`, `data/`, `scanner/`, `scheduler/`
 
 Files outside both sets (`scripts/`, `tests/`, `systemd/`, `guidelines/`, docs) never trigger a restart.
+
+---
+
+## 2.5 — v1.5.2 detail
+
+**Bug fixes: country edits not persisting + silent migration failures**
+
+Three bugs prevented country from being saved after the v1.5.0/v1.5.1 deploy:
+
+1. **`data/database.py` — `update_organisation()` whitelist** (root cause of data loss):
+   The `allowed` set was `{"name", "sector", "region", "description"}` — `country_code`
+   and `country` were not included. Every PATCH received both fields from the route,
+   but `update_organisation()` silently filtered them out before building the SQL UPDATE.
+   Fixed: `allowed = {"name", "sector", "region", "description", "country_code", "country"}`.
+
+2. **`admin/routes.py` — `syncCountryName()` undefined** (prevented value from being set):
+   The country-code `<select>` had `onchange="syncCountryName()"` but the function was
+   never implemented. Selecting a country threw `ReferenceError: syncCountryName is not
+   defined` in the browser console, which in some browsers resets the select value before
+   `submitOrgModal()` reads it. Fixed: added `syncCountryName()` implementation that
+   extracts the display name from the selected option text and writes it to `f-org-country`.
+
+3. **`data/database.py` — silent migration failure** (masked the schema lag):
+   `Database.__init__` caught all migration exceptions and logged them at `DEBUG` level
+   with the message `"Migrations skipped"`, then continued normally. Schema v15 almost
+   certainly failed on startup (import path issue under gunicorn) and was swallowed,
+   leaving the DB at v14 with no visible error. Fixed: now logs at `ERROR` and re-raises,
+   causing a hard startup failure with a clear message instead of silent data loss.
+
+**Deploy notes**: apply the three patches to the live server manually (as done during
+diagnosis) then `sudo systemctl restart pqc-monitor-web`. No DB migration needed — v15
+and v16 were applied manually during diagnosis.
 
 ---
 

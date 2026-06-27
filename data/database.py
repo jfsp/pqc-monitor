@@ -39,7 +39,8 @@ class Database:
             with self._connect() as conn:
                 apply_migrations(conn)
         except Exception as e:
-            logger.debug(f"Migrations skipped: {e}")
+            logger.error(f"Migration failed — database may be on wrong schema version: {e}")
+            raise
         logger.info(f"Database initialised: {db_path}")
 
     def _connect(self):

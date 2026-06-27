@@ -6,6 +6,22 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.2] — 2026-06-27
+
+### Fixed
+- **`data/database.py`**: `update_organisation()` `allowed` whitelist was missing
+  `country_code` and `country` — both fields were silently dropped on every PATCH,
+  so country edits never persisted to the DB
+- **`admin/routes.py`**: `syncCountryName()` was referenced in `onchange` on the
+  country-code `<select>` but never defined — selecting a country threw a
+  `ReferenceError` in the browser, preventing the value from being committed before
+  `submitOrgModal()` read it
+- **`data/database.py`**: migration failures were caught and logged at `DEBUG` level
+  (`"Migrations skipped"`) then silently swallowed — schema upgrades could fail
+  invisibly in production; now logged at `ERROR` and re-raised so startup fails
+  loudly with a clear message
+
+---
 ## [1.5.1] — 2026-06-27
 
 ### Added

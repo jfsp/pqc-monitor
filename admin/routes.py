@@ -18,7 +18,7 @@ from flask import (
 )
 
 from auth.middleware import require_admin, current_user, _audit
-from auth.models import ROLE_ADMIN, ROLE_ANALYST, ALL_ROLES
+from auth.models import ROLE_ADMIN, ROLE_COMMUNITY_MANAGER, ROLE_ANALYST, ALL_ROLES
 
 logger = logging.getLogger(__name__)
 admin_bp = Blueprint("admin_bp", __name__, url_prefix="/admin")
@@ -32,6 +32,104 @@ def _db():
 
 
 # ── Admin SPA shell ───────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Community CRUD API
+# ══════════════════════════════════════════════════════════════════════════════
+
+@admin_bp.route("/api/communities")
+@require_admin
+def api_list_communities():
+    db = _db()
+    communities = db.get_communities()
+    for c in communities:
+        c["orgs"] = db.get_community_orgs(c["id"])
+    return jsonify(communities)
+
+
+@admin_bp.route("/api/communities", methods=["POST"])
+@require_admin
+def api_create_community():
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+    me = current_user()
+    db = _db()
+    try:
+        cid = db.create_community(
+            name=name,
+            description=data.get("description", ""),
+            created_by=me.id
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 409
+    org_ids = [int(x) for x in data.get("org_ids", []) if str(x).isdigit()]
+    if org_ids:
+        db.set_community_orgs(cid, org_ids, added_by=me.id)
+    _audit("community.created", resource=name)
+    c = db.get_community(cid)
+    c["orgs"] = db.get_community_orgs(cid)
+    return jsonify(c), 201
+
+
+@admin_bp.route("/api/communities/<int:cid>")
+@require_admin
+def api_get_community(cid):
+    db = _db()
+    c  = db.get_community(cid)
+    if not c:
+        return jsonify({"error": "not found"}), 404
+    c["orgs"] = db.get_community_orgs(cid)
+    return jsonify(c)
+
+
+@admin_bp.route("/api/communities/<int:cid>", methods=["PATCH"])
+@require_admin
+def api_update_community(cid):
+    data = request.get_json() or {}
+    db   = _db()
+    ok   = db.update_community(cid, **{
+        k: data[k] for k in ("name", "description") if k in data
+    })
+    if not ok:
+        return jsonify({"error": "not found"}), 404
+    if "org_ids" in data:
+        me = current_user()
+        db.set_community_orgs(
+            cid,
+            [int(x) for x in data["org_ids"] if str(x).isdigit()],
+            added_by=me.id
+        )
+    _audit("community.updated", resource=str(cid))
+    c = db.get_community(cid)
+    c["orgs"] = db.get_community_orgs(cid)
+    return jsonify(c)
+
+
+@admin_bp.route("/api/communities/<int:cid>", methods=["DELETE"])
+@require_admin
+def api_delete_community(cid):
+    db = _db()
+    if not db.delete_community(cid):
+        return jsonify({"error": "not found"}), 404
+    _audit("community.deleted", resource=str(cid))
+    return jsonify({"deleted": cid})
+
+
+@admin_bp.route("/api/users/<int:uid>/communities", methods=["PUT"])
+@require_admin
+def api_set_user_communities(uid):
+    """Replace a user's community assignments. Auto-promotes analyst→community_manager."""
+    data         = request.get_json() or {}
+    community_ids = [int(x) for x in data.get("community_ids", []) if str(x).isdigit()]
+    me   = current_user()
+    store = current_app.config["AUTH_STORE"]
+    store.set_user_communities(uid, community_ids, granted_by=me.id)
+    _audit("user.communities_updated", resource=str(uid),
+           detail=f"communities={community_ids}")
+    return jsonify({"ok": True, "community_ids": community_ids})
+
 
 @admin_bp.route("/")
 @admin_bp.route("/<path:_>")
@@ -470,7 +568,8 @@ body { background:var(--bg); color:var(--text);
 .badge { display:inline-block; padding:.15rem .55rem; border-radius:4px;
          font-size:.7rem; font-weight:600; }
 .badge-admin    { background:rgba(124,58,237,.2); color:#a78bfa; }
-.badge-analyst  { background:rgba(0,212,255,.1);  color:var(--accent); }
+.badge-analyst            { background:rgba(0,212,255,.1);  color:var(--accent); }
+.badge-community_manager  { background:rgba(168,85,247,.15); color:#c084fc; }
 .badge-active   { background:rgba(34,197,94,.1);  color:var(--ready); }
 .badge-inactive { background:rgba(100,116,139,.1);color:var(--muted); }
 
@@ -554,7 +653,8 @@ select option { background:var(--panel); }
     <div class="section-label">Management</div>
     <a href="#" onclick="showView('users')"    class="active" id="nav-users">👤 Users</a>
     <a href="#" onclick="showView('lists')"    id="nav-lists">📋 Domain Lists</a>
-    <a href="#" onclick="showView('orgs')"     id="nav-orgs">🏢 Organisations</a>
+    <a href="#" onclick="showView('orgs')"         id="nav-orgs">🏢 Organisations</a>
+    <a href="#" onclick="showView('communities')"  id="nav-communities">🌐 Communities</a>
     <div class="section-label">Monitoring</div>
     <a href="#" onclick="showView('audit')"    id="nav-audit">📜 Audit Log</a>
   </nav>
@@ -674,6 +774,7 @@ select option { background:var(--panel); }
         <label>Role *</label>
         <select id="f-role">
           <option value="analyst">Analyst</option>
+          <option value="community_manager">Community Manager</option>
           <option value="admin">Admin</option>
         </select>
       </div>
@@ -694,8 +795,12 @@ select option { background:var(--panel); }
       <div class="check-list" id="f-domain-lists"></div>
     </div>
     <div class="form-group" style="margin-top:1rem" id="f-user-orgs-group">
-      <label>Assigned Organisations (Analyst only)</label>
+      <label>Assigned Organisations</label>
       <div class="check-list" id="f-user-orgs"></div>
+    </div>
+    <div class="form-group" style="margin-top:1rem" id="f-user-communities-group">
+      <label>Assigned Communities <span style="color:var(--muted);font-size:.75rem">(auto-promotes to Community Manager)</span></label>
+      <div class="check-list" id="f-user-communities"></div>
     </div>
     <div class="form-actions">
       <button class="btn btn-ghost" onclick="closeModal('modal-user')">Cancel</button>
@@ -873,6 +978,7 @@ async function openEditUser(uid) {
   hideAlert('modal-alert');
   loadDomainListCheckboxes(u);
   loadOrgCheckboxes(u);
+  loadCommunityCheckboxes(u);
   document.getElementById('modal-user').classList.add('open');
 }
 
@@ -883,7 +989,7 @@ async function loadDomainListCheckboxes(user) {
   const assigned = new Set((user?.domain_list_ids) || []);
   const role = document.getElementById('f-role').value;
   document.getElementById('f-domain-lists-group').style.display =
-    (role === 'analyst') ? 'block' : 'none';
+    (role === 'analyst' || role === 'community_manager') ? 'block' : 'none';
   container.innerHTML = _allDomainLists.map(dl =>
     `<label class="check-item">
       <input type="checkbox" value="${dl.id}" ${assigned.has(dl.id) ? 'checked' : ''}>
@@ -901,7 +1007,7 @@ async function loadOrgCheckboxes(user) {
   const assigned = new Set((user?.org_ids) || []);
   const role = document.getElementById('f-role').value;
   document.getElementById('f-user-orgs-group').style.display =
-    (role === 'analyst') ? 'block' : 'none';
+    (role === 'analyst' || role === 'community_manager') ? 'block' : 'none';
   container.innerHTML = orgs.map(o =>
     `<label class="check-item">
       <input type="checkbox" value="${o.id}" ${assigned.has(o.id) ? 'checked' : ''}>
@@ -911,11 +1017,31 @@ async function loadOrgCheckboxes(user) {
   ).join('') || '<div style="color:var(--muted);font-size:.82rem;padding:.5rem">No organisations yet.</div>';
 }
 
+async function loadCommunityCheckboxes(user) {
+  const container = document.getElementById('f-user-communities');
+  if (!container) return;
+  const r = await fetch('/admin/api/communities');
+  const communities = await r.json();
+  const assigned = new Set((user?.community_ids) || []);
+  const role = document.getElementById('f-role').value;
+  document.getElementById('f-user-communities-group').style.display =
+    (role === 'community_manager') ? 'block' : 'none';
+  container.innerHTML = communities.map(c =>
+    `<label class="check-item">
+      <input type="checkbox" value="${c.id}" ${assigned.has(c.id) ? 'checked' : ''}>
+      <span>${esc(c.name)}</span>
+      <span style="color:var(--muted);font-size:.72rem;margin-left:auto">${c.org_count||0} orgs</span>
+    </label>`
+  ).join('') || '<div style="color:var(--muted);font-size:.82rem;padding:.5rem">No communities yet.</div>';
+}
+
 document.getElementById('f-role')?.addEventListener('change', () => {
   const role = document.getElementById('f-role').value;
-  const show = role === 'analyst' ? 'block' : 'none';
-  document.getElementById('f-domain-lists-group').style.display = show;
-  document.getElementById('f-user-orgs-group').style.display = show;
+  const showAnalyst   = (role === 'analyst' || role === 'community_manager') ? 'block' : 'none';
+  const showCommunity = (role === 'community_manager') ? 'block' : 'none';
+  document.getElementById('f-domain-lists-group').style.display = showAnalyst;
+  document.getElementById('f-user-orgs-group').style.display    = showAnalyst;
+  document.getElementById('f-user-communities-group').style.display = showCommunity;
 });
 
 async function submitUserModal() {
@@ -961,6 +1087,14 @@ async function submitUserModal() {
     await fetch(`/admin/api/users/${_editUserId}/orgs`, {
       method:'PUT', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({org_ids: selectedOrgs})
+    });
+
+    // Update community assignments
+    const selectedCommunities = [...document.querySelectorAll('#f-user-communities input:checked')]
+      .map(cb => parseInt(cb.value));
+    await fetch(`/admin/api/users/${_editUserId}/communities`, {
+      method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({community_ids: selectedCommunities})
     });
 
     closeModal('modal-user');
@@ -1353,6 +1487,96 @@ async function submitOrgModal() {
   loadOrgs();
 }
 
+
+// ── Community management ──────────────────────────────────────────────────────
+
+let _editCommunityId = null;
+
+async function loadCommunities() {
+  const r = await fetch('/admin/api/communities');
+  const communities = await r.json();
+  const tbody = document.getElementById('communities-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = communities.map(c => `
+    <tr>
+      <td style="color:var(--muted)">#${c.id}</td>
+      <td><strong>${esc(c.name)}</strong></td>
+      <td style="color:var(--muted)">${esc(c.description||'')}</td>
+      <td style="text-align:center">
+        <span style="background:rgba(14,165,233,.1);color:#38bdf8;padding:.15rem .5rem;border-radius:4px;font-size:.78rem">
+          ${c.org_count||0} orgs
+        </span>
+      </td>
+      <td>
+        <button class="btn btn-sm btn-ghost" onclick="openEditCommunity(${c.id})">Edit</button>
+        <button class="btn btn-sm btn-ghost" style="color:#ef4444"
+                onclick="deleteCommunity(${c.id}, '${esc(c.name)}')">Delete</button>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:2rem">No communities yet.</td></tr>';
+}
+
+async function openNewCommunity() {
+  _editCommunityId = null;
+  document.getElementById('modal-community-title').textContent = 'New Community';
+  document.getElementById('modal-community-submit').textContent = 'Create';
+  document.getElementById('f-comm-name').value = '';
+  document.getElementById('f-comm-desc').value = '';
+  await loadCommOrgCheckboxes(null);
+  document.getElementById('modal-community').classList.add('open');
+}
+
+async function openEditCommunity(cid) {
+  _editCommunityId = cid;
+  const r = await fetch(`/admin/api/communities/${cid}`);
+  const c = await r.json();
+  document.getElementById('modal-community-title').textContent = `Edit: ${c.name}`;
+  document.getElementById('modal-community-submit').textContent = 'Save';
+  document.getElementById('f-comm-name').value = c.name || '';
+  document.getElementById('f-comm-desc').value = c.description || '';
+  const assignedIds = new Set((c.orgs||[]).map(o => o.id));
+  await loadCommOrgCheckboxes(assignedIds);
+  document.getElementById('modal-community').classList.add('open');
+}
+
+async function loadCommOrgCheckboxes(assignedIds) {
+  const container = document.getElementById('f-comm-orgs');
+  const r = await fetch('/admin/api/organisations');
+  const orgs = await r.json();
+  container.innerHTML = orgs.map(o =>
+    `<label class="check-item">
+      <input type="checkbox" value="${o.id}" ${assignedIds && assignedIds.has(o.id) ? 'checked' : ''}>
+      <span>${esc(o.name)}</span>
+      <span style="color:var(--muted);font-size:.72rem;margin-left:auto">${o.region||''}</span>
+    </label>`
+  ).join('') || '<div style="color:var(--muted);font-size:.82rem;padding:.5rem">No organisations yet.</div>';
+}
+
+async function submitCommunityModal() {
+  const name = document.getElementById('f-comm-name').value.trim();
+  if (!name) { showAlert('modal-community-alert', 'Name is required.', 'error'); return; }
+  const desc    = document.getElementById('f-comm-desc').value.trim();
+  const org_ids = [...document.querySelectorAll('#f-comm-orgs input:checked')]
+    .map(cb => parseInt(cb.value));
+  const body   = { name, description: desc, org_ids };
+  const url    = _editCommunityId ? `/admin/api/communities/${_editCommunityId}` : '/admin/api/communities';
+  const method = _editCommunityId ? 'PATCH' : 'POST';
+  const r = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const d = await r.json();
+  if (d.error) { showAlert('modal-community-alert', d.error, 'error'); return; }
+  closeModal('modal-community');
+  showPageAlert('communities-alert', _editCommunityId ? 'Community updated.' : 'Community created.', 'ok');
+  loadCommunities();
+}
+
+async function deleteCommunity(cid, name) {
+  if (!confirm(`Delete community "${name}"? This will remove all org and user assignments.`)) return;
+  const r = await fetch(`/admin/api/communities/${cid}`, { method: 'DELETE' });
+  const d = await r.json();
+  if (d.error) { showPageAlert('communities-alert', d.error, 'error'); return; }
+  showPageAlert('communities-alert', 'Community deleted.', 'ok');
+  loadCommunities();
+}
+
 async function openOrgDomains(orgId, orgName) {
   const r = await fetch(`/admin/api/organisations/${orgId}`);
   const o = await r.json();
@@ -1540,6 +1764,56 @@ loadUsers();
     </div>
   </div>
 </div>
+
+
+  <!-- ── Communities view ── -->
+  <div id="view-communities" class="view" style="display:none">
+    <div class="page-hdr">
+      <div>
+        <h2>Communities</h2>
+        <p class="page-sub">Group organisations into communities and assign users to them.</p>
+      </div>
+      <button class="btn" onclick="openNewCommunity()">+ New Community</button>
+    </div>
+    <div id="communities-alert" class="alert" style="display:none"></div>
+    <table class="data-table" id="communities-table">
+      <thead><tr>
+        <th>#</th><th>Name</th><th>Description</th>
+        <th style="text-align:center">Orgs</th><th>Actions</th>
+      </tr></thead>
+      <tbody id="communities-tbody"></tbody>
+    </table>
+  </div>
+
+  <!-- ── Community modal ── -->
+  <div class="modal-bg" id="modal-community">
+    <div class="modal" style="width:560px;max-height:90vh;overflow-y:auto">
+      <div class="modal-header">
+        <span id="modal-community-title">New Community</span>
+        <button class="btn-ghost btn-sm" onclick="closeModal('modal-community')">✕</button>
+      </div>
+      <div id="modal-community-alert" class="alert"></div>
+      <div class="form-group">
+        <label>Name *</label>
+        <input type="text" id="f-comm-name" placeholder="e.g. Spanish Banking Sector"
+               style="width:100%;background:var(--panel);border:1px solid var(--border);color:var(--text);padding:.3rem .5rem;border-radius:4px">
+      </div>
+      <div class="form-group">
+        <label>Description</label>
+        <input type="text" id="f-comm-desc" placeholder="Optional description"
+               style="width:100%;background:var(--panel);border:1px solid var(--border);color:var(--text);padding:.3rem .5rem;border-radius:4px">
+      </div>
+      <div class="form-group">
+        <label>Member Organisations</label>
+        <div class="check-list" id="f-comm-orgs"
+             style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;padding:.4rem"></div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-ghost" onclick="closeModal('modal-community')">Cancel</button>
+        <button class="btn" id="modal-community-submit" onclick="submitCommunityModal()">Create</button>
+      </div>
+    </div>
+  </div>
 
 <footer style="text-align:center;padding:1.25rem;color:var(--muted);font-size:.7rem;border-top:1px solid var(--border);margin-top:2rem">
   PQC-Monitor v{{ version }} &nbsp;·&nbsp; GPL-3.0-or-later &nbsp;·&nbsp; AI-assisted (Claude/Anthropic)

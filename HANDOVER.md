@@ -100,6 +100,7 @@ The script uses `git diff --diff-filter=AMRC` to identify changed files, skips p
 | 1.5.0 | Feature: Country on organisations — `country_code` (ISO 3166-1 alpha-2) + `country` (display name) on every org; schema v15; country dropdown filter in dashboard; `?country_code=` on `/api/assessments`. See §2.3 for full details. |
 | 1.5.1 | Feature: Country + region on scan runs — TLD-based auto-inference via `data/tld_geo.csv`; schema v16; `--country-code`/`--country` on `scan` and `schedule` CLI commands; `list-runs` shows country column. See §2.4 for full details. |
 | 1.5.2 | Fix: country edits not persisting — `update_organisation()` whitelist missing `country_code`/`country`; `syncCountryName()` undefined in admin UI; migration failures silently swallowed (now ERROR + re-raise). See §2.5 for full details. |
+| 1.6.0 | Feature: Community concept — group organisations for scoped access and reporting; `ROLE_COMMUNITY_MANAGER`; Group Report tab (community + region views, PDF/CSV export, country filter); 8 new API endpoints; `community` CLI group (7 subcommands); weasyprint PDF; 31 new tests; schema v17. See §2.6 for full details. |
 
 ### 2.1 v1.3.1 — Deployment fixes (2026-06-25)
 
@@ -228,6 +229,88 @@ Service restart trigger sets (restart only when these paths change):
 - `pqc-monitor-scheduler`: `pqc_monitor.py`, `version.py`, `requirements.txt`, `ct/`, `data/`, `scanner/`, `scheduler/`
 
 Files outside both sets (`scripts/`, `tests/`, `systemd/`, `guidelines/`, docs) never trigger a restart.
+
+---
+
+## 2.6 — v1.6.0 detail
+
+**Community — group organisations for scoped access and reporting**
+
+### Data model
+
+```
+communities               (id, name, description, created_at, created_by)
+community_organisations   (community_id, org_id, added_at, added_by)  PK both cols
+user_communities          (user_id, community_id, granted_at, granted_by)  PK both cols
+```
+
+Schema v17 adds all three tables with cascade deletes and indexes. Domain resolution for non-admin users now has three additive paths: direct domain lists → direct org assignments → community org assignments.
+
+### Role: `community_manager`
+
+New role between `analyst` and `admin`. Auto-promoted from `analyst` when first community is assigned via admin UI or CLI (`set_user_communities`). Admins are never affected. Has `group_report.view` permission (same as admin). Cannot access admin panel, run scans, or manage users.
+
+### Group Report tab
+
+Replaces the previous concept of separate community/region dashboards with a single tab. Positioned after Dashboard, before Domain Discovery. Tab is hidden from analysts. Features:
+
+- Top selector: **By Community** or **By Region** (switches the group dropdown)
+- Country filter: only shown when the selected group spans >1 distinct country
+- Aggregate table: one row per org — CC, Sector, Domains, Score, Level badge, Critical/Weak/Moderate/Ready/No TLS/PQC counts; Totals row at bottom
+- Executive summary panel: auto-generated paragraph (org count, avg score, PQC detection status)
+- CSV and PDF export buttons (disabled until a group is selected)
+
+### PDF report (`reports/community_report.py`)
+
+Generated server-side via weasyprint. A4 landscape. Contains: PQC-Monitor branding header, group name + generation timestamp, executive summary paragraph, colour-coded aggregate table, footer. Requires weasyprint system deps (Pango, Cairo) — install with `apt install python3-weasyprint` or `pip install weasyprint` after system deps. PDF endpoint returns 503 JSON if weasyprint is not installed, so the rest of the app is not affected.
+
+### API endpoints
+
+All under `/app/api/` (auth-gated, require `community_manager` or `admin`):
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/communities` | List communities (scoped to user's assignments for non-admin) |
+| `GET /api/communities/<id>/report` | JSON aggregate report |
+| `GET /api/communities/<id>/report.csv` | CSV download |
+| `GET /api/communities/<id>/report.pdf` | PDF download |
+| `GET /api/regions` | Distinct region values visible to user |
+| `GET /api/regions/<name>/report` | JSON aggregate by region |
+| `GET /api/regions/<name>/report.csv` | CSV download |
+| `GET /api/regions/<name>/report.pdf` | PDF download |
+
+### CLI
+
+```bash
+# Create a community
+pqc_monitor.py community create "Spanish Banking Sector" -d "Major Spanish banks"
+
+# Add orgs
+pqc_monitor.py community add-org 1 3   # community 1, org 3
+
+# Assign user (auto-promotes analyst → community_manager)
+pqc_monitor.py community assign-user 1 javier
+
+# Generate reports
+pqc_monitor.py community report 1 --format text
+pqc_monitor.py community report 1 --format csv -o report.csv
+pqc_monitor.py community region-report Europe --format json
+```
+
+### Admin UI
+
+New **Communities** section in the left nav (between Organisations and Monitoring). Create/edit/delete communities, assign orgs via checkbox list. User modal updated: `community_manager` role option; community assignment section visible when role is `community_manager`; note explains auto-promote behaviour.
+
+### Deploy notes
+
+Run `deploy.sh` — both web and scheduler restart (both touch `data/`). Migration v17 runs automatically on startup. Install weasyprint system deps before deploying if PDF export is required:
+
+```bash
+sudo apt install -y libpango-1.0-0 libharfbuzz0b libpangoft2-1.0-0
+pip install weasyprint>=62.0 --break-system-packages
+```
+
+PDF export gracefully degrades (503 JSON) if weasyprint is absent.
 
 ---
 

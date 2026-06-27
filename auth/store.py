@@ -20,7 +20,7 @@ from typing import Optional
 
 from werkzeug.security import generate_password_hash, check_password_hash
 
-from auth.models import User, AuditEvent, ROLE_ADMIN, ROLE_ANALYST, ALL_ROLES
+from auth.models import User, AuditEvent, ROLE_ADMIN, ROLE_COMMUNITY_MANAGER, ROLE_ANALYST, ALL_ROLES
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +202,15 @@ class AuthStore:
             ).fetchall()
         dl_ids  = [r["domain_list_id"] for r in dl_rows]
         org_ids = [r["org_id"] for r in org_rows]
+        try:
+            with self._connect() as conn:
+                comm_rows = conn.execute(
+                    "SELECT community_id FROM user_communities WHERE user_id=?",
+                    (d["id"],)
+                ).fetchall()
+            community_ids = [r["community_id"] for r in comm_rows]
+        except Exception:
+            community_ids = []
         return User(
             id=d["id"],
             username=d["username"],
@@ -214,6 +223,7 @@ class AuthStore:
             password_hash=d["password_hash"],
             domain_list_ids=dl_ids,
             org_ids=org_ids,
+            community_ids=community_ids,
         )
 
     def set_user_orgs(self, user_id: int, org_ids: list,
@@ -229,6 +239,29 @@ class AuthStore:
                     "INSERT OR IGNORE INTO user_organisations "
                     "(user_id, org_id, granted_at, granted_by) VALUES (?,?,?,?)",
                     (user_id, oid, ts, granted_by)
+                )
+
+    def set_user_communities(self, user_id: int, community_ids: list,
+                              granted_by: int = None):
+        """Replace a user's community assignments atomically.
+        Auto-promotes analyst → community_manager when communities are assigned.
+        """
+        ts = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM user_communities WHERE user_id=?", (user_id,)
+            )
+            for cid in community_ids:
+                conn.execute(
+                    "INSERT OR IGNORE INTO user_communities "
+                    "(user_id, community_id, granted_at, granted_by) VALUES (?,?,?,?)",
+                    (user_id, cid, ts, granted_by)
+                )
+            # Auto-promote: analyst → community_manager when communities assigned
+            if community_ids:
+                conn.execute(
+                    "UPDATE users SET role=? WHERE id=? AND role=?",
+                    (ROLE_COMMUNITY_MANAGER, user_id, ROLE_ANALYST)
                 )
 
     def get_user_domains(self, user_id: int) -> list[str]:
@@ -273,6 +306,24 @@ class AuthStore:
                 if d not in seen:
                     seen.add(d)
                     domains.append(d)
+
+            # Community path (additive): orgs via user_communities
+            try:
+                comm_rows = conn.execute("""
+                    SELECT DISTINCT do2.domain
+                    FROM user_communities uc
+                    JOIN community_organisations co ON co.community_id = uc.community_id
+                    JOIN domain_organisations do2 ON do2.org_id = co.org_id
+                    WHERE uc.user_id = ?
+                    ORDER BY do2.domain
+                """, (user_id,)).fetchall()
+                for row in comm_rows:
+                    d = row["domain"]
+                    if d not in seen:
+                        seen.add(d)
+                        domains.append(d)
+            except Exception:
+                pass  # user_communities table absent on old schema
 
         return sorted(domains)
 

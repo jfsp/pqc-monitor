@@ -685,6 +685,176 @@ def scheduler_daemon(ctx):
         click.echo("Scheduler stopped.")
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Community CLI commands
+# ══════════════════════════════════════════════════════════════════════════════
+
+@cli.group("community")
+def community_grp():
+    """Manage communities (groups of organisations)."""
+
+
+@community_grp.command("create")
+@click.argument("name")
+@click.option("--description", "-d", default="", help="Optional description")
+@click.pass_context
+def community_create(ctx, name, description):
+    """Create a new community."""
+    cfg = ctx.obj or {}
+    db  = Database(cfg.get("db_path", "data/pqc_monitor.db"))
+    cid = db.create_community(name=name, description=description)
+    click.echo(f"✅ Community #{cid} created: {name}")
+
+
+@community_grp.command("list")
+@click.pass_context
+def community_list(ctx):
+    """List all communities."""
+    cfg = ctx.obj or {}
+    db  = Database(cfg.get("db_path", "data/pqc_monitor.db"))
+    communities = db.get_communities()
+    if not communities:
+        click.echo("No communities found.")
+        return
+    click.echo(f"\n{'ID':<6} {'Name':<30} {'Orgs':<6} Description")
+    click.echo("-" * 70)
+    for c in communities:
+        click.echo(f"{c['id']:<6} {c['name']:<30} {c.get('org_count',0):<6} {c.get('description','')}")
+
+
+@community_grp.command("add-org")
+@click.argument("community_id", type=int)
+@click.argument("org_id", type=int)
+@click.pass_context
+def community_add_org(ctx, community_id, org_id):
+    """Add an organisation to a community."""
+    cfg = ctx.obj or {}
+    db  = Database(cfg.get("db_path", "data/pqc_monitor.db"))
+    c   = db.get_community(community_id)
+    if not c:
+        click.echo(f"❌ Community #{community_id} not found.", err=True)
+        raise SystemExit(1)
+    org = db.get_organisation(org_id)
+    if not org:
+        click.echo(f"❌ Organisation #{org_id} not found.", err=True)
+        raise SystemExit(1)
+    current_orgs = [o["id"] for o in db.get_community_orgs(community_id)]
+    if org_id not in current_orgs:
+        db.set_community_orgs(community_id, current_orgs + [org_id])
+    click.echo("Organisation #{} added to community: {}".format(org_id, c['name']))
+
+
+@community_grp.command("remove-org")
+@click.argument("community_id", type=int)
+@click.argument("org_id", type=int)
+@click.pass_context
+def community_remove_org(ctx, community_id, org_id):
+    """Remove an organisation from a community."""
+    cfg = ctx.obj or {}
+    db  = Database(cfg.get("db_path", "data/pqc_monitor.db"))
+    c   = db.get_community(community_id)
+    if not c:
+        click.echo(f"❌ Community #{community_id} not found.", err=True)
+        raise SystemExit(1)
+    current_orgs = [o["id"] for o in db.get_community_orgs(community_id)]
+    if org_id not in current_orgs:
+        click.echo("Organisation #{} is not in community: {}".format(org_id, c['name']))
+        return
+    db.set_community_orgs(community_id, [oid for oid in current_orgs if oid != org_id])
+    click.echo("Organisation #{} removed from community: {}".format(org_id, c['name']))
+
+
+@community_grp.command("assign-user")
+@click.argument("community_id", type=int)
+@click.argument("username")
+@click.pass_context
+def community_assign_user(ctx, community_id, username):
+    """Assign a user to a community (auto-promotes analyst → community_manager)."""
+    cfg   = ctx.obj or {}
+    db    = Database(cfg.get("db_path", "data/pqc_monitor.db"))
+    from auth.store import AuthStore
+    store = AuthStore(cfg.get("db_path", "data/pqc_monitor.db"))
+    c     = db.get_community(community_id)
+    if not c:
+        click.echo(f"❌ Community #{community_id} not found.", err=True)
+        raise SystemExit(1)
+    user = store.get_user_by_username(username)
+    if not user:
+        click.echo(f"❌ User '{username}' not found.", err=True)
+        raise SystemExit(1)
+    current = [comm["id"] for comm in db.get_user_communities(user.id)]
+    if community_id not in current:
+        current.append(community_id)
+    store.set_user_communities(user.id, current)
+    user_after = store.get_user_by_id(user.id)
+    click.echo(f"✅ User '{username}' assigned to community (role: {user_after.role})")
+
+
+@community_grp.command("report")
+@click.argument("community_id", type=int)
+@click.option("--format", "fmt", default="text",
+              type=click.Choice(["text", "json", "csv"]),
+              help="Output format (default: text)")
+@click.option("--output", "-o", default=None, help="Write to file instead of stdout")
+@click.pass_context
+def community_report(ctx, community_id, fmt, output):
+    """Generate a PQC-readiness report for a community."""
+    cfg = ctx.obj or {}
+    db  = Database(cfg.get("db_path", "data/pqc_monitor.db"))
+    c   = db.get_community(community_id)
+    if not c:
+        click.echo(f"❌ Community #{community_id} not found.", err=True)
+        raise SystemExit(1)
+    from reports.community_report import build_report, export_text, export_csv
+    import json as _json
+    rows   = db.get_community_aggregate(community_id)
+    report = build_report(c["name"], "Community", rows)
+    if fmt == "json":
+        out = _json.dumps(report, indent=2, default=str)
+    elif fmt == "csv":
+        out = export_csv(report)
+    else:
+        out = export_text(report)
+    if output:
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(out)
+        click.echo(f"✅ Report saved to {output}")
+    else:
+        click.echo(out)
+
+
+@community_grp.command("region-report")
+@click.argument("region")
+@click.option("--format", "fmt", default="text",
+              type=click.Choice(["text", "json", "csv"]),
+              help="Output format (default: text)")
+@click.option("--output", "-o", default=None, help="Write to file instead of stdout")
+@click.pass_context
+def region_report_cmd(ctx, region, fmt, output):
+    """Generate a PQC-readiness report for a region."""
+    cfg = ctx.obj or {}
+    db  = Database(cfg.get("db_path", "data/pqc_monitor.db"))
+    from reports.community_report import build_report, export_text, export_csv
+    import json as _json
+    rows   = db.get_region_aggregate(region)
+    if not rows:
+        click.echo(f"⚠ No organisations found in region '{region}'.")
+        return
+    report = build_report(region, "Region", rows)
+    if fmt == "json":
+        out = _json.dumps(report, indent=2, default=str)
+    elif fmt == "csv":
+        out = export_csv(report)
+    else:
+        out = export_text(report)
+    if output:
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(out)
+        click.echo(f"✅ Report saved to {output}")
+    else:
+        click.echo(out)
+
 if __name__ == "__main__":
     cli()
 

@@ -562,6 +562,7 @@ footer {
   </div>
   <div class="header-nav">
     <button class="nav-btn active" onclick="showView('dashboard',this)">Dashboard</button>
+    {% if can_view_group_report %}<button class="nav-btn" onclick="showView('group_report',this); grInit()">Group Report</button>{% endif %}
     {% if user.is_admin %}<button class="nav-btn" onclick="showView('domains',this)">Domain Discovery</button>{% endif %}
     {% if user.is_admin %}<button class="nav-btn" onclick="showView('scan',this)">Scan</button>{% endif %}
     <button class="nav-btn" onclick="showView('trends',this)">Trends</button>
@@ -1100,6 +1101,57 @@ footer {
   </div>
 
   <!-- ═══ SETTINGS VIEW ═══ -->
+  <!-- ══ Group Report ═══════════════════════════════════════════════════════ -->
+  {% if can_view_group_report %}
+  <div id="view-group_report" class="view">
+    <div style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;margin-bottom:1.25rem">
+      <select id="gr-view-by" onchange="grSwitchViewBy()"
+        style="background:var(--panel);border:1px solid var(--border);color:var(--text);
+               padding:.3rem .6rem;border-radius:4px;font-size:.82rem">
+        <option value="community">By Community</option>
+        <option value="region">By Region</option>
+      </select>
+      <select id="gr-group-sel" onchange="grLoadReport()"
+        style="background:var(--panel);border:1px solid var(--border);color:var(--text);
+               padding:.3rem .6rem;border-radius:4px;font-size:.82rem;min-width:200px">
+        <option value="">— Select —</option>
+      </select>
+      <select id="gr-country-filter" onchange="grApplyFilters()"
+        style="display:none;background:var(--panel);border:1px solid var(--border);
+               color:var(--text);padding:.3rem .6rem;border-radius:4px;font-size:.82rem">
+        <option value="">All Countries</option>
+      </select>
+      <div style="margin-left:auto;display:flex;gap:.5rem">
+        <button class="btn" id="gr-btn-csv" onclick="grExportCSV()" disabled
+          style="font-size:.78rem;padding:.25rem .75rem">⬇ CSV</button>
+        <button class="btn" id="gr-btn-pdf" onclick="grExportPDF()" disabled
+          style="font-size:.78rem;padding:.25rem .75rem">⬇ PDF</button>
+      </div>
+    </div>
+    <div id="gr-summary"
+      style="display:none;background:rgba(14,165,233,.06);border-left:3px solid var(--accent);
+             padding:.75rem 1rem;border-radius:0 6px 6px 0;font-size:.82rem;
+             line-height:1.6;margin-bottom:1.25rem"></div>
+    <table class="data-table" id="gr-table" style="display:none">
+      <thead><tr>
+        <th>Organisation</th><th>CC</th><th>Sector</th>
+        <th style="text-align:right">Domains</th>
+        <th style="text-align:right">Score</th><th>Level</th>
+        <th style="text-align:right" title="Critical">Crit</th>
+        <th style="text-align:right" title="Weak">Weak</th>
+        <th style="text-align:right" title="Moderate">Mod</th>
+        <th style="text-align:right" title="Ready">Ready</th>
+        <th style="text-align:right" title="No TLS">NTLS</th>
+        <th style="text-align:right" title="PQC detected">PQC</th>
+      </tr></thead>
+      <tbody id="gr-tbody"></tbody>
+    </table>
+    <div id="gr-empty" style="text-align:center;padding:3rem;color:var(--muted);font-size:.88rem">
+      Select a community or region above to load the report.
+    </div>
+  </div>
+  {% endif %}
+
   <div id="view-settings" class="view">
     <div class="panel">
       <div class="panel-header"><div class="panel-title">Guidelines in Use</div></div>
@@ -2272,6 +2324,198 @@ function renderSettingsVersion() {
 loadSummary();
 loadAssessments();
 loadRoadmapStats();
+
+
+// ── Group Report ──────────────────────────────────────────────────────────────
+
+let _grReport    = null;   // current report JSON
+let _grFiltered  = [];     // filtered org rows
+
+const GR_LEVEL_COLOURS = {
+  Critical: '#ef4444', Weak: '#f97316',
+  Moderate: '#eab308', Ready: '#22c55e', 'N/A': '#6b7280'
+};
+
+function grLevel(score) {
+  if (score == null) return 'N/A';
+  if (score < 30)   return 'Critical';
+  if (score < 55)   return 'Weak';
+  if (score < 75)   return 'Moderate';
+  return 'Ready';
+}
+
+async function grInit() {
+  await grSwitchViewBy();
+}
+
+async function grSwitchViewBy() {
+  const viewBy = document.getElementById('gr-view-by')?.value || 'community';
+  const sel    = document.getElementById('gr-group-sel');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">— loading… —</option>';
+  _grReport = null;
+  grClearTable();
+  document.getElementById('gr-btn-csv').disabled = true;
+  document.getElementById('gr-btn-pdf').disabled = true;
+
+  if (viewBy === 'community') {
+    const r = await fetch('/app/api/communities');
+    const communities = await r.json().catch(() => []);
+    sel.innerHTML = '<option value="">— Select Community —</option>' +
+      communities.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  } else {
+    const r = await fetch('/app/api/regions');
+    const regions = await r.json().catch(() => []);
+    sel.innerHTML = '<option value="">— Select Region —</option>' +
+      regions.map(rg => `<option value="${esc(rg)}">${esc(rg)}</option>`).join('');
+  }
+}
+
+async function grLoadReport() {
+  const viewBy = document.getElementById('gr-view-by')?.value || 'community';
+  const val    = document.getElementById('gr-group-sel')?.value;
+  if (!val) { grClearTable(); return; }
+
+  const url = viewBy === 'community'
+    ? `/app/api/communities/${val}/report`
+    : `/app/api/regions/${encodeURIComponent(val)}/report`;
+
+  const r = await fetch(url);
+  if (!r.ok) { console.error('Group report fetch failed', r.status); return; }
+  _grReport = await r.json();
+  _grFiltered = _grReport.organisations || [];
+
+  // Country filter — only show if >1 distinct country in this group
+  const countries = [...new Set(_grFiltered
+    .map(o => o.country_code).filter(Boolean))].sort();
+  const countryFilter = document.getElementById('gr-country-filter');
+  if (countries.length > 1) {
+    countryFilter.innerHTML = '<option value="">All Countries</option>' +
+      countries.map(cc => {
+        const name = (_grFiltered.find(o => o.country_code === cc)||{}).country || cc;
+        return `<option value="${cc}">${cc}${name ? ' – ' + esc(name) : ''}</option>`;
+      }).join('');
+    countryFilter.style.display = '';
+  } else {
+    countryFilter.style.display = 'none';
+    countryFilter.value = '';
+  }
+
+  grRenderTable();
+  document.getElementById('gr-btn-csv').disabled = false;
+  document.getElementById('gr-btn-pdf').disabled = false;
+}
+
+function grApplyFilters() {
+  if (!_grReport) return;
+  const cc = document.getElementById('gr-country-filter')?.value || '';
+  _grFiltered = cc
+    ? (_grReport.organisations||[]).filter(o => (o.country_code||'') === cc)
+    : (_grReport.organisations||[]);
+  grRenderTable();
+}
+
+function grRenderTable() {
+  const tbody = document.getElementById('gr-tbody');
+  const table = document.getElementById('gr-table');
+  const empty = document.getElementById('gr-empty');
+  const sumEl = document.getElementById('gr-summary');
+
+  if (!_grFiltered.length) {
+    table.style.display = 'none';
+    empty.style.display = '';
+    sumEl.style.display = 'none';
+    return;
+  }
+
+  sumEl.textContent = _grReport.summary || '';
+  sumEl.style.display = '';
+
+  const rows = _grFiltered.map(o => {
+    const lvl    = grLevel(o.avg_score);
+    const colour = GR_LEVEL_COLOURS[lvl] || '#6b7280';
+    const score  = o.avg_score != null ? o.avg_score.toFixed(1) : 'N/A';
+    return `<tr>
+      <td><strong>${esc(o.name||'')}</strong></td>
+      <td style="color:var(--muted)">${esc(o.country_code||'')}</td>
+      <td style="color:var(--muted)">${esc(o.sector||'')}</td>
+      <td style="text-align:right">${o.domain_count||0}</td>
+      <td style="text-align:right">${score}</td>
+      <td><span style="background:${colour}20;color:${colour};padding:.15rem .45rem;
+                border-radius:3px;font-size:.74rem;font-weight:600">${lvl}</span></td>
+      <td style="text-align:right;color:#ef4444">${o.critical||0}</td>
+      <td style="text-align:right;color:#f97316">${o.weak||0}</td>
+      <td style="text-align:right;color:#eab308">${o.moderate||0}</td>
+      <td style="text-align:right;color:#22c55e">${o.ready||0}</td>
+      <td style="text-align:right;color:var(--muted)">${o.no_tls||0}</td>
+      <td style="text-align:right;color:#38bdf8">${o.pqc_count||0}</td>
+    </tr>`;
+  }).join('');
+
+  // Totals row from filtered data
+  const tot = {
+    domain_count: _grFiltered.reduce((s,o)=>s+(o.domain_count||0),0),
+    avg_score:    (() => { const sc=_grFiltered.filter(o=>o.avg_score!=null);
+                           return sc.length ? sc.reduce((s,o)=>s+o.avg_score,0)/sc.length : null; })(),
+    critical:     _grFiltered.reduce((s,o)=>s+(o.critical||0),0),
+    weak:         _grFiltered.reduce((s,o)=>s+(o.weak||0),0),
+    moderate:     _grFiltered.reduce((s,o)=>s+(o.moderate||0),0),
+    ready:        _grFiltered.reduce((s,o)=>s+(o.ready||0),0),
+    no_tls:       _grFiltered.reduce((s,o)=>s+(o.no_tls||0),0),
+    pqc_count:    _grFiltered.reduce((s,o)=>s+(o.pqc_count||0),0),
+  };
+  const tlvl   = grLevel(tot.avg_score);
+  const tcolor = GR_LEVEL_COLOURS[tlvl] || '#6b7280';
+  const tscore = tot.avg_score != null ? tot.avg_score.toFixed(1) : 'N/A';
+  const totRow = `<tr style="border-top:2px solid var(--border);font-weight:600">
+    <td>Totals</td><td></td><td></td>
+    <td style="text-align:right">${tot.domain_count}</td>
+    <td style="text-align:right">${tscore}</td>
+    <td><span style="background:${tcolor}20;color:${tcolor};padding:.15rem .45rem;
+              border-radius:3px;font-size:.74rem;font-weight:600">${tlvl}</span></td>
+    <td style="text-align:right;color:#ef4444">${tot.critical}</td>
+    <td style="text-align:right;color:#f97316">${tot.weak}</td>
+    <td style="text-align:right;color:#eab308">${tot.moderate}</td>
+    <td style="text-align:right;color:#22c55e">${tot.ready}</td>
+    <td style="text-align:right;color:var(--muted)">${tot.no_tls}</td>
+    <td style="text-align:right;color:#38bdf8">${tot.pqc_count}</td>
+  </tr>`;
+
+  tbody.innerHTML = rows + totRow;
+  table.style.display = '';
+  empty.style.display = 'none';
+}
+
+function grClearTable() {
+  const tbody = document.getElementById('gr-tbody');
+  if (tbody) tbody.innerHTML = '';
+  const table = document.getElementById('gr-table');
+  if (table) table.style.display = 'none';
+  const empty = document.getElementById('gr-empty');
+  if (empty) empty.style.display = '';
+  const sum = document.getElementById('gr-summary');
+  if (sum) sum.style.display = 'none';
+}
+
+function grExportCSV() {
+  const viewBy = document.getElementById('gr-view-by')?.value || 'community';
+  const val    = document.getElementById('gr-group-sel')?.value;
+  if (!val) return;
+  const url = viewBy === 'community'
+    ? `/app/api/communities/${val}/report.csv`
+    : `/app/api/regions/${encodeURIComponent(val)}/report.csv`;
+  window.location = url;
+}
+
+function grExportPDF() {
+  const viewBy = document.getElementById('gr-view-by')?.value || 'community';
+  const val    = document.getElementById('gr-group-sel')?.value;
+  if (!val) return;
+  const url = viewBy === 'community'
+    ? `/app/api/communities/${val}/report.pdf`
+    : `/app/api/regions/${encodeURIComponent(val)}/report.pdf`;
+  window.location = url;
+}
 
 </script>
 </body>

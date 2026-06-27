@@ -6,6 +6,62 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.6.0] — 2026-06-27
+
+### Added
+- **Community concept** — group organisations into named communities for
+  scoped reporting and user access control
+  - Schema migration v17: `communities`, `community_organisations`,
+    `user_communities` tables with cascade deletes and indexes
+  - Full CRUD in DB layer (`create_community`, `update_community`,
+    `delete_community`, `set_community_orgs`, `get_community_orgs`,
+    `get_community_domains`, `set_user_communities`, `get_user_communities`)
+  - Aggregate report engine: `get_community_aggregate()`,
+    `get_region_aggregate()`, `_build_group_aggregate()` — per-org score,
+    level counts, PQC count from latest assessments
+- **`ROLE_COMMUNITY_MANAGER`** — new role between analyst and admin
+  - Auto-promoted from analyst when first community is assigned
+  - Permissions: view own communities, generate group reports, export
+  - Admins are never demoted by community assignment
+- **Group Report tab** in dashboard (admin + community_manager only)
+  - Positioned after Dashboard, before Domain Discovery
+  - Toggle between Community view and Region view via top selector
+  - Country filter dropdown (shown only when group spans >1 country)
+  - Live aggregate table: org, CC, sector, domains, score, level, critical/
+    weak/moderate/ready/no-TLS/PQC columns with totals row
+  - Executive summary panel (auto-generated from aggregate stats)
+  - CSV export and PDF export buttons
+- **`reports/community_report.py`** — new module
+  - `build_report()`: structured dict with summary, totals, per-org rows
+  - `export_csv()`, `export_text()`: tabular output
+  - `export_pdf()`: weasyprint A4 landscape PDF with branding header,
+    executive summary, colour-coded level badges, totals row, footer
+- **Admin UI — Communities section**
+  - New nav item and view: create/edit/delete communities, assign orgs
+  - User modal: community_manager role option; community checkbox group
+    (shown for community_manager role); auto-promote note
+- **API endpoints** (8 new routes under `/app/api/`)
+  - `GET /api/communities` — list visible communities (scoped for non-admin)
+  - `GET /api/communities/<id>/report` — JSON aggregate report
+  - `GET /api/communities/<id>/report.csv` — CSV download
+  - `GET /api/communities/<id>/report.pdf` — PDF download
+  - `GET /api/regions` — list distinct regions visible to user
+  - `GET /api/regions/<name>/report` — JSON aggregate by region
+  - `GET /api/regions/<name>/report.csv` — CSV download
+  - `GET /api/regions/<name>/report.pdf` — PDF download
+- **CLI command group** `community`
+  - `create <name>` — create a community
+  - `list` — list all communities with org count
+  - `add-org <community_id> <org_id>` — add org to community
+  - `remove-org <community_id> <org_id>` — remove org from community
+  - `assign-user <community_id> <username>` — assign user (auto-promotes)
+  - `report <community_id> [--format text|json|csv] [-o file]`
+  - `region-report <region> [--format text|json|csv] [-o file]`
+- **`requirements.txt`**: added `weasyprint>=62.0` for PDF generation
+- **`tests/test_communities.py`**: 31 new tests across 4 classes
+  (DB CRUD, auth store + auto-promote, report generation, aggregates)
+
+---
 ## [1.5.2] — 2026-06-27
 
 ### Fixed

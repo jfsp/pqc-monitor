@@ -14,38 +14,52 @@ from typing import Optional
 
 # ── Roles ─────────────────────────────────────────────────────────────────────
 
-ROLE_ADMIN   = "admin"
-ROLE_ANALYST = "analyst"
-ALL_ROLES    = (ROLE_ADMIN, ROLE_ANALYST)
+ROLE_ADMIN             = "admin"
+ROLE_COMMUNITY_MANAGER = "community_manager"
+ROLE_ANALYST           = "analyst"
+ALL_ROLES = (ROLE_ADMIN, ROLE_COMMUNITY_MANAGER, ROLE_ANALYST)
 
 # ── Permissions per role ──────────────────────────────────────────────────────
 # Each permission is checked in the decorator/helper; new perms can be added here.
 
 PERMISSIONS = {
     ROLE_ADMIN: {
-        "user.manage",          # create / edit / delete users
-        "user.view",            # list all users
-        "domain_list.manage",   # create / edit / delete domain lists
-        "domain_list.view_all", # see every domain list (no scoping)
-        "scan.run",             # trigger scans
-        "scan.view_all",        # see all scan runs
-        "schedule.manage",      # add / remove schedules
-        "ct.run",               # trigger CT monitoring
-        "roadmap.generate",     # generate roadmaps
-        "report.export",        # download reports
-        "admin.panel",          # access the /admin section
-        "audit.view",           # read audit log
-        "settings.manage",      # system configuration
-        "org.manage",           # create / edit / delete organisations
-        "org.view_all",         # see all organisations and their members
+        "user.manage",           # create / edit / delete users
+        "user.view",             # list all users
+        "domain_list.manage",    # create / edit / delete domain lists
+        "domain_list.view_all",  # see every domain list (no scoping)
+        "scan.run",              # trigger scans
+        "scan.view_all",         # see all scan runs
+        "schedule.manage",       # add / remove schedules
+        "ct.run",                # trigger CT monitoring
+        "roadmap.generate",      # generate roadmaps
+        "report.export",         # download reports
+        "admin.panel",           # access the /admin section
+        "audit.view",            # read audit log
+        "settings.manage",       # system configuration
+        "org.manage",            # create / edit / delete organisations
+        "org.view_all",          # see all organisations and their members
+        "community.manage",      # create / edit / delete communities
+        "community.view_all",    # see all communities
+        "group_report.view",     # access Group Report tab
+    },
+    ROLE_COMMUNITY_MANAGER: {
+        "domain_list.view_own",  # see only assigned domain lists
+        "scan.view_own",         # see scan results for assigned domains only
+        "ct.view_own",           # CT data for assigned domains
+        "roadmap.view_own",      # roadmaps for assigned domains
+        "report.export",         # download reports (scoped to own communities)
+        "org.view_own",          # see own org assignments only
+        "community.view_own",    # see assigned communities only
+        "group_report.view",     # access Group Report tab
     },
     ROLE_ANALYST: {
-        "domain_list.view_own", # see only assigned domain lists
-        "scan.view_own",        # see scan results for assigned domains only
-        "ct.view_own",          # CT data for assigned domains
-        "roadmap.view_own",     # roadmaps for assigned domains
-        "report.export",        # download reports (scoped to own domains)
-        "org.view_own",         # see own org assignments only
+        "domain_list.view_own",  # see only assigned domain lists
+        "scan.view_own",         # see scan results for assigned domains only
+        "ct.view_own",           # CT data for assigned domains
+        "roadmap.view_own",      # roadmaps for assigned domains
+        "report.export",         # download reports (scoped to own domains)
+        "org.view_own",          # see own org assignments only
     },
 }
 
@@ -68,6 +82,7 @@ class User:
     last_login: str = ""
     domain_list_ids: list = field(default_factory=list)  # assigned list IDs
     org_ids: list         = field(default_factory=list)  # assigned org IDs
+    community_ids: list   = field(default_factory=list)  # assigned community IDs
 
     # Never serialise password_hash outside auth layer
     password_hash: str = field(default="", repr=False)
@@ -75,6 +90,14 @@ class User:
     @property
     def is_admin(self) -> bool:
         return self.role == ROLE_ADMIN
+
+    @property
+    def is_community_manager(self) -> bool:
+        return self.role == ROLE_COMMUNITY_MANAGER
+
+    @property
+    def can_view_group_report(self) -> bool:
+        return self.role in (ROLE_ADMIN, ROLE_COMMUNITY_MANAGER)
 
     def can(self, perm: str) -> bool:
         return has_permission(self.role, perm)
@@ -91,6 +114,7 @@ class User:
             "last_login":      self.last_login,
             "domain_list_ids": self.domain_list_ids,
             "org_ids":         self.org_ids,
+            "community_ids":   self.community_ids,
         }
         if include_sensitive:
             d["password_hash"] = self.password_hash

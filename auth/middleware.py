@@ -22,7 +22,7 @@ from flask import (
     jsonify, g, current_app
 )
 
-from auth.models import User, ROLE_ADMIN, ROLE_ANALYST
+from auth.models import User, ROLE_ADMIN, ROLE_COMMUNITY_MANAGER, ROLE_ANALYST
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +178,11 @@ def require_role(*roles: str) -> Callable:
 
 def require_admin(f: Callable) -> Callable:
     return require_role(ROLE_ADMIN)(f)
+
+
+def require_community_manager(f: Callable) -> Callable:
+    """Allow admin and community_manager roles."""
+    return require_role(ROLE_ADMIN, ROLE_COMMUNITY_MANAGER)(f)
 
 
 def scope_domains(domains: list[str], user: User) -> list[str]:

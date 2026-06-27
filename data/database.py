@@ -582,6 +582,197 @@ class Database:
             conn.execute("DELETE FROM organisations WHERE id=?", (org_id,))
         return True
 
+    # ─── Communities ──────────────────────────────────────────────
+
+    def create_community(self, name: str, description: str = "",
+                          created_by: int = None) -> int:
+        """Create a new community. Returns new community id."""
+        ts = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO communities (name, description, created_at, created_by) "
+                "VALUES (?,?,?,?)",
+                (name.strip(), description, ts, created_by)
+            )
+        return cur.lastrowid
+
+    def get_communities(self) -> list[dict]:
+        """Return all communities with org counts."""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT c.*,
+                       COUNT(DISTINCT co.org_id) as org_count
+                FROM communities c
+                LEFT JOIN community_organisations co ON co.community_id = c.id
+                GROUP BY c.id
+                ORDER BY c.name
+            """).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_community(self, community_id: int) -> Optional[dict]:
+        """Return a single community or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM communities WHERE id=?", (community_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_community(self, community_id: int, **fields) -> bool:
+        """Update name or description. Returns False if not found."""
+        allowed = {"name", "description"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return True
+        cols = ", ".join(f"{k}=?" for k in updates)
+        vals = list(updates.values()) + [community_id]
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"UPDATE communities SET {cols} WHERE id=?", vals
+            )
+        return cur.rowcount > 0
+
+    def delete_community(self, community_id: int) -> bool:
+        """Delete community and cascade to org/user assignments."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM communities WHERE id=?", (community_id,)
+            ).fetchone()
+            if not row:
+                return False
+            conn.execute("DELETE FROM communities WHERE id=?", (community_id,))
+        return True
+
+    def set_community_orgs(self, community_id: int, org_ids: list[int],
+                            added_by: int = None):
+        """Replace all org assignments for a community atomically."""
+        ts = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM community_organisations WHERE community_id=?",
+                (community_id,)
+            )
+            for oid in org_ids:
+                conn.execute(
+                    "INSERT OR IGNORE INTO community_organisations "
+                    "(community_id, org_id, added_at, added_by) VALUES (?,?,?,?)",
+                    (community_id, oid, ts, added_by)
+                )
+
+    def get_community_orgs(self, community_id: int) -> list[dict]:
+        """Return all organisations in a community with full org data."""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT o.*,
+                       COUNT(DISTINCT do2.domain) as domain_count
+                FROM organisations o
+                JOIN community_organisations co ON co.org_id = o.id
+                LEFT JOIN domain_organisations do2 ON do2.org_id = o.id
+                WHERE co.community_id = ?
+                GROUP BY o.id
+                ORDER BY o.name
+            """, (community_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_community_domains(self, community_id: int) -> list[str]:
+        """Return flat sorted list of all domains in a community (via orgs)."""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT DISTINCT do2.domain
+                FROM community_organisations co
+                JOIN domain_organisations do2 ON do2.org_id = co.org_id
+                WHERE co.community_id = ?
+                ORDER BY do2.domain
+            """, (community_id,)).fetchall()
+        return [r["domain"] for r in rows]
+
+    def get_user_communities(self, user_id: int) -> list[dict]:
+        """Return all communities assigned to a user."""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT c.*
+                FROM communities c
+                JOIN user_communities uc ON uc.community_id = c.id
+                WHERE uc.user_id = ?
+                ORDER BY c.name
+            """, (user_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_user_communities(self, user_id: int, community_ids: list[int],
+                              granted_by: int = None):
+        """Replace all community assignments for a user atomically."""
+        ts = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM user_communities WHERE user_id=?", (user_id,)
+            )
+            for cid in community_ids:
+                conn.execute(
+                    "INSERT OR IGNORE INTO user_communities "
+                    "(user_id, community_id, granted_at, granted_by) VALUES (?,?,?,?)",
+                    (user_id, cid, ts, granted_by)
+                )
+
+    def get_community_aggregate(self, community_id: int) -> dict:
+        """
+        Return per-org PQC readiness summary for a community.
+        Each entry: org metadata + domain_count, avg_score, level counts, pqc_count.
+        """
+        orgs = self.get_community_orgs(community_id)
+        return self._build_group_aggregate(orgs)
+
+    def get_region_aggregate(self, region: str) -> dict:
+        """
+        Return per-org PQC readiness summary for all orgs in a region.
+        """
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT o.*,
+                       COUNT(DISTINCT do2.domain) as domain_count
+                FROM organisations o
+                LEFT JOIN domain_organisations do2 ON do2.org_id = o.id
+                WHERE LOWER(o.region) = LOWER(?)
+                GROUP BY o.id
+                ORDER BY o.name
+            """, (region,)).fetchall()
+        orgs = [dict(r) for r in rows]
+        return self._build_group_aggregate(orgs)
+
+    def _build_group_aggregate(self, orgs: list[dict]) -> dict:
+        """Build aggregate stats across a list of orgs."""
+        result = []
+        for org in orgs:
+            domains = self.get_org_domains(org["id"])
+            if not domains:
+                result.append({**org, "avg_score": None, "critical": 0,
+                                "weak": 0, "moderate": 0, "ready": 0,
+                                "no_tls": 0, "pqc_count": 0})
+                continue
+            placeholders = ",".join("?" * len(domains))
+            with self._connect() as conn:
+                rows = conn.execute(f"""
+                    SELECT a.score, a.level, a.has_pqc
+                    FROM assessments a
+                    INNER JOIN (
+                        SELECT domain, MAX(assessed_at) as max_ts
+                        FROM assessments GROUP BY domain
+                    ) latest ON a.domain=latest.domain AND a.assessed_at=latest.max_ts
+                    WHERE a.domain IN ({placeholders})
+                """, domains).fetchall()
+            assessed = [dict(r) for r in rows]
+            scored   = [r for r in assessed if r.get("level") != "na"]
+            avg_score = round(sum(r["score"] for r in scored) / len(scored), 1)                         if scored else None
+            result.append({
+                **org,
+                "avg_score":  avg_score,
+                "critical":   sum(1 for r in scored if r["level"] == "critical"),
+                "weak":       sum(1 for r in scored if r["level"] == "weak"),
+                "moderate":   sum(1 for r in scored if r["level"] == "moderate"),
+                "ready":      sum(1 for r in scored if r["level"] == "ready"),
+                "no_tls":     sum(1 for r in assessed if r.get("level") == "na"),
+                "pqc_count":  sum(1 for r in assessed if r.get("has_pqc")),
+            })
+        return result
+
     # ─── Domain ↔ Org assignments ──────────────────────────────────
 
     def set_org_domains(self, org_id: int, domains: list[str],

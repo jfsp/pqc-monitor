@@ -22,7 +22,7 @@ from flask import (
 )
 
 from auth.middleware import (
-    require_auth, current_user, filter_assessments,
+    require_auth, require_community_manager, current_user, filter_assessments,
     scope_domains, _audit
 )
 from auth.models import ROLE_ADMIN
@@ -80,6 +80,7 @@ def dashboard_home():
         version=VERSION,
         user=user,
         is_admin=user.is_admin,
+        can_view_group_report=user.can_view_group_report,
     )
 
 
@@ -596,6 +597,155 @@ def api_add_schedule():
 
 
 # ── Current user info ─────────────────────────────────────────────────────────
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Community & Group Report API
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app_bp.route("/api/communities")
+@require_auth
+def api_communities():
+    """List communities visible to the current user."""
+    db   = current_app.config["DATABASE"]
+    user = current_user()
+    if user.is_admin:
+        communities = db.get_communities()
+    else:
+        communities = db.get_user_communities(user.id)
+    # Attach org list to each community
+    for c in communities:
+        c["orgs"] = db.get_community_orgs(c["id"])
+    return jsonify(communities)
+
+
+@app_bp.route("/api/communities/<int:cid>/report")
+@require_community_manager
+def api_community_report(cid):
+    """Return aggregate PQC-readiness report for a community as JSON."""
+    db   = current_app.config["DATABASE"]
+    user = current_user()
+    comm = db.get_community(cid)
+    if not comm:
+        return jsonify({"error": "not found"}), 404
+    if not user.is_admin and cid not in user.community_ids:
+        return jsonify({"error": "forbidden"}), 403
+    from reports.community_report import build_report
+    rows   = db.get_community_aggregate(cid)
+    report = build_report(comm["name"], "Community", rows)
+    return jsonify(report)
+
+
+@app_bp.route("/api/communities/<int:cid>/report.csv")
+@require_community_manager
+def api_community_report_csv(cid):
+    """Download community report as CSV."""
+    db   = current_app.config["DATABASE"]
+    user = current_user()
+    comm = db.get_community(cid)
+    if not comm:
+        return jsonify({"error": "not found"}), 404
+    if not user.is_admin and cid not in user.community_ids:
+        return jsonify({"error": "forbidden"}), 403
+    from reports.community_report import build_report, export_csv
+    rows   = db.get_community_aggregate(cid)
+    report = build_report(comm["name"], "Community", rows)
+    csv_data = export_csv(report)
+    fname = f"community_{comm['name'].replace(' ','_')}.csv"
+    return current_app.response_class(
+        csv_data, mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={fname}"}
+    )
+
+
+@app_bp.route("/api/communities/<int:cid>/report.pdf")
+@require_community_manager
+def api_community_report_pdf(cid):
+    """Download community report as PDF."""
+    db   = current_app.config["DATABASE"]
+    user = current_user()
+    comm = db.get_community(cid)
+    if not comm:
+        return jsonify({"error": "not found"}), 404
+    if not user.is_admin and cid not in user.community_ids:
+        return jsonify({"error": "forbidden"}), 403
+    from reports.community_report import build_report, export_pdf
+    rows   = db.get_community_aggregate(cid)
+    report = build_report(comm["name"], "Community", rows)
+    try:
+        pdf_bytes = export_pdf(report)
+    except ImportError as e:
+        return jsonify({"error": str(e)}), 503
+    fname = f"community_{comm['name'].replace(' ','_')}.pdf"
+    return current_app.response_class(
+        pdf_bytes, mimetype="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={fname}"}
+    )
+
+
+@app_bp.route("/api/regions")
+@require_community_manager
+def api_regions():
+    """List distinct regions from all organisations visible to the user."""
+    db   = current_app.config["DATABASE"]
+    user = current_user()
+    orgs = db.get_organisations()
+    if not user.is_admin:
+        # Scope to orgs the user can see
+        allowed_org_ids = set(user.org_ids)
+        for cid in user.community_ids:
+            for o in db.get_community_orgs(cid):
+                allowed_org_ids.add(o["id"])
+        orgs = [o for o in orgs if o["id"] in allowed_org_ids]
+    regions = sorted({o["region"] for o in orgs if o.get("region")})
+    return jsonify(regions)
+
+
+@app_bp.route("/api/regions/<path:region>/report")
+@require_community_manager
+def api_region_report(region):
+    """Return aggregate PQC-readiness report for a region as JSON."""
+    db   = current_app.config["DATABASE"]
+    from reports.community_report import build_report
+    rows   = db.get_region_aggregate(region)
+    report = build_report(region, "Region", rows)
+    return jsonify(report)
+
+
+@app_bp.route("/api/regions/<path:region>/report.csv")
+@require_community_manager
+def api_region_report_csv(region):
+    """Download region report as CSV."""
+    db   = current_app.config["DATABASE"]
+    from reports.community_report import build_report, export_csv
+    rows     = db.get_region_aggregate(region)
+    report   = build_report(region, "Region", rows)
+    csv_data = export_csv(report)
+    fname    = f"region_{region.replace(' ','_')}.csv"
+    return current_app.response_class(
+        csv_data, mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={fname}"}
+    )
+
+
+@app_bp.route("/api/regions/<path:region>/report.pdf")
+@require_community_manager
+def api_region_report_pdf(region):
+    """Download region report as PDF."""
+    db   = current_app.config["DATABASE"]
+    from reports.community_report import build_report, export_pdf
+    rows   = db.get_region_aggregate(region)
+    report = build_report(region, "Region", rows)
+    try:
+        pdf_bytes = export_pdf(report)
+    except ImportError as e:
+        return jsonify({"error": str(e)}), 503
+    fname = f"region_{region.replace(' ','_')}.pdf"
+    return current_app.response_class(
+        pdf_bytes, mimetype="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={fname}"}
+    )
+
 
 @app_bp.route("/api/me")
 @require_auth

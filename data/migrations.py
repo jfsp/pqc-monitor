@@ -243,6 +243,33 @@ ALTER TABLE organisations ADD COLUMN country TEXT DEFAULT ''""",
         """ALTER TABLE scan_runs ADD COLUMN country_code TEXT DEFAULT '';
 ALTER TABLE scan_runs ADD COLUMN country TEXT DEFAULT ''""",
     ),
+    (
+        17,
+        "Add communities, community_organisations, user_communities tables",
+        """CREATE TABLE IF NOT EXISTS communities (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    description TEXT DEFAULT '',
+    created_at  TEXT NOT NULL,
+    created_by  INTEGER REFERENCES users(id)
+);
+CREATE TABLE IF NOT EXISTS community_organisations (
+    community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+    org_id       INTEGER NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
+    added_at     TEXT NOT NULL,
+    added_by     INTEGER REFERENCES users(id),
+    PRIMARY KEY (community_id, org_id)
+);
+CREATE TABLE IF NOT EXISTS user_communities (
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+    granted_at   TEXT NOT NULL,
+    granted_by   INTEGER REFERENCES users(id),
+    PRIMARY KEY (user_id, community_id)
+);
+CREATE INDEX IF NOT EXISTS idx_community_org  ON community_organisations(org_id);
+CREATE INDEX IF NOT EXISTS idx_user_community ON user_communities(user_id)""",
+    ),
 ]
 
 

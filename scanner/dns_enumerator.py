@@ -464,25 +464,31 @@ def _dnsdumpster_api(
             logger.warning(f"DNSDumpster request failed for {domain} (page {page}): {exc}")
             break
 
-        # ── Parse JSON body first — needed for quota detection on any status ──
+        # ── Quota detection: check raw text before JSON parsing ───────────────
+        # DNSDumpster delivers {"error":"Daily quota exceeded"} as the body of
+        # a 429.  Check the raw text first so we catch it regardless of whether
+        # the body is valid JSON or whether resp.json() raises.
+        raw_text = resp.text or ""
+        if "quota" in raw_text.lower() or "daily" in raw_text.lower():
+            _DNSDUMPSTER_QUOTA_EXHAUSTED = True
+            logger.warning(
+                f"DNSDumpster daily quota exceeded (HTTP {resp.status_code}) — "
+                "disabling for this session, activating passive DNS fallback"
+            )
+            raise DnsDumpsterQuotaError(raw_text[:200])
+
+        # ── Parse JSON body for structured error messages ──────────────────────
         try:
             data = resp.json()
         except Exception:
             data = {}
 
-        # ── Quota exhaustion detection (may arrive as 429 OR 200 with error) ──
         if isinstance(data, dict) and data.get("error"):
-            err_msg = str(data["error"])
-            if "quota" in err_msg.lower() or "daily" in err_msg.lower():
-                _DNSDUMPSTER_QUOTA_EXHAUSTED = True
-                logger.warning(
-                    "DNSDumpster daily quota exceeded — "
-                    "disabling for this session, activating passive DNS fallback"
-                )
-                raise DnsDumpsterQuotaError(err_msg)
+            logger.warning(f"DNSDumpster API error for {domain}: {data['error']}")
+            break
 
         if resp.status_code == 429:
-            # Rate limit (not quota) — back off and retry the same page
+            # Genuine per-request rate limit (no quota language in body)
             logger.warning(
                 f"DNSDumpster rate limit hit for {domain} — "
                 "respecting 2-second limit between requests"

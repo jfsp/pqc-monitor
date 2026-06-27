@@ -2,24 +2,29 @@
 # shodan-test.sh — verify the Shodan API key configured in PQC-Monitor
 #
 # Usage:
-#   bash scripts/shodan-test.sh [domain]
+#   bash scripts/shodan-test.sh [ip|domain]
 #
-# The domain is optional; defaults to google.com.
+# The target is optional; defaults to 8.8.8.8 (Google DNS) which is
+# freely accessible on the oss plan.  Passing a domain resolves it to
+# an IP first, but note that CDN/anycast IPs (e.g. google.com) may
+# return 403 on the oss plan even with a valid key — use a stable,
+# well-known IP for a reliable connectivity test.
+#
 # The script reads the API key from the same sources pqc_monitor.py uses:
 #   1. SHODAN_API_KEY environment variable
 #   2. shodan.api_key in /etc/pqc-monitor/config.yaml
 #   3. shodan.api_key in config/config.yaml (dev fallback)
 #
 # Exit codes:
-#   0 — key is valid and a host lookup succeeded
-#   1 — key is missing, invalid, or the lookup returned no data
+#   0 — key is valid and the host lookup succeeded
+#   1 — key is missing, invalid, quota/plan error, or lookup failed
 #   2 — shodan Python library not installed
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 set -euo pipefail
 
-DOMAIN="${1:-google.com}"
+TARGET="${1:-8.8.8.8}"
 CONFIG_PROD="/etc/pqc-monitor/config.yaml"
 CONFIG_DEV="$(dirname "$0")/../config/config.yaml"
 
@@ -48,13 +53,13 @@ fi
 
 # ── Run the test via inline Python ────────────────────────────────────────────
 
-python3 - "$API_KEY" "$DOMAIN" <<'PYEOF'
+python3 - "$API_KEY" "$TARGET" <<'PYEOF'
 import sys
 import json
 import socket
 
 api_key = sys.argv[1]
-domain  = sys.argv[2]
+target  = sys.argv[2]
 
 try:
     import shodan as shodan_lib
@@ -78,28 +83,40 @@ plan    = info.get("plan", "unknown")
 credits = info.get("query_credits", 0)
 scan_cr = info.get("scan_credits", 0)
 
-# ── 2. Host lookup ────────────────────────────────────────────────────────────
-try:
-    ip = socket.gethostbyname(domain)
-except socket.gaierror as e:
-    print(json.dumps({
-        "account": {"plan": plan, "query_credits": credits, "scan_credits": scan_cr},
-        "error": f"Could not resolve {domain}: {e}"
-    }))
-    sys.exit(1)
+# ── 2. Resolve target to IP if a hostname was given ───────────────────────────
+# The oss plan only allows lookups against IPs in Shodan's shared dataset.
+# CDN/anycast IPs from gethostbyname() (e.g. google.com → 173.x.x.x) are
+# often outside that set and return 403.  Use a stable IP like 8.8.8.8 to
+# confirm the key and plan are working correctly.
+ip = target
+if not target[0].isdigit():
+    try:
+        ip = socket.gethostbyname(target)
+    except socket.gaierror as e:
+        print(json.dumps({
+            "account": {"plan": plan, "query_credits": credits, "scan_credits": scan_cr},
+            "error": f"Could not resolve {target}: {e}"
+        }))
+        sys.exit(1)
 
+# ── 3. Host lookup ────────────────────────────────────────────────────────────
 try:
     host = api.host(ip)
 except shodan_lib.APIError as e:
     err = str(e)
     no_data = "no information available" in err.lower()
+    plan_restricted = "403" in err or "access denied" in err.lower()
     print(json.dumps({
         "account": {"plan": plan, "query_credits": credits, "scan_credits": scan_cr},
         "host_lookup": {
-            "domain": domain,
+            "target": target,
             "ip": ip,
-            "status": "no_data" if no_data else "error",
+            "status": "no_data" if no_data else "plan_restricted" if plan_restricted else "error",
             "detail": err,
+            "hint": (
+                "oss plan cannot query this IP — try bash scripts/shodan-test.sh 8.8.8.8"
+                if plan_restricted else None
+            ),
         }
     }, indent=2))
     sys.exit(0 if no_data else 1)
@@ -110,32 +127,28 @@ except Exception as e:
     }))
     sys.exit(1)
 
-# ── 3. Extract TLS services ───────────────────────────────────────────────────
+# ── 4. Extract TLS services ───────────────────────────────────────────────────
 tls_services = []
 for svc in host.get("data", []):
     ssl = svc.get("ssl", {})
     if not ssl:
         continue
-    port = svc.get("port", 0)
-    versions  = [v for v in ssl.get("versions", []) if not v.startswith("-")]
-    cipher    = ssl.get("cipher", {})
-    cert      = ssl.get("cert", {})
-    subject   = cert.get("subject", {})
-    issuer    = cert.get("issuer", {})
-    pubkey    = cert.get("pubkey", {})
+    port   = svc.get("port", 0)
+    cert   = ssl.get("cert", {})
+    pubkey = cert.get("pubkey", {})
     tls_services.append({
         "port":     port,
-        "tls":      versions,
-        "cipher":   cipher.get("name", ""),
+        "tls":      [v for v in ssl.get("versions", []) if not v.startswith("-")],
+        "cipher":   ssl.get("cipher", {}).get("name", ""),
         "key_type": pubkey.get("type", "").upper(),
         "key_bits": pubkey.get("bits", 0),
-        "subject":  subject.get("CN", ""),
-        "issuer":   issuer.get("CN", ""),
+        "subject":  cert.get("subject", {}).get("CN", ""),
+        "issuer":   cert.get("issuer", {}).get("CN", ""),
         "expires":  cert.get("expires", ""),
         "sig_alg":  cert.get("sig_alg", ""),
     })
 
-# ── 4. Output ─────────────────────────────────────────────────────────────────
+# ── 5. Output ─────────────────────────────────────────────────────────────────
 result = {
     "account": {
         "plan": plan,
@@ -148,12 +161,14 @@ result = {
         ),
     },
     "host_lookup": {
-        "domain": domain,
-        "ip":     ip,
-        "org":    host.get("org", ""),
-        "country": host.get("country_name", ""),
+        "target":      target,
+        "ip":          ip,
+        "org":         host.get("org", ""),
+        "country":     host.get("country_name", ""),
+        "asn":         host.get("data", [{}])[0].get("asn", "") if host.get("data") else "",
         "total_ports": len(host.get("data", [])),
-        "tls_ports": len(tls_services),
+        "ports":       host.get("ports", []),
+        "tls_ports":   len(tls_services),
         "tls_services": tls_services,
     }
 }

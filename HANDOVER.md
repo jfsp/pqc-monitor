@@ -98,6 +98,7 @@ The script uses `git diff --diff-filter=AMRC` to identify changed files, skips p
 | 1.3.1 | Fix: production deployment — systemd unit errors, database path, session persistence, reverse proxy headers. See §2.1 for full details. |
 | 1.4.0 | Fix: no-TLS domains shown as Critical → now N/A; fix: analyst sees forbidden tabs; fix: roadmap includes N/A domains; fix: scheduler service not starting (DB path mismatch); new: incremental deploy script. See §2.2 for full details. |
 | 1.5.0 | Feature: Country on organisations — `country_code` (ISO 3166-1 alpha-2) + `country` (display name) on every org; schema v15; country dropdown filter in dashboard; `?country_code=` on `/api/assessments`. See §2.3 for full details. |
+| 1.5.1 | Feature: Country + region on scan runs — TLD-based auto-inference via `data/tld_geo.csv`; schema v16; `--country-code`/`--country` on `scan` and `schedule` CLI commands; `list-runs` shows country column. See §2.4 for full details. |
 
 ### 2.1 v1.3.1 — Deployment fixes (2026-06-25)
 
@@ -226,6 +227,37 @@ Service restart trigger sets (restart only when these paths change):
 - `pqc-monitor-scheduler`: `pqc_monitor.py`, `version.py`, `requirements.txt`, `ct/`, `data/`, `scanner/`, `scheduler/`
 
 Files outside both sets (`scripts/`, `tests/`, `systemd/`, `guidelines/`, docs) never trigger a restart.
+
+---
+
+## 2.4 — v1.5.1 detail
+
+**Country and Region on Scan Runs + TLD-based Auto-Inference**
+
+Every scan run now stores `country_code` and `country` alongside the existing `sector` and `region` fields. When not explicitly provided, both are auto-inferred from the ccTLDs in the domain list.
+
+Inference rules (implemented in `data/geo_inference.py`):
+- If the domain list yields exactly **one distinct ccTLD** → infer country and region from `data/tld_geo.csv`.
+- If the domain list yields **multiple distinct ccTLDs** → no inference; CLI echoes which ccTLDs were found.
+- If the domain list contains **only generic TLDs** (`.com`, `.net`, `.org`, etc.) → no inference.
+- If `--country-code` is supplied explicitly → inference is skipped; the explicit value is used.
+- Region is also auto-filled when omitted and inference succeeds.
+- The CLI always echoes the inference outcome (inferred, skipped, or reason for skip).
+
+`data/tld_geo.csv` — user-editable CSV shipped with the project. Format: `tld,country_code,country,region`. Comments (`#`) and blank lines are ignored. Admins may add, remove, or correct entries without touching code. Changes take effect on the next scan.
+
+Changes by file:
+
+- `data/tld_geo.csv` — new file; 200+ ccTLD entries covering Europe, America, Asia, Middle East, Africa, Oceania.
+- `data/geo_inference.py` — new module; `infer_from_domains()`, `infer_and_fill()`, `_load_table()`. Pure stdlib, no network.
+- `data/migrations.py` — migration **v16**: `ALTER TABLE scan_runs ADD COLUMN country_code TEXT DEFAULT ''` + `country TEXT DEFAULT ''`.
+- `data/database.py` — `create_run()` accepts `country_code` and `country`; INSERT updated.
+- `scanner/orchestrator.py` — `scan_domains()` and `reassess_run()` accept and propagate `country_code`/`country`.
+- `scheduler/scan_scheduler.py` — `add_schedule()` stores `country_code`/`country` in `config_json`; `_run_scheduled_scan()` passes them to `scan_domains()`.
+- `pqc_monitor.py` — `scan` command gains `--country-code`/`--country` options and calls `infer_and_fill()`; `schedule` command same; `list-runs` output gains Country and Region columns.
+- `tests/test_orgs_and_dns.py` — `TestGeoInference` class with 12 tests (single ccTLD, mixed, generic, infer_and_fill, edge cases, CSV spot-checks, DB integration).
+
+**Schema**: v16. Deploy path: `deploy.sh` (web + scheduler restart; both touch `data/`).
 
 ---
 

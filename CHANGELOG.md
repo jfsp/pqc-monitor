@@ -6,6 +6,24 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.1] — 2026-06-27
+
+### Added
+- **TLD-based geo inference** (`data/geo_inference.py` + `data/tld_geo.csv`)
+  - Reads user-editable CSV (200+ ccTLD entries); no network calls; pure stdlib
+  - Single ccTLD list → infers country_code, country, region automatically
+  - Multiple ccTLDs → no inference; CLI echoes which TLDs were found
+  - All generic TLDs (.com/.net/.org/…) → no inference
+  - Explicit `--country-code` always overrides inference
+- **Country + region on scan runs** — schema migration v16
+  - `data/database.py`: `create_run()` stores `country_code` + `country`
+  - `scanner/orchestrator.py`: `scan_domains()` and `reassess_run()` propagate both fields
+  - `scheduler/scan_scheduler.py`: `add_schedule()` stores in `config_json`, passes on run
+- **CLI**: `scan` and `schedule` commands gain `--country-code` and `--country` options
+- **CLI**: `list-runs` output now shows Country and Region columns
+- **Tests**: `TestGeoInference` class — 12 tests in `test_orgs_and_dns.py`
+
+---
 ## [1.5.0] — 2026-06-27
 
 ### Added

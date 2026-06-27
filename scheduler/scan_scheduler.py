@@ -54,15 +54,18 @@ class ScanScheduler:
     def add_schedule(self, name: str, domain_list_id: int,
                      interval_days: int = 90,
                      use_shodan: bool = False,
-                     sector: str = "", region: str = "") -> int:
+                     sector: str = "", region: str = "",
+                     country_code: str = "", country: str = "") -> int:
         """Add a new periodic scan schedule."""
         import json
         next_run = (datetime.now(timezone.utc) + timedelta(days=interval_days)).isoformat()
 
         config = {
-            "use_shodan": use_shodan,
-            "sector": sector,
-            "region": region
+            "use_shodan":   use_shodan,
+            "sector":       sector,
+            "region":       region,
+            "country_code": country_code,
+            "country":      country,
         }
 
         with self.db._connect() as conn:
@@ -113,6 +116,8 @@ class ScanScheduler:
                 domains,
                 sector=config.get("sector", ""),
                 region=config.get("region", ""),
+                country_code=config.get("country_code", ""),
+                country=config.get("country", ""),
                 use_shodan=config.get("use_shodan", False)
             )
             ts = datetime.now(timezone.utc).isoformat()

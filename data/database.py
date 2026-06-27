@@ -191,15 +191,18 @@ class Database:
     # ─── Scan Runs ───────────────────────────────────────────────
 
     def create_run(self, domains: list, sector: str = "", region: str = "",
+                   country_code: str = "", country: str = "",
                    notes: str = "") -> str:
         import uuid
         run_id = str(uuid.uuid4())[:8]
         ts = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO scan_runs (run_id, started_at, domain_list, sector, region, notes) "
-                "VALUES (?,?,?,?,?,?)",
-                (run_id, ts, json.dumps(domains), sector, region, notes)
+                "INSERT INTO scan_runs "
+                "(run_id, started_at, domain_list, sector, region, country_code, country, notes) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (run_id, ts, json.dumps(domains), sector, region,
+                 country_code, country, notes)
             )
         return run_id
 

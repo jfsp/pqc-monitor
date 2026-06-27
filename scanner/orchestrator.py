@@ -92,6 +92,7 @@ class ScanOrchestrator:
         self.assessor = CryptoAssessor(guideline_ids, guidelines_dir)
 
     def scan_domains(self, domains: list, sector: str = "", region: str = "",
+                     country_code: str = "", country: str = "",
                      use_shodan: bool = False, progress_callback=None) -> str:
         """Scan a list of domains. Returns run_id."""
         logger.info(
@@ -100,7 +101,8 @@ class ScanOrchestrator:
             f"chain={self.do_chain} | cipher_enum={self.do_cipher_enum} | "
             f"cdn={self.do_cdn}"
         )
-        run_id = self.db.create_run(domains, sector=sector, region=region)
+        run_id = self.db.create_run(domains, sector=sector, region=region,
+                                    country_code=country_code, country=country)
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as ex:
                 futures = {
@@ -142,6 +144,8 @@ class ScanOrchestrator:
             domains,
             sector=original.get("sector", ""),
             region=original.get("region", ""),
+            country_code=original.get("country_code", ""),
+            country=original.get("country", ""),
             notes=f"Re-assessment of run {run_id}"
         )
         for domain in domains:

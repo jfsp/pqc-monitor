@@ -1,0 +1,257 @@
+# PQC-Monitor: TLD → Country / Region mapping
+# Format: tld,country_code,country,region
+# - tld: lowercase without leading dot (e.g. es, de, uk)
+# - country_code: ISO 3166-1 alpha-2
+# - country: display name
+# - region: one of Europe, America, Asia, Africa, Oceania, Middle East
+#
+# Lines starting with # are comments. Blank lines are ignored.
+# Admins may edit this file freely; changes take effect on the next scan.
+# Generic TLDs (.com, .net, .org, etc.) are intentionally omitted —
+# they carry no geographic signal.
+
+# ── Europe ────────────────────────────────────────────────────────────────────
+ac,SH,Saint Helena,Africa
+ad,AD,Andorra,Europe
+al,AL,Albania,Europe
+am,AM,Armenia,Europe
+at,AT,Austria,Europe
+ax,FI,Finland,Europe
+az,AZ,Azerbaijan,Europe
+ba,BA,Bosnia and Herzegovina,Europe
+be,BE,Belgium,Europe
+bg,BG,Bulgaria,Europe
+by,BY,Belarus,Europe
+ch,CH,Switzerland,Europe
+cy,CY,Cyprus,Europe
+cz,CZ,Czechia,Europe
+de,DE,Germany,Europe
+dk,DK,Denmark,Europe
+ee,EE,Estonia,Europe
+es,ES,Spain,Europe
+eu,EU,European Union,Europe
+fi,FI,Finland,Europe
+fo,FO,Faroe Islands,Europe
+fr,FR,France,Europe
+gb,GB,United Kingdom,Europe
+gg,GG,Guernsey,Europe
+gi,GI,Gibraltar,Europe
+gr,GR,Greece,Europe
+hr,HR,Croatia,Europe
+hu,HU,Hungary,Europe
+ie,IE,Ireland,Europe
+im,IM,Isle of Man,Europe
+is,IS,Iceland,Europe
+it,IT,Italy,Europe
+je,JE,Jersey,Europe
+li,LI,Liechtenstein,Europe
+lt,LT,Lithuania,Europe
+lu,LU,Luxembourg,Europe
+lv,LV,Latvia,Europe
+mc,MC,Monaco,Europe
+md,MD,Moldova,Europe
+me,ME,Montenegro,Europe
+mk,MK,North Macedonia,Europe
+mt,MT,Malta,Europe
+nl,NL,Netherlands,Europe
+no,NO,Norway,Europe
+pl,PL,Poland,Europe
+pt,PT,Portugal,Europe
+ro,RO,Romania,Europe
+rs,RS,Serbia,Europe
+ru,RU,Russia,Europe
+se,SE,Sweden,Europe
+si,SI,Slovenia,Europe
+sk,SK,Slovakia,Europe
+sm,SM,San Marino,Europe
+ua,UA,Ukraine,Europe
+uk,GB,United Kingdom,Europe
+va,VA,Vatican City,Europe
+xk,XK,Kosovo,Europe
+
+# ── America ───────────────────────────────────────────────────────────────────
+ag,AG,Antigua and Barbuda,America
+ai,AI,Anguilla,America
+an,AN,Netherlands Antilles,America
+ar,AR,Argentina,America
+aw,AW,Aruba,America
+bb,BB,Barbados,America
+bl,BL,Saint Barthélemy,America
+bm,BM,Bermuda,America
+bo,BO,Bolivia,America
+bq,BQ,Bonaire,America
+br,BR,Brazil,America
+bs,BS,Bahamas,America
+bz,BZ,Belize,America
+ca,CA,Canada,America
+cl,CL,Chile,America
+co,CO,Colombia,America
+cr,CR,Costa Rica,America
+cu,CU,Cuba,America
+cw,CW,Curaçao,America
+dm,DM,Dominica,America
+do,DO,Dominican Republic,America
+ec,EC,Ecuador,America
+fk,FK,Falkland Islands,America
+gd,GD,Grenada,America
+gp,GP,Guadeloupe,America
+gt,GT,Guatemala,America
+gy,GY,Guyana,America
+hn,HN,Honduras,America
+ht,HT,Haiti,America
+jm,JM,Jamaica,America
+kn,KN,Saint Kitts and Nevis,America
+ky,KY,Cayman Islands,America
+lc,LC,Saint Lucia,America
+mf,MF,Saint Martin,America
+mq,MQ,Martinique,America
+ms,MS,Montserrat,America
+mx,MX,Mexico,America
+ni,NI,Nicaragua,America
+pa,PA,Panama,America
+pe,PE,Peru,America
+pm,PM,Saint Pierre and Miquelon,America
+pr,PR,Puerto Rico,America
+py,PY,Paraguay,America
+sr,SR,Suriname,America
+sv,SV,El Salvador,America
+sx,SX,Sint Maarten,America
+tc,TC,Turks and Caicos Islands,America
+tt,TT,Trinidad and Tobago,America
+us,US,United States,America
+uy,UY,Uruguay,America
+vc,VC,Saint Vincent and the Grenadines,America
+ve,VE,Venezuela,America
+vg,VG,British Virgin Islands,America
+vi,VI,US Virgin Islands,America
+
+# ── Asia ──────────────────────────────────────────────────────────────────────
+af,AF,Afghanistan,Asia
+bd,BD,Bangladesh,Asia
+bn,BN,Brunei,Asia
+bt,BT,Bhutan,Asia
+cn,CN,China,Asia
+hk,HK,Hong Kong,Asia
+id,ID,Indonesia,Asia
+in,IN,India,Asia
+jp,JP,Japan,Asia
+kg,KG,Kyrgyzstan,Asia
+kh,KH,Cambodia,Asia
+kp,KP,North Korea,Asia
+kr,KR,South Korea,Asia
+kz,KZ,Kazakhstan,Asia
+la,LA,Laos,Asia
+lk,LK,Sri Lanka,Asia
+mm,MM,Myanmar,Asia
+mn,MN,Mongolia,Asia
+mo,MO,Macao,Asia
+mv,MV,Maldives,Asia
+my,MY,Malaysia,Asia
+np,NP,Nepal,Asia
+ph,PH,Philippines,Asia
+pk,PK,Pakistan,Asia
+sg,SG,Singapore,Asia
+th,TH,Thailand,Asia
+tj,TJ,Tajikistan,Asia
+tl,TL,Timor-Leste,Asia
+tm,TM,Turkmenistan,Asia
+tw,TW,Taiwan,Asia
+uz,UZ,Uzbekistan,Asia
+vn,VN,Vietnam,Asia
+
+# ── Middle East ───────────────────────────────────────────────────────────────
+ae,AE,United Arab Emirates,Middle East
+bh,BH,Bahrain,Middle East
+iq,IQ,Iraq,Middle East
+ir,IR,Iran,Middle East
+jo,JO,Jordan,Middle East
+kw,KW,Kuwait,Middle East
+lb,LB,Lebanon,Middle East
+om,OM,Oman,Middle East
+ps,PS,Palestine,Middle East
+qa,QA,Qatar,Middle East
+sa,SA,Saudi Arabia,Middle East
+sy,SY,Syria,Middle East
+tr,TR,Turkey,Middle East
+ye,YE,Yemen,Middle East
+
+# ── Africa ───────────────────────────────────────────────────────────────────
+ao,AO,Angola,Africa
+bf,BF,Burkina Faso,Africa
+bi,BI,Burundi,Africa
+bj,BJ,Benin,Africa
+bw,BW,Botswana,Africa
+cd,CD,DR Congo,Africa
+cf,CF,Central African Republic,Africa
+cg,CG,Republic of Congo,Africa
+ci,CI,Côte d'Ivoire,Africa
+cm,CM,Cameroon,Africa
+cv,CV,Cape Verde,Africa
+dj,DJ,Djibouti,Africa
+dz,DZ,Algeria,Africa
+eg,EG,Egypt,Africa
+eh,EH,Western Sahara,Africa
+er,ER,Eritrea,Africa
+et,ET,Ethiopia,Africa
+ga,GA,Gabon,Africa
+gh,GH,Ghana,Africa
+gm,GM,Gambia,Africa
+gn,GN,Guinea,Africa
+gq,GQ,Equatorial Guinea,Africa
+gw,GW,Guinea-Bissau,Africa
+ke,KE,Kenya,Africa
+km,KM,Comoros,Africa
+lr,LR,Liberia,Africa
+ls,LS,Lesotho,Africa
+ly,LY,Libya,Africa
+ma,MA,Morocco,Africa
+mg,MG,Madagascar,Africa
+ml,ML,Mali,Africa
+mr,MR,Mauritania,Africa
+mu,MU,Mauritius,Africa
+mw,MW,Malawi,Africa
+mz,MZ,Mozambique,Africa
+na,NA,Namibia,Africa
+ne,NE,Niger,Africa
+ng,NG,Nigeria,Africa
+rw,RW,Rwanda,Africa
+sc,SC,Seychelles,Africa
+sd,SD,Sudan,Africa
+sl,SL,Sierra Leone,Africa
+sn,SN,Senegal,Africa
+so,SO,Somalia,Africa
+ss,SS,South Sudan,Africa
+st,ST,São Tomé and Príncipe,Africa
+sz,SZ,Eswatini,Africa
+td,TD,Chad,Africa
+tg,TG,Togo,Africa
+tn,TN,Tunisia,Africa
+tz,TZ,Tanzania,Africa
+ug,UG,Uganda,Africa
+za,ZA,South Africa,Africa
+zm,ZM,Zambia,Africa
+zw,ZW,Zimbabwe,Africa
+
+# ── Oceania ───────────────────────────────────────────────────────────────────
+au,AU,Australia,Oceania
+ck,CK,Cook Islands,Oceania
+fj,FJ,Fiji,Oceania
+fm,FM,Micronesia,Oceania
+ki,KI,Kiribati,Oceania
+mh,MH,Marshall Islands,Oceania
+mp,MP,Northern Mariana Islands,Oceania
+nc,NC,New Caledonia,Oceania
+nf,NF,Norfolk Island,Oceania
+nr,NR,Nauru,Oceania
+nu,NU,Niue,Oceania
+nz,NZ,New Zealand,Oceania
+pf,PF,French Polynesia,Oceania
+pg,PG,Papua New Guinea,Oceania
+pw,PW,Palau,Oceania
+sb,SB,Solomon Islands,Oceania
+tk,TK,Tokelau,Oceania
+to,TO,Tonga,Oceania
+tv,TV,Tuvalu,Oceania
+vu,VU,Vanuatu,Oceania
+wf,WF,Wallis and Futuna,Oceania
+ws,WS,Samoa,Oceania

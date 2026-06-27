@@ -670,3 +670,117 @@ class TestDNSDumpsterAPIKey(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ══════════════════════════════════════════════════════════════════
+# Geo inference (data/geo_inference.py + data/tld_geo.csv)
+# ══════════════════════════════════════════════════════════════════
+
+class TestGeoInference(unittest.TestCase):
+    """Tests for TLD-based geographic inference."""
+
+    def setUp(self):
+        # Use the real tld_geo.csv shipped with the project
+        self.csv = os.path.join(
+            os.path.dirname(__file__), "..", "data", "tld_geo.csv"
+        )
+        from data.geo_inference import infer_from_domains, infer_and_fill
+        self.infer     = infer_from_domains
+        self.infer_fill = infer_and_fill
+
+    # ── Single ccTLD → infer ──────────────────────────────────────
+
+    def test_single_cctld_infers_country(self):
+        r = self.infer(["bancosantander.es", "bbva.es"], csv_path=self.csv)
+        self.assertTrue(r.inferred)
+        self.assertEqual(r.country_code, "ES")
+        self.assertEqual(r.country,      "Spain")
+        self.assertEqual(r.region,       "Europe")
+
+    def test_single_cctld_de(self):
+        r = self.infer(["bundesbank.de", "commerzbank.de"], csv_path=self.csv)
+        self.assertTrue(r.inferred)
+        self.assertEqual(r.country_code, "DE")
+        self.assertEqual(r.region,       "Europe")
+
+    def test_message_contains_country_code(self):
+        r = self.infer(["example.pt"], csv_path=self.csv)
+        self.assertIn("PT", r.message)
+        self.assertIn("Portugal", r.message)
+
+    # ── Mixed ccTLDs → no inference ───────────────────────────────
+
+    def test_mixed_cctlds_no_inference(self):
+        r = self.infer(["banco.es", "bank.de"], csv_path=self.csv)
+        self.assertFalse(r.inferred)
+        self.assertEqual(r.country_code, "")
+        self.assertIn("multiple ccTLDs", r.message)
+        self.assertIn(".de", r.message)
+        self.assertIn(".es", r.message)
+
+    # ── All generic TLDs → no inference ──────────────────────────
+
+    def test_generic_tlds_no_inference(self):
+        r = self.infer(["example.com", "bank.net", "gov.org"], csv_path=self.csv)
+        self.assertFalse(r.inferred)
+        self.assertIn("no ccTLDs", r.message)
+
+    def test_mixed_generic_and_single_cctld_infers(self):
+        """Generic TLDs are ignored; single remaining ccTLD still infers."""
+        r = self.infer(["bank.es", "cdn.com", "api.net"], csv_path=self.csv)
+        self.assertTrue(r.inferred)
+        self.assertEqual(r.country_code, "ES")
+
+    # ── infer_and_fill: explicit country_code skips inference ─────
+
+    def test_explicit_country_code_skips_inference(self):
+        r = self.infer_fill(["bank.de"], country_code="FR", country="France",
+                             csv_path=self.csv)
+        self.assertFalse(r.inferred)
+        self.assertEqual(r.country_code, "FR")
+        self.assertEqual(r.country,      "France")
+
+    def test_explicit_region_preserved_when_inference_skips(self):
+        r = self.infer_fill(["bank.com", "api.net"],
+                             region="LatAm", csv_path=self.csv)
+        self.assertFalse(r.inferred)
+        self.assertEqual(r.region, "LatAm")
+
+    def test_infer_and_fill_sets_region_when_missing(self):
+        r = self.infer_fill(["ecb.europa.eu", "eba.europa.eu"],
+                             csv_path=self.csv)
+        # .eu → EU / Europe
+        self.assertTrue(r.inferred)
+        self.assertEqual(r.region, "Europe")
+
+    # ── Edge cases ────────────────────────────────────────────────
+
+    def test_empty_domain_list(self):
+        r = self.infer([], csv_path=self.csv)
+        self.assertFalse(r.inferred)
+        self.assertIsNotNone(r.message)
+
+    def test_unknown_tld_treated_as_generic(self):
+        """A TLD not in the CSV and not in GENERIC_TLDS is silently ignored."""
+        r = self.infer(["site.xyz", "api.invalid"], csv_path=self.csv)
+        self.assertFalse(r.inferred)
+
+    def test_csv_columns_correct_for_known_entries(self):
+        """Spot-check several entries across regions."""
+        from data.geo_inference import _load_table
+        table = _load_table(self.csv)
+        cases = [
+            ("es", "ES", "Spain",         "Europe"),
+            ("jp", "JP", "Japan",         "Asia"),
+            ("br", "BR", "Brazil",        "America"),
+            ("za", "ZA", "South Africa",  "Africa"),
+            ("au", "AU", "Australia",     "Oceania"),
+            ("sa", "SA", "Saudi Arabia",  "Middle East"),
+        ]
+        for tld, cc, country, region in cases:
+            with self.subTest(tld=tld):
+                self.assertIn(tld, table)
+                self.assertEqual(table[tld]["country_code"], cc)
+                self.assertEqual(table[tld]["country"],      country)
+                self.assertEqual(table[tld]["region"],       region)
+

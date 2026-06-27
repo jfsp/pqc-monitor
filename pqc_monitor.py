@@ -151,13 +151,16 @@ def discover(ctx, query, max_domains, no_validate, output):
 @click.option("--domains", "-d", default=None, help="File with domains (one per line)")
 @click.option("--domain", multiple=True, help="Individual domain(s) to scan")
 @click.option("--sector", default="", help="Sector name")
-@click.option("--region", default="", help="Region name")
+@click.option("--region", default="", help="Region label (e.g. Europe). Auto-inferred from ccTLD if omitted.")
+@click.option("--country-code", "country_code", default="",
+              help="ISO 3166-1 alpha-2 country code (e.g. ES). Auto-inferred from ccTLD if omitted.")
+@click.option("--country", default="", help="Country display name (e.g. Spain). Auto-filled when country-code is inferred.")
 @click.option("--shodan", is_flag=True, help="Use Shodan API if available")
 @click.option("--dns-enumerate", "dns_enumerate", is_flag=True,
               help="Run DNS deep-dive enumeration before scanning (CT SANs, "
                    "wordlist, DNSDumpster if key configured)")
 @click.pass_context
-def scan(ctx, domains, domain, sector, region, shodan, dns_enumerate):
+def scan(ctx, domains, domain, sector, region, country_code, country, shodan, dns_enumerate):
     """Scan domains for cryptographic posture and PQC readiness.
 
     Examples:
@@ -221,12 +224,22 @@ def scan(ctx, domains, domain, sector, region, shodan, dns_enumerate):
         domain_list = sorted(discovered)
         click.echo(f"  → {len(domain_list)} total hosts to scan after enumeration")
 
+    # Geo inference: fill country/region from ccTLDs when not explicitly set
+    from data.geo_inference import infer_and_fill
+    geo = infer_and_fill(domain_list, country_code=country_code,
+                         country=country, region=region)
+    click.echo(geo.message)
+    country_code = geo.country_code
+    country      = geo.country
+    region       = geo.region or region   # keep explicit region if inference skipped
+
     completed = 0
     def progress(done, total, current_domain):
         click.echo(f"  [{done}/{total}] {current_domain}")
 
     run_id = orchestrator.scan_domains(
         domain_list, sector=sector, region=region,
+        country_code=country_code, country=country,
         use_shodan=shodan, progress_callback=progress
     )
 
@@ -271,10 +284,13 @@ def dashboard(ctx):
 @click.option("--domains", "-d", required=True, help="Domain list file")
 @click.option("--interval", default="90d", help="Scan interval (e.g. 90d, 30d)")
 @click.option("--sector", default="")
-@click.option("--region", default="")
+@click.option("--region", default="", help="Region label. Auto-inferred from ccTLD if omitted.")
+@click.option("--country-code", "country_code", default="",
+              help="ISO 3166-1 alpha-2 country code. Auto-inferred from ccTLD if omitted.")
+@click.option("--country", default="", help="Country display name.")
 @click.option("--name", default="", help="Schedule name")
 @click.pass_context
-def schedule(ctx, domains, interval, sector, region, name):
+def schedule(ctx, domains, interval, sector, region, country_code, country, name):
     """Add a periodic scan schedule."""
     cfg = ctx.obj["config"]
     with open(domains) as f:
@@ -284,15 +300,25 @@ def schedule(ctx, domains, interval, sector, region, name):
     db = Database(cfg.get("db_path", "data/pqc_monitor.db"))
     list_id = db.save_domain_list(name or domains, domain_list)
 
+    # Geo inference: fill country/region from ccTLDs when not explicitly set
+    from data.geo_inference import infer_and_fill
+    geo = infer_and_fill(domain_list, country_code=country_code,
+                         country=country, region=region)
+    click.echo(geo.message)
+    country_code = geo.country_code
+    country      = geo.country
+    region       = geo.region or region
+
     from scanner.orchestrator import ScanOrchestrator
     from scheduler.scan_scheduler import ScanScheduler
     orch = ScanOrchestrator(cfg)
     sched = ScanScheduler(orch, db)
     sched_id = sched.add_schedule(
-        name=name or f"auto-{sector}-{region}",
+        name=name or f"auto-{sector}-{region or country_code}",
         domain_list_id=list_id,
         interval_days=days,
-        sector=sector, region=region
+        sector=sector, region=region,
+        country_code=country_code, country=country,
     )
     click.echo(f"✅ Schedule #{sched_id} added: every {days} days")
 
@@ -326,11 +352,13 @@ def list_runs(ctx):
     if not runs:
         click.echo("No scan runs found.")
         return
-    click.echo(f"\n{'Run ID':<12} {'Started':<22} {'Sector':<15} {'Status':<12}")
-    click.echo("-" * 65)
+    click.echo(f"\n{'Run ID':<12} {'Started':<22} {'Sector':<15} {'Country':<6} {'Region':<12} {'Status':<12}")
+    click.echo("-" * 85)
     for r in runs:
+        cc = r.get("country_code", "") or ""
         click.echo(f"{r['run_id']:<12} {r['started_at'][:19]:<22} "
-                   f"{r.get('sector',''):<15} {r['status']:<12}")
+                   f"{r.get('sector',''):<15} {cc:<6} "
+                   f"{r.get('region',''):<12} {r['status']:<12}")
 
 
 @cli.command("export")

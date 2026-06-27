@@ -237,6 +237,12 @@ CREATE INDEX IF NOT EXISTS idx_user_org       ON user_organisations(user_id)""",
         """ALTER TABLE organisations ADD COLUMN country_code TEXT DEFAULT '';
 ALTER TABLE organisations ADD COLUMN country TEXT DEFAULT ''""",
     ),
+    (
+        16,
+        "Add country_code and country columns to scan_runs",
+        """ALTER TABLE scan_runs ADD COLUMN country_code TEXT DEFAULT '';
+ALTER TABLE scan_runs ADD COLUMN country TEXT DEFAULT ''""",
+    ),
 ]
 
 

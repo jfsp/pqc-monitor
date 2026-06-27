@@ -97,6 +97,7 @@ The script uses `git diff --diff-filter=AMRC` to identify changed files, skips p
 | 1.3.0 | DNSDumpster official API key support; Organisation grouping (migration v14); full org CRUD API; admin panel tab; `?org_id=` and `?region=` filters; analyst org scoping in RBAC |
 | 1.3.1 | Fix: production deployment — systemd unit errors, database path, session persistence, reverse proxy headers. See §2.1 for full details. |
 | 1.4.0 | Fix: no-TLS domains shown as Critical → now N/A; fix: analyst sees forbidden tabs; fix: roadmap includes N/A domains; fix: scheduler service not starting (DB path mismatch); new: incremental deploy script. See §2.2 for full details. |
+| 1.5.0 | Feature: Country on organisations — `country_code` (ISO 3166-1 alpha-2) + `country` (display name) on every org; schema v15; country dropdown filter in dashboard; `?country_code=` on `/api/assessments`. See §2.3 for full details. |
 
 ### 2.1 v1.3.1 — Deployment fixes (2026-06-25)
 
@@ -225,6 +226,25 @@ Service restart trigger sets (restart only when these paths change):
 - `pqc-monitor-scheduler`: `pqc_monitor.py`, `version.py`, `requirements.txt`, `ct/`, `data/`, `scanner/`, `scheduler/`
 
 Files outside both sets (`scripts/`, `tests/`, `systemd/`, `guidelines/`, docs) never trigger a restart.
+
+---
+
+## 2.3 — v1.5.0 detail
+
+**Country on Organisations**
+
+Every organisation now carries `country_code` (ISO 3166-1 alpha-2, e.g. `ES`) and `country` (display name, e.g. `Spain`). Both fields default to empty string so existing data is unaffected.
+
+Changes by file:
+
+- `data/migrations.py` — migration **v15**: two `ALTER TABLE` statements add `country_code TEXT DEFAULT ''` and `country TEXT DEFAULT ''` to `organisations`.
+- `data/database.py` — `create_organisation()` and `update_organisation()` accept both new fields; `update_organisation` whitelist updated.
+- `admin/routes.py` — POST `/admin/api/organisations` and PATCH `/admin/api/organisations/<id>` pass/return both fields; org table gains a Country column; edit modal has a full ISO 3166-1 alpha-2 `<select>` with `syncCountryName()` auto-fill for the display name.
+- `app_routes.py` — `GET /api/assessments` accepts `?country_code=XX` (case-insensitive); filters in-memory via `get_domain_org()`, same pattern as `?region=`.
+- `dashboard/app.py` — new `<select id="filter-country">` in Domain Assessments toolbar (right of Region); `_activeCountry` state; `populateCountryDropdown()` builds options dynamically from `_orgsCache` (only countries with at least one org); country filter block in `applyFilterAndSort()`.
+- `tests/test_orgs_and_dns.py` — 7 new tests covering DB-layer create/update/default and API-layer create/update/list.
+
+**Schema**: v15. No breaking changes. Deploy path: run `deploy.sh` (web service restart only; scheduler not affected).
 
 ---
 

@@ -6,6 +6,17 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.0] — 2026-06-27
+
+### Added
+- **Country on organisations** (`country_code` ISO 3166-1 alpha-2 + `country` display name)
+  - Schema migration v15: two new columns on `organisations`, default empty string
+  - Admin UI: ISO country dropdown with auto-fill in create/edit org modal; Country column in org table
+  - Dashboard: Country filter dropdown (alongside existing Org and Region filters), client-side via `_orgsCache`
+  - API: `GET /api/assessments?country_code=XX` server-side filter (mirrors `?region=`)
+  - 7 new tests in `test_orgs_and_dns.py` (DB layer + admin API)
+
+---
 ## [Unreleased]
 
 *Add entries here as work progresses on the next release.*

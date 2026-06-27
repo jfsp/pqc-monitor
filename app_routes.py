@@ -124,6 +124,7 @@ def api_assessments():
     service_type = request.args.get("service_type")  # T2-1 filter
     org_id_raw   = request.args.get("org_id")
     region       = request.args.get("region")         # filter by org.region
+    country_code = request.args.get("country_code")   # filter by org.country_code (ISO 3166-1 alpha-2)
 
     org_id = int(org_id_raw) if org_id_raw and org_id_raw.isdigit() else None
 
@@ -145,6 +146,16 @@ def api_assessments():
         all_ = [
             a for a in all_
             if (_org_for(a.get("domain", "")).get("region", "")).lower() == region_lc
+        ]
+
+    # Country filter: match org.country_code (case-insensitive) via domain→org join
+    if country_code:
+        cc_upper = country_code.upper().strip()
+        def _org_for_cc(domain):
+            return db.get_domain_org(domain) or {}
+        all_ = [
+            a for a in all_
+            if (_org_for_cc(a.get("domain", "")).get("country_code", "")).upper() == cc_upper
         ]
 
     return jsonify(filter_assessments(all_, user))

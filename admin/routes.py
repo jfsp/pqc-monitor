@@ -287,6 +287,8 @@ def api_create_org():
             sector=data.get("sector", ""),
             region=data.get("region", ""),
             description=data.get("description", ""),
+            country_code=data.get("country_code", ""),
+            country=data.get("country", ""),
             created_by=current_user().id,
         )
     except Exception as exc:
@@ -310,7 +312,8 @@ def api_get_org(org_id):
 def api_update_org(org_id):
     data = request.get_json() or {}
     ok   = _db().update_organisation(org_id, **{
-        k: data[k] for k in ("name", "sector", "region", "description") if k in data
+        k: data[k] for k in ("name", "sector", "region", "description",
+                              "country_code", "country") if k in data
     })
     if not ok:
         return jsonify({"error": "not found"}), 404
@@ -619,7 +622,7 @@ select option { background:var(--panel); }
       <div class="card">
         <div class="card-body" style="padding:0">
           <table class="tbl" id="tbl-orgs">
-            <thead><tr><th>#</th><th>Name</th><th>Sector</th><th>Region</th><th>Domains</th><th>Actions</th></tr></thead>
+            <thead><tr><th>#</th><th>Name</th><th>Sector</th><th>Region</th><th>Country</th><th>Domains</th><th>Actions</th></tr></thead>
             <tbody id="tbody-orgs"></tbody>
           </table>
         </div>
@@ -1280,20 +1283,21 @@ async function loadOrgs() {
     <td><strong>${esc(o.name)}</strong></td>
     <td style="color:var(--muted)">${esc(o.sector||'—')}</td>
     <td style="color:var(--muted)">${esc(o.region||'—')}</td>
+    <td style="color:var(--muted)">${o.country_code ? `<span title="${esc(o.country||'')}">${esc(o.country_code)}</span>` : '—'}</td>
     <td><span style="background:rgba(0,212,255,.1);color:var(--accent);padding:.1rem .45rem;border-radius:3px;font-size:.75rem">${o.domain_count||0} domains</span></td>
     <td>
       <button class="btn btn-outline btn-sm" onclick="openEditOrg(${o.id})">Edit</button>
       <button class="btn btn-outline btn-sm" onclick="openOrgDomains(${o.id},'${esc(o.name)}')">Domains</button>
       <button class="btn btn-danger btn-sm" onclick="deleteOrg(${o.id},'${esc(o.name)}')">Delete</button>
     </td>
-  </tr>`).join('') || '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:1.5rem">No organisations yet.</td></tr>';
+  </tr>`).join('') || '<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:1.5rem">No organisations yet.</td></tr>';
 }
 
 function openCreateOrg() {
   _editOrgId = null;
   document.getElementById('modal-org-title').textContent = 'New Organisation';
   document.getElementById('modal-org-submit').textContent = 'Create';
-  ['f-org-name','f-org-sector','f-org-region','f-org-desc'].forEach(id =>
+  ['f-org-name','f-org-sector','f-org-region','f-org-country-code','f-org-country','f-org-desc'].forEach(id =>
     document.getElementById(id).value = '');
   hideAlert('modal-org-alert');
   document.getElementById('modal-org').classList.add('open');
@@ -1305,20 +1309,24 @@ async function openEditOrg(orgId) {
   const o = await r.json();
   document.getElementById('modal-org-title').textContent = `Edit: ${o.name}`;
   document.getElementById('modal-org-submit').textContent = 'Save';
-  document.getElementById('f-org-name').value   = o.name   || '';
-  document.getElementById('f-org-sector').value = o.sector || '';
-  document.getElementById('f-org-region').value = o.region || '';
-  document.getElementById('f-org-desc').value   = o.description || '';
+  document.getElementById('f-org-name').value         = o.name   || '';
+  document.getElementById('f-org-sector').value       = o.sector || '';
+  document.getElementById('f-org-region').value       = o.region || '';
+  document.getElementById('f-org-country-code').value = o.country_code || '';
+  document.getElementById('f-org-country').value      = o.country || '';
+  document.getElementById('f-org-desc').value         = o.description || '';
   hideAlert('modal-org-alert');
   document.getElementById('modal-org').classList.add('open');
 }
 
 async function submitOrgModal() {
   const body = {
-    name:        document.getElementById('f-org-name').value.trim(),
-    sector:      document.getElementById('f-org-sector').value.trim(),
-    region:      document.getElementById('f-org-region').value.trim(),
-    description: document.getElementById('f-org-desc').value.trim(),
+    name:         document.getElementById('f-org-name').value.trim(),
+    sector:       document.getElementById('f-org-sector').value.trim(),
+    region:       document.getElementById('f-org-region').value.trim(),
+    country_code: document.getElementById('f-org-country-code').value.trim(),
+    country:      document.getElementById('f-org-country').value.trim(),
+    description:  document.getElementById('f-org-desc').value.trim(),
   };
   if (!body.name) { showAlert('modal-org-alert','Name is required.','error'); return; }
   const url    = _editOrgId ? `/admin/api/organisations/${_editOrgId}` : '/admin/api/organisations';
@@ -1382,6 +1390,109 @@ loadUsers();
       <input type="text" id="f-org-sector" placeholder="e.g. Financial Services" style="width:100%;margin-bottom:.75rem">
       <label>Region</label>
       <input type="text" id="f-org-region" placeholder="e.g. EU, Spain, LATAM" style="width:100%;margin-bottom:.75rem">
+      <label>Country Code (ISO 3166-1 alpha-2)</label>
+      <select id="f-org-country-code" onchange="syncCountryName()" style="width:100%;background:var(--input-bg,var(--panel));border:1px solid var(--border);color:var(--text);padding:.3rem .5rem;border-radius:4px;margin-bottom:.75rem">
+        <option value="">— Select country —</option>
+        <option value="AD">AD – Andorra</option><option value="AE">AE – United Arab Emirates</option>
+        <option value="AF">AF – Afghanistan</option><option value="AG">AG – Antigua and Barbuda</option>
+        <option value="AL">AL – Albania</option><option value="AM">AM – Armenia</option>
+        <option value="AO">AO – Angola</option><option value="AR">AR – Argentina</option>
+        <option value="AT">AT – Austria</option><option value="AU">AU – Australia</option>
+        <option value="AZ">AZ – Azerbaijan</option><option value="BA">BA – Bosnia and Herzegovina</option>
+        <option value="BB">BB – Barbados</option><option value="BD">BD – Bangladesh</option>
+        <option value="BE">BE – Belgium</option><option value="BF">BF – Burkina Faso</option>
+        <option value="BG">BG – Bulgaria</option><option value="BH">BH – Bahrain</option>
+        <option value="BI">BI – Burundi</option><option value="BJ">BJ – Benin</option>
+        <option value="BN">BN – Brunei</option><option value="BO">BO – Bolivia</option>
+        <option value="BR">BR – Brazil</option><option value="BS">BS – Bahamas</option>
+        <option value="BT">BT – Bhutan</option><option value="BW">BW – Botswana</option>
+        <option value="BY">BY – Belarus</option><option value="BZ">BZ – Belize</option>
+        <option value="CA">CA – Canada</option><option value="CD">CD – DR Congo</option>
+        <option value="CF">CF – Central African Republic</option><option value="CG">CG – Congo</option>
+        <option value="CH">CH – Switzerland</option><option value="CI">CI – Côte d'Ivoire</option>
+        <option value="CL">CL – Chile</option><option value="CM">CM – Cameroon</option>
+        <option value="CN">CN – China</option><option value="CO">CO – Colombia</option>
+        <option value="CR">CR – Costa Rica</option><option value="CU">CU – Cuba</option>
+        <option value="CV">CV – Cape Verde</option><option value="CY">CY – Cyprus</option>
+        <option value="CZ">CZ – Czechia</option><option value="DE">DE – Germany</option>
+        <option value="DJ">DJ – Djibouti</option><option value="DK">DK – Denmark</option>
+        <option value="DM">DM – Dominica</option><option value="DO">DO – Dominican Republic</option>
+        <option value="DZ">DZ – Algeria</option><option value="EC">EC – Ecuador</option>
+        <option value="EE">EE – Estonia</option><option value="EG">EG – Egypt</option>
+        <option value="ER">ER – Eritrea</option><option value="ES">ES – Spain</option>
+        <option value="ET">ET – Ethiopia</option><option value="FI">FI – Finland</option>
+        <option value="FJ">FJ – Fiji</option><option value="FR">FR – France</option>
+        <option value="GA">GA – Gabon</option><option value="GB">GB – United Kingdom</option>
+        <option value="GD">GD – Grenada</option><option value="GE">GE – Georgia</option>
+        <option value="GH">GH – Ghana</option><option value="GM">GM – Gambia</option>
+        <option value="GN">GN – Guinea</option><option value="GQ">GQ – Equatorial Guinea</option>
+        <option value="GR">GR – Greece</option><option value="GT">GT – Guatemala</option>
+        <option value="GW">GW – Guinea-Bissau</option><option value="GY">GY – Guyana</option>
+        <option value="HN">HN – Honduras</option><option value="HR">HR – Croatia</option>
+        <option value="HT">HT – Haiti</option><option value="HU">HU – Hungary</option>
+        <option value="ID">ID – Indonesia</option><option value="IE">IE – Ireland</option>
+        <option value="IL">IL – Israel</option><option value="IN">IN – India</option>
+        <option value="IQ">IQ – Iraq</option><option value="IR">IR – Iran</option>
+        <option value="IS">IS – Iceland</option><option value="IT">IT – Italy</option>
+        <option value="JM">JM – Jamaica</option><option value="JO">JO – Jordan</option>
+        <option value="JP">JP – Japan</option><option value="KE">KE – Kenya</option>
+        <option value="KG">KG – Kyrgyzstan</option><option value="KH">KH – Cambodia</option>
+        <option value="KI">KI – Kiribati</option><option value="KM">KM – Comoros</option>
+        <option value="KN">KN – Saint Kitts and Nevis</option><option value="KP">KP – North Korea</option>
+        <option value="KR">KR – South Korea</option><option value="KW">KW – Kuwait</option>
+        <option value="KZ">KZ – Kazakhstan</option><option value="LA">LA – Laos</option>
+        <option value="LB">LB – Lebanon</option><option value="LC">LC – Saint Lucia</option>
+        <option value="LI">LI – Liechtenstein</option><option value="LK">LK – Sri Lanka</option>
+        <option value="LR">LR – Liberia</option><option value="LS">LS – Lesotho</option>
+        <option value="LT">LT – Lithuania</option><option value="LU">LU – Luxembourg</option>
+        <option value="LV">LV – Latvia</option><option value="LY">LY – Libya</option>
+        <option value="MA">MA – Morocco</option><option value="MC">MC – Monaco</option>
+        <option value="MD">MD – Moldova</option><option value="ME">ME – Montenegro</option>
+        <option value="MG">MG – Madagascar</option><option value="MH">MH – Marshall Islands</option>
+        <option value="MK">MK – North Macedonia</option><option value="ML">ML – Mali</option>
+        <option value="MM">MM – Myanmar</option><option value="MN">MN – Mongolia</option>
+        <option value="MR">MR – Mauritania</option><option value="MT">MT – Malta</option>
+        <option value="MU">MU – Mauritius</option><option value="MV">MV – Maldives</option>
+        <option value="MW">MW – Malawi</option><option value="MX">MX – Mexico</option>
+        <option value="MY">MY – Malaysia</option><option value="MZ">MZ – Mozambique</option>
+        <option value="NA">NA – Namibia</option><option value="NE">NE – Niger</option>
+        <option value="NG">NG – Nigeria</option><option value="NI">NI – Nicaragua</option>
+        <option value="NL">NL – Netherlands</option><option value="NO">NO – Norway</option>
+        <option value="NP">NP – Nepal</option><option value="NR">NR – Nauru</option>
+        <option value="NZ">NZ – New Zealand</option><option value="OM">OM – Oman</option>
+        <option value="PA">PA – Panama</option><option value="PE">PE – Peru</option>
+        <option value="PG">PG – Papua New Guinea</option><option value="PH">PH – Philippines</option>
+        <option value="PK">PK – Pakistan</option><option value="PL">PL – Poland</option>
+        <option value="PT">PT – Portugal</option><option value="PW">PW – Palau</option>
+        <option value="PY">PY – Paraguay</option><option value="QA">QA – Qatar</option>
+        <option value="RO">RO – Romania</option><option value="RS">RS – Serbia</option>
+        <option value="RU">RU – Russia</option><option value="RW">RW – Rwanda</option>
+        <option value="SA">SA – Saudi Arabia</option><option value="SB">SB – Solomon Islands</option>
+        <option value="SC">SC – Seychelles</option><option value="SD">SD – Sudan</option>
+        <option value="SE">SE – Sweden</option><option value="SG">SG – Singapore</option>
+        <option value="SI">SI – Slovenia</option><option value="SK">SK – Slovakia</option>
+        <option value="SL">SL – Sierra Leone</option><option value="SM">SM – San Marino</option>
+        <option value="SN">SN – Senegal</option><option value="SO">SO – Somalia</option>
+        <option value="SR">SR – Suriname</option><option value="SS">SS – South Sudan</option>
+        <option value="ST">ST – São Tomé and Príncipe</option><option value="SV">SV – El Salvador</option>
+        <option value="SY">SY – Syria</option><option value="SZ">SZ – Eswatini</option>
+        <option value="TD">TD – Chad</option><option value="TG">TG – Togo</option>
+        <option value="TH">TH – Thailand</option><option value="TJ">TJ – Tajikistan</option>
+        <option value="TL">TL – Timor-Leste</option><option value="TM">TM – Turkmenistan</option>
+        <option value="TN">TN – Tunisia</option><option value="TO">TO – Tonga</option>
+        <option value="TR">TR – Turkey</option><option value="TT">TT – Trinidad and Tobago</option>
+        <option value="TV">TV – Tuvalu</option><option value="TZ">TZ – Tanzania</option>
+        <option value="UA">UA – Ukraine</option><option value="UG">UG – Uganda</option>
+        <option value="US">US – United States</option><option value="UY">UY – Uruguay</option>
+        <option value="UZ">UZ – Uzbekistan</option><option value="VA">VA – Vatican City</option>
+        <option value="VC">VC – Saint Vincent and the Grenadines</option><option value="VE">VE – Venezuela</option>
+        <option value="VN">VN – Vietnam</option><option value="VU">VU – Vanuatu</option>
+        <option value="WS">WS – Samoa</option><option value="YE">YE – Yemen</option>
+        <option value="ZA">ZA – South Africa</option><option value="ZM">ZM – Zambia</option>
+        <option value="ZW">ZW – Zimbabwe</option>
+      </select>
+      <label>Country (display name)</label>
+      <input type="text" id="f-org-country" placeholder="Auto-filled or enter manually" style="width:100%;margin-bottom:.75rem">
       <label>Description</label>
       <input type="text" id="f-org-desc" placeholder="Optional notes" style="width:100%;margin-bottom:.75rem">
     </div>

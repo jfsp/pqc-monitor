@@ -141,6 +141,29 @@ class TestOrgDatabaseCRUD(unittest.TestCase):
         self.assertEqual(org["name"],   "New Name")
         self.assertEqual(org["region"], "LATAM")
 
+    def test_create_organisation_with_country(self):
+        oid = self.db.create_organisation(
+            "Country Bank", sector="Finance", region="EU",
+            country_code="DE", country="Germany"
+        )
+        org = self.db.get_organisation(oid)
+        self.assertEqual(org["country_code"], "DE")
+        self.assertEqual(org["country"],      "Germany")
+
+    def test_update_organisation_country(self):
+        oid = self.db.create_organisation("Multi Bank", country_code="ES", country="Spain")
+        ok  = self.db.update_organisation(oid, country_code="FR", country="France")
+        self.assertTrue(ok)
+        org = self.db.get_organisation(oid)
+        self.assertEqual(org["country_code"], "FR")
+        self.assertEqual(org["country"],      "France")
+
+    def test_country_defaults_to_empty(self):
+        oid = self.db.create_organisation("No Country Corp")
+        org = self.db.get_organisation(oid)
+        self.assertEqual(org.get("country_code", ""), "")
+        self.assertEqual(org.get("country",      ""), "")
+
     def test_delete_organisation(self):
         oid = self.db.create_organisation("To Delete")
         self.db.delete_organisation(oid)
@@ -340,6 +363,38 @@ class TestAdminOrgAPI(unittest.TestCase):
         d = json.loads(r.data)
         self.assertEqual(d["name"],   "After")
         self.assertEqual(d["region"], "APAC")
+
+    def test_create_org_with_country(self):
+        r = self.client.post("/admin/api/organisations",
+                             json={"name": "ISO Bank", "country_code": "ES",
+                                   "country": "Spain"},
+                             content_type="application/json")
+        self.assertEqual(r.status_code, 201)
+        d = json.loads(r.data)
+        self.assertEqual(d["country_code"], "ES")
+        self.assertEqual(d["country"],      "Spain")
+
+    def test_update_org_country(self):
+        oid = self.db.create_organisation("Patch Country", country_code="PT",
+                                           country="Portugal")
+        r = self.client.patch(f"/admin/api/organisations/{oid}",
+                              json={"country_code": "IT", "country": "Italy"},
+                              content_type="application/json")
+        self.assertEqual(r.status_code, 200)
+        d = json.loads(r.data)
+        self.assertEqual(d["country_code"], "IT")
+        self.assertEqual(d["country"],      "Italy")
+
+    def test_list_orgs_includes_country(self):
+        self.db.create_organisation("CountryAlpha", country_code="FR",
+                                     country="France")
+        r = self.client.get("/admin/api/organisations")
+        self.assertEqual(r.status_code, 200)
+        data = json.loads(r.data)
+        match = next((o for o in data if o["name"] == "CountryAlpha"), None)
+        self.assertIsNotNone(match)
+        self.assertEqual(match["country_code"], "FR")
+        self.assertEqual(match["country"],      "France")
 
     def test_delete_org(self):
         oid = self.db.create_organisation("To Del")

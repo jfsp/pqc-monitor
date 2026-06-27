@@ -517,14 +517,15 @@ class Database:
 
     def create_organisation(self, name: str, sector: str = "",
                              region: str = "", description: str = "",
+                             country_code: str = "", country: str = "",
                              created_by: int = None) -> int:
         """Create a new organisation. Returns new org id."""
         ts = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO organisations (name, sector, region, description, "
-                "created_at, created_by) VALUES (?,?,?,?,?,?)",
-                (name.strip(), sector, region, description, ts, created_by)
+                "country_code, country, created_at, created_by) VALUES (?,?,?,?,?,?,?,?)",
+                (name.strip(), sector, region, description, country_code, country, ts, created_by)
             )
         return cur.lastrowid
 
@@ -555,8 +556,8 @@ class Database:
         return dict(row) if row else None
 
     def update_organisation(self, org_id: int, **fields) -> bool:
-        """Update name, sector, region, or description. Returns False if not found."""
-        allowed = {"name", "sector", "region", "description"}
+        """Update name, sector, region, country_code, country, or description. Returns False if not found."""
+        allowed = {"name", "sector", "region", "description", "country_code", "country"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return True

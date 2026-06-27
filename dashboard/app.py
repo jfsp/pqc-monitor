@@ -626,6 +626,10 @@ footer {
             style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:.25rem .5rem;border-radius:4px;font-size:.78rem">
             <option value="">All Regions</option>
           </select>
+          <select id="filter-country" onchange="applyDropdownFilters()"
+            style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:.25rem .5rem;border-radius:4px;font-size:.78rem">
+            <option value="">All Countries</option>
+          </select>
           <button class="btn-outline" id="btn-clear-filter" style="display:none" onclick="setFilter(null)">✕ Clear filter</button>
           <button class="btn-outline" onclick="loadAssessments()">↻ Refresh</button>
         </div>
@@ -1160,6 +1164,7 @@ let _activeFilter    = null; // 'critical'|'weak'|'moderate'|'ready'|'pqc'|null
 let _orgsCache       = [];   // populated by loadAssessments
 let _activeOrg       = '';
 let _activeRegion    = '';
+let _activeCountry   = '';
 let _sortCol         = 'score';
 let _sortDir         = 'asc'; // 'asc'|'desc'
 
@@ -1238,8 +1243,10 @@ async function loadAssessments(runId) {
   _activeFilter   = null;
   _activeOrg      = '';
   _activeRegion   = '';
+  _activeCountry  = '';
   populateOrgDropdown();
   populateRegionDropdown();
+  populateCountryDropdown();
   updateFilterUI();
   applyFilterAndSort();
   renderTLSChart(data);
@@ -1262,9 +1269,26 @@ function populateRegionDropdown() {
     regions.map(r => `<option value="${r}" ${current === r ? 'selected' : ''}>${r}</option>`).join('');
 }
 
+function populateCountryDropdown() {
+  const sel = document.getElementById('filter-country');
+  if (!sel) return;
+  // Build list from orgs that have a country_code; display as "CC – Country"
+  const seen = new Map();
+  _orgsCache.forEach(o => {
+    if (o.country_code) seen.set(o.country_code, o.country || o.country_code);
+  });
+  const entries = [...seen.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All Countries</option>' +
+    entries.map(([cc, name]) =>
+      `<option value="${cc}" ${current === cc ? 'selected' : ''}>${cc}–${esc(name)}</option>`
+    ).join('');
+}
+
 function applyDropdownFilters() {
-  _activeOrg    = document.getElementById('filter-org')?.value    || '';
-  _activeRegion = document.getElementById('filter-region')?.value || '';
+  _activeOrg     = document.getElementById('filter-org')?.value     || '';
+  _activeRegion  = document.getElementById('filter-region')?.value  || '';
+  _activeCountry = document.getElementById('filter-country')?.value || '';
   applyFilterAndSort();
 }
 
@@ -1345,6 +1369,18 @@ function applyFilterAndSort() {
     );
     if (domainsByRegion.size > 0) {
       items = items.filter(a => domainsByRegion.has(a.domain));
+    }
+  }
+
+  // Country filter (via org country_code)
+  if (_activeCountry) {
+    const domainsByCountry = new Set(
+      _orgsCache
+        .filter(o => (o.country_code || '').toUpperCase() === _activeCountry.toUpperCase())
+        .flatMap(o => o.domains || [])
+    );
+    if (domainsByCountry.size > 0) {
+      items = items.filter(a => domainsByCountry.has(a.domain));
     }
   }
 

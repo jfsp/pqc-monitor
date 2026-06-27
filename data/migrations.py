@@ -231,6 +231,12 @@ CREATE INDEX IF NOT EXISTS idx_domain_org     ON domain_organisations(org_id);
 CREATE INDEX IF NOT EXISTS idx_domain_org_dom ON domain_organisations(domain);
 CREATE INDEX IF NOT EXISTS idx_user_org       ON user_organisations(user_id)""",
     ),
+    (
+        15,
+        "Add country_code (ISO 3166-1 alpha-2) and country (display name) to organisations",
+        """ALTER TABLE organisations ADD COLUMN country_code TEXT DEFAULT '';
+ALTER TABLE organisations ADD COLUMN country TEXT DEFAULT ''""",
+    ),
 ]
 
 

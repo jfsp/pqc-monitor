@@ -4,7 +4,7 @@
 # Usage:
 #   bash scripts/dnsdumpster-test.sh [domain]
 #
-# The domain is optional; defaults to bundesbank.de.
+# The domain is optional; defaults to google.com.
 # The script reads the API key from the same sources pqc_monitor.py uses:
 #   1. PQC_DNSDUMPSTER_KEY environment variable
 #   2. dns_enumeration.dnsdumpster_api_key in /etc/pqc-monitor/config.yaml

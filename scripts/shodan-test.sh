@@ -4,7 +4,7 @@
 # Usage:
 #   bash scripts/shodan-test.sh [domain]
 #
-# The domain is optional; defaults to bundesbank.de.
+# The domain is optional; defaults to google.com.
 # The script reads the API key from the same sources pqc_monitor.py uses:
 #   1. SHODAN_API_KEY environment variable
 #   2. shodan.api_key in /etc/pqc-monitor/config.yaml
@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-DOMAIN="${1:-bundesbank.de}"
+DOMAIN="${1:-google.com}"
 CONFIG_PROD="/etc/pqc-monitor/config.yaml"
 CONFIG_DEV="$(dirname "$0")/../config/config.yaml"
 

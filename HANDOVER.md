@@ -1,6 +1,6 @@
 # PQC-Monitor — Developer Handover Document
 
-**Version:** 1.4.0
+**Version:** 1.7.0
 **Date:** 2026-06-27
 **Status:** 452/452 tests passing (no new tests this session — bug fixes only)
 **Purpose:** Context transfer for continuing development in a new session

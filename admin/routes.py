@@ -749,6 +749,25 @@ select option { background:var(--panel); }
       </div>
     </div>
 
+    <!-- ── Communities view ── -->
+    <div id="view-communities" class="view">
+      <div class="page-hdr">
+        <div>
+          <h2 style="font-size:1.1rem;font-weight:600">Communities</h2>
+          <p style="color:var(--muted);font-size:.82rem;margin-top:.2rem">Group organisations into communities and assign users to them.</p>
+        </div>
+        <button class="btn" onclick="openNewCommunity()">+ New Community</button>
+      </div>
+      <div id="communities-alert" class="alert"></div>
+      <table class="tbl" id="communities-table">
+        <thead><tr>
+          <th>#</th><th>Name</th><th>Description</th>
+          <th style="text-align:center">Orgs</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="communities-tbody"></tbody>
+      </table>
+    </div>
+
   </div><!-- /main -->
 </div><!-- /layout -->
 
@@ -916,10 +935,11 @@ function showView(name) {
   document.querySelectorAll('.sidebar a').forEach(a => a.classList.remove('active'));
   document.getElementById('view-' + name).classList.add('active');
   document.getElementById('nav-' + name)?.classList.add('active');
-  if (name === 'users')  loadUsers();
-  if (name === 'lists')  loadDomainLists();
-  if (name === 'orgs')   loadOrgs();
-  if (name === 'audit')  loadAudit();
+  if (name === 'users')       loadUsers();
+  if (name === 'lists')       loadDomainLists();
+  if (name === 'orgs')        loadOrgs();
+  if (name === 'audit')       loadAudit();
+  if (name === 'communities') loadCommunities();
 }
 
 // ── Users ─────────────────────────────────────────────────────────────────────
@@ -1765,25 +1785,6 @@ loadUsers();
   </div>
 </div>
 
-
-  <!-- ── Communities view ── -->
-  <div id="view-communities" class="view" style="display:none">
-    <div class="page-hdr">
-      <div>
-        <h2>Communities</h2>
-        <p class="page-sub">Group organisations into communities and assign users to them.</p>
-      </div>
-      <button class="btn" onclick="openNewCommunity()">+ New Community</button>
-    </div>
-    <div id="communities-alert" class="alert" style="display:none"></div>
-    <table class="data-table" id="communities-table">
-      <thead><tr>
-        <th>#</th><th>Name</th><th>Description</th>
-        <th style="text-align:center">Orgs</th><th>Actions</th>
-      </tr></thead>
-      <tbody id="communities-tbody"></tbody>
-    </table>
-  </div>
 
   <!-- ── Community modal ── -->
   <div class="modal-bg" id="modal-community">

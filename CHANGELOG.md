@@ -6,6 +6,23 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.6.2] — 2026-06-27
+
+### Fixed
+- **`app_routes.py`**: all 8 community/region API endpoints used
+  `current_app.config["DATABASE"]` which does not exist — the correct
+  key registered by `app_factory.py` is `"PQC_DB"`, accessible via the
+  existing `_db()` helper. This caused 500 errors on every call to
+  `/app/api/communities`, `/app/api/regions`, and all report endpoints.
+  Replaced all 8 occurrences with `_db()`.
+- **`admin/routes.py`**: communities view div was injected outside
+  `</div><!--/main-->`, making it invisible when selected. Moved inside
+  the main content area. Table class `data-table` corrected to `tbl`
+  (the only table class defined in the admin stylesheet). Added
+  `loadCommunities()` call to `showView()` dispatch so the table
+  populates on nav click.
+
+---
 ## [1.6.1] — 2026-06-27
 
 ### Fixed

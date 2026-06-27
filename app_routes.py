@@ -607,7 +607,7 @@ def api_add_schedule():
 @require_auth
 def api_communities():
     """List communities visible to the current user."""
-    db   = current_app.config["DATABASE"]
+    db   = _db()
     user = current_user()
     if user.is_admin:
         communities = db.get_communities()
@@ -623,7 +623,7 @@ def api_communities():
 @require_community_manager
 def api_community_report(cid):
     """Return aggregate PQC-readiness report for a community as JSON."""
-    db   = current_app.config["DATABASE"]
+    db   = _db()
     user = current_user()
     comm = db.get_community(cid)
     if not comm:
@@ -640,7 +640,7 @@ def api_community_report(cid):
 @require_community_manager
 def api_community_report_csv(cid):
     """Download community report as CSV."""
-    db   = current_app.config["DATABASE"]
+    db   = _db()
     user = current_user()
     comm = db.get_community(cid)
     if not comm:
@@ -662,7 +662,7 @@ def api_community_report_csv(cid):
 @require_community_manager
 def api_community_report_pdf(cid):
     """Download community report as PDF."""
-    db   = current_app.config["DATABASE"]
+    db   = _db()
     user = current_user()
     comm = db.get_community(cid)
     if not comm:
@@ -687,7 +687,7 @@ def api_community_report_pdf(cid):
 @require_community_manager
 def api_regions():
     """List distinct regions from all organisations visible to the user."""
-    db   = current_app.config["DATABASE"]
+    db   = _db()
     user = current_user()
     orgs = db.get_organisations()
     if not user.is_admin:
@@ -705,7 +705,7 @@ def api_regions():
 @require_community_manager
 def api_region_report(region):
     """Return aggregate PQC-readiness report for a region as JSON."""
-    db   = current_app.config["DATABASE"]
+    db   = _db()
     from reports.community_report import build_report
     rows   = db.get_region_aggregate(region)
     report = build_report(region, "Region", rows)
@@ -716,7 +716,7 @@ def api_region_report(region):
 @require_community_manager
 def api_region_report_csv(region):
     """Download region report as CSV."""
-    db   = current_app.config["DATABASE"]
+    db   = _db()
     from reports.community_report import build_report, export_csv
     rows     = db.get_region_aggregate(region)
     report   = build_report(region, "Region", rows)
@@ -732,7 +732,7 @@ def api_region_report_csv(region):
 @require_community_manager
 def api_region_report_pdf(region):
     """Download region report as PDF."""
-    db   = current_app.config["DATABASE"]
+    db   = _db()
     from reports.community_report import build_report, export_pdf
     rows   = db.get_region_aggregate(region)
     report = build_report(region, "Region", rows)

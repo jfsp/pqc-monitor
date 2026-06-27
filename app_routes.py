@@ -100,15 +100,17 @@ def api_summary():
         allowed = set(current_app.config["AUTH_STORE"].get_user_domains(user.id))
         assessments = db.get_latest_assessments()
         visible = [a for a in assessments if a.get("domain") in allowed]
-        scores  = [a.get("score", 0) for a in visible]
+        scored  = [a for a in visible if a.get("level") != "na"]
+        scores  = [a.get("score", 0) for a in scored]
         stats = {
             "total_domains":   len(visible),
             "avg_score":       round(sum(scores)/len(scores), 1) if scores else 0,
-            "critical_count":  sum(1 for a in visible if a.get("level") == "critical"),
-            "weak_count":      sum(1 for a in visible if a.get("level") == "weak"),
-            "moderate_count":  sum(1 for a in visible if a.get("level") == "moderate"),
-            "ready_count":     sum(1 for a in visible if a.get("level") == "ready"),
+            "critical_count":  sum(1 for a in scored if a.get("level") == "critical"),
+            "weak_count":      sum(1 for a in scored if a.get("level") == "weak"),
+            "moderate_count":  sum(1 for a in scored if a.get("level") == "moderate"),
+            "ready_count":     sum(1 for a in scored if a.get("level") == "ready"),
             "pqc_count":       sum(1 for a in visible if a.get("has_pqc")),
+            "na_count":        sum(1 for a in visible if a.get("level") == "na"),
         }
     return jsonify({"stats": stats, "recent_runs": runs})
 

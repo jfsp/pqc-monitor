@@ -401,6 +401,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--font-sans);
 .val-weak     { color: var(--weak); }
 .val-moderate { color: var(--moderate); }
 .val-ready    { color: var(--ready); }
+.val-na       { color: var(--muted); }
 .val-accent   { color: var(--accent); }
 
 /* ─── Panels ─── */
@@ -440,6 +441,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--font-sans);
 .score-weak     { background: rgba(249,115,22,0.15); color: var(--weak); border: 1px solid rgba(249,115,22,0.3); }
 .score-moderate { background: rgba(234,179,8,0.15); color: var(--moderate); border: 1px solid rgba(234,179,8,0.3); }
 .score-ready    { background: rgba(34,197,94,0.15); color: var(--ready); border: 1px solid rgba(34,197,94,0.3); }
+.score-na       { background: rgba(100,116,139,0.12); color: var(--muted); border: 1px solid rgba(100,116,139,0.25); }
 
 .level-dot {
   display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px;
@@ -448,6 +450,7 @@ body { background: var(--bg); color: var(--text); font-family: var(--font-sans);
 .dot-weak     { background: var(--weak); box-shadow: 0 0 6px var(--weak); }
 .dot-moderate { background: var(--moderate); box-shadow: 0 0 6px var(--moderate); }
 .dot-ready    { background: var(--ready); box-shadow: 0 0 6px var(--ready); }
+.dot-na       { background: var(--muted); box-shadow: none; }
 
 /* ─── Forms & Controls ─── */
 .form-row { display: flex; gap: 0.75rem; margin-bottom: 1rem; align-items: flex-start; flex-wrap: wrap; }
@@ -559,8 +562,8 @@ footer {
   </div>
   <div class="header-nav">
     <button class="nav-btn active" onclick="showView('dashboard',this)">Dashboard</button>
-    <button class="nav-btn" onclick="showView('domains',this)">Domain Discovery</button>
-    <button class="nav-btn" onclick="showView('scan',this)">Scan</button>
+    {% if user.is_admin %}<button class="nav-btn" onclick="showView('domains',this)">Domain Discovery</button>{% endif %}
+    {% if user.is_admin %}<button class="nav-btn" onclick="showView('scan',this)">Scan</button>{% endif %}
     <button class="nav-btn" onclick="showView('trends',this)">Trends</button>
     <button class="nav-btn" onclick="showView('ct',this)">CT Monitor</button>
     <button class="nav-btn" onclick="showView('roadmap',this)">Roadmap</button>
@@ -584,6 +587,7 @@ footer {
       <div class="stat-card stat-card-filter" id="filter-card-weak"     onclick="setFilter('weak')"     title="Click to filter by Weak"><div class="stat-val val-weak" id="stat-weak">—</div><div class="stat-label">Weak</div></div>
       <div class="stat-card stat-card-filter" id="filter-card-moderate" onclick="setFilter('moderate')" title="Click to filter by Moderate"><div class="stat-val val-moderate" id="stat-moderate">—</div><div class="stat-label">Moderate</div></div>
       <div class="stat-card stat-card-filter" id="filter-card-ready"    onclick="setFilter('ready')"    title="Click to filter by PQC-Ready"><div class="stat-val val-ready" id="stat-ready">—</div><div class="stat-label">PQC-Ready</div></div>
+      <div class="stat-card stat-card-filter" id="filter-card-na"       onclick="setFilter('na')"       title="Click to filter by N/A (no TLS)"><div class="stat-val val-na" id="stat-na">—</div><div class="stat-label">No TLS</div></div>
       <div class="stat-card stat-card-filter" id="filter-card-pqc"      onclick="setFilter('pqc')"      title="Click to filter PQC Detected"><div class="stat-val" id="stat-pqc" style="color:#a78bfa">—</div><div class="stat-label">PQC Detected</div></div>
       <div class="stat-card"><div class="stat-val" id="stat-ct-pqc" style="color:#22c55e">—</div><div class="stat-label">PQC Certs (CT)</div></div>
       <div class="stat-card"><div class="stat-val" id="stat-p1-actions" style="color:var(--critical)">—</div><div class="stat-label">Urgent Actions</div></div>
@@ -847,6 +851,7 @@ footer {
     </div>
 
     <!-- Run CT monitor -->
+    {% if user.is_admin %}
     <div class="panel" style="margin-bottom:1.5rem">
       <div class="panel-header"><div class="panel-title">Run CT Monitor</div></div>
       <div class="panel-body">
@@ -869,6 +874,7 @@ footer {
         <div id="ct-run-alert" class="alert" style="margin-top:1rem"></div>
       </div>
     </div>
+    {% endif %}
 
     <!-- OID registry info -->
     <div class="panels" style="margin-bottom:1.5rem">
@@ -985,6 +991,7 @@ footer {
     </div>
 
     <!-- Generate / controls -->
+    {% if user.is_admin %}
     <div class="panel" style="margin-bottom:1.5rem">
       <div class="panel-header"><div class="panel-title">Generate Roadmap</div></div>
       <div class="panel-body">
@@ -1004,6 +1011,7 @@ footer {
         <div id="rm-alert" class="alert" style="margin-top:.75rem"></div>
       </div>
     </div>
+    {% endif %}
 
     <!-- Phase timeline chart + effort bar chart -->
     <div class="panels" style="margin-bottom:1.5rem">
@@ -1184,6 +1192,7 @@ async function loadSummary() {
   document.getElementById('stat-moderate').textContent = s.moderate_count ?? '0';
   document.getElementById('stat-ready').textContent    = s.ready_count ?? '0';
   document.getElementById('stat-pqc').textContent      = s.pqc_count ?? '0';
+  document.getElementById('stat-na').textContent       = s.na_count ?? '0';
 
   renderDistChart(s);
   // Also pull CT stats for the dashboard card
@@ -1277,7 +1286,7 @@ function updateFilterUI() {
   if (_activeFilter) {
     const card = document.getElementById('filter-card-' + _activeFilter);
     if (card) card.classList.add('filter-active');
-    if (badge)   { badge.textContent = 'Filtered: ' + ucfirst(_activeFilter); badge.style.display = ''; }
+    if (badge)   { badge.textContent = 'Filtered: ' + (_activeFilter === 'na' ? 'No TLS' : ucfirst(_activeFilter)); badge.style.display = ''; }
     if (clearBtn) clearBtn.style.display = '';
   } else {
     if (badge)   badge.style.display = 'none';
@@ -1307,7 +1316,7 @@ function sortBy(col) {
 }
 
 function applyFilterAndSort() {
-  const LEVEL_ORDER = { critical: 0, weak: 1, moderate: 2, ready: 3 };
+  const LEVEL_ORDER = { critical: 0, weak: 1, moderate: 2, ready: 3, na: 4 };
 
   // Filter
   let items = _allAssessments.slice();
@@ -1346,6 +1355,11 @@ function applyFilterAndSort() {
       av = (a.domain || '').toLowerCase();
       bv = (b.domain || '').toLowerCase();
     } else if (_sortCol === 'score') {
+      // na-level domains (no TLS) sort after all scored domains
+      const aIsNA = (a.level || '') === 'na';
+      const bIsNA = (b.level || '') === 'na';
+      if (aIsNA && !bIsNA) return 1;
+      if (!aIsNA && bIsNA) return -1;
       av = a.score ?? -1;
       bv = b.score ?? -1;
     } else if (_sortCol === 'level') {
@@ -1388,22 +1402,25 @@ function renderAssessments(items) {
     return;
   }
   tbody.innerHTML = items.map(a => {
-    const lc = a.level || 'moderate';
+    const lc = a.level || 'na';
+    const isNA = lc === 'na';
     const tlsArr = tryJSON(a.tls_versions) || [];
     const findings = tryJSON(a.findings_json) || [];
     const critCount = findings.filter(f=>f.severity==='critical').length;
     const highCount = findings.filter(f=>f.severity==='high').length;
     return `<tr>
       <td><a class="domain-link" href="#" onclick="showDomainDetail('${a.domain}');return false">${a.domain}</a></td>
-      <td><span class="score-badge score-${lc}">${a.score??'?'}</span></td>
-      <td><span class="level-dot dot-${lc}"></span>${ucfirst(lc)}</td>
+      <td>${isNA ? '<span class="score-badge score-na">N/A</span>' : `<span class="score-badge score-${lc}">${a.score??'?'}</span>`}</td>
+      <td><span class="level-dot dot-${lc}"></span>${isNA ? '<span style="color:var(--muted)">No TLS</span>' : ucfirst(lc)}</td>
       <td>${tlsArr.map(t=>`<span class="tls-pill">${t}</span>`).join(' ')}</td>
       <td style="font-family:var(--font-mono);font-size:0.75rem">${a.key_type||'—'}</td>
       <td>${a.has_pqc ? '<span class="pqc-pill">✓ PQC</span>' : '<span style="color:var(--muted);font-size:0.75rem">—</span>'}</td>
       <td style="font-size:0.75rem">
-        ${critCount ? `<span style="color:var(--critical)">${critCount} crit</span> ` : ''}
-        ${highCount ? `<span style="color:var(--weak)">${highCount} high</span>` : ''}
-        ${!critCount && !highCount ? '<span style="color:var(--ready)">✓</span>' : ''}
+        ${isNA ? '<span style="color:var(--muted);font-size:0.75rem">—</span>' : (
+          critCount ? `<span style="color:var(--critical)">${critCount} crit</span> ` : '') +
+          (highCount ? `<span style="color:var(--weak)">${highCount} high</span>` : '') +
+          (!critCount && !highCount ? '<span style="color:var(--ready)">✓</span>' : ''
+        )}
       </td>
     </tr>`;
   }).join('');
@@ -1457,8 +1474,8 @@ async function showDomainDetail(domain) {
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-bottom:1.5rem">
       <div>
         <div style="color:var(--muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">Score</div>
-        <div style="font-family:var(--font-mono);font-size:2.5rem;color:${levelColor(a.level)}">${a.score??'—'}</div>
-        <div style="color:${levelColor(a.level)};font-size:.85rem;margin-top:.25rem">${ucfirst(a.level||'')}</div>
+        <div style="font-family:var(--font-mono);font-size:2.5rem;color:${levelColor(a.level)}">${a.level === 'na' ? 'N/A' : (a.score??'—')}</div>
+        <div style="color:${levelColor(a.level)};font-size:.85rem;margin-top:.25rem">${a.level === 'na' ? 'No TLS Service' : ucfirst(a.level||'')}</div>
       </div>
       <div>
         <div style="color:var(--muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">Details</div>
@@ -1737,6 +1754,7 @@ function levelColor(l) {
   if (l==='critical') return 'var(--critical)';
   if (l==='weak') return 'var(--weak)';
   if (l==='moderate') return 'var(--moderate)';
+  if (l==='na') return 'var(--muted)';
   return 'var(--ready)';
 }
 
@@ -1949,7 +1967,7 @@ function renderRoadmapTable(domains) {
     return;
   }
   tbody.innerHTML = domains.map(d => {
-    const lc = scoreClass(d.current_score || 0);
+    const lc = (d.current_level === 'na') ? 'na' : scoreClass(d.current_score || 0);
     const s1c = scoreClass(d.score_after_phase1 || d.score_p1 || 0);
     const s2c = scoreClass(d.score_after_phase2 || d.score_p2 || 0);
     const emin = d.effort_days_min || d.effort_min || 0;

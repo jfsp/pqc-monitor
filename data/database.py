@@ -394,15 +394,18 @@ class Database:
         if not rows:
             return {}
 
-        scores = [r.get("score", 0) for r in rows]
+        # na-level rows (no TLS service) are excluded from scoring and level counts
+        scored_rows = [r for r in rows if r.get("level") != "na"]
+        scores = [r.get("score", 0) for r in scored_rows]
         return {
             "total_domains": len(rows),
             "avg_score": round(sum(scores) / len(scores), 1) if scores else 0,
-            "critical_count": sum(1 for r in rows if r.get("level") == "critical"),
-            "weak_count": sum(1 for r in rows if r.get("level") == "weak"),
-            "moderate_count": sum(1 for r in rows if r.get("level") == "moderate"),
-            "ready_count": sum(1 for r in rows if r.get("level") == "ready"),
+            "critical_count": sum(1 for r in scored_rows if r.get("level") == "critical"),
+            "weak_count": sum(1 for r in scored_rows if r.get("level") == "weak"),
+            "moderate_count": sum(1 for r in scored_rows if r.get("level") == "moderate"),
+            "ready_count": sum(1 for r in scored_rows if r.get("level") == "ready"),
             "pqc_count": sum(1 for r in rows if r.get("has_pqc")),
+            "na_count": sum(1 for r in rows if r.get("level") == "na"),
         }
 
     def _parse_assessment_row(self, row) -> dict:

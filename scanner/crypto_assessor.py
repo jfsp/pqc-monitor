@@ -24,6 +24,7 @@ LEVEL_CRITICAL = "critical"   # 0-25
 LEVEL_WEAK     = "weak"       # 26-50
 LEVEL_MODERATE = "moderate"   # 51-75
 LEVEL_READY    = "ready"      # 76-100
+LEVEL_NA       = "na"         # no TLS service — not applicable
 
 
 def score_to_level(score: int) -> str:
@@ -128,7 +129,7 @@ class CryptoAssessor:
         if not scan_results:
             assessment.errors.append("No scan data available")
             assessment.score = 0
-            assessment.level = LEVEL_CRITICAL
+            assessment.level = LEVEL_NA
             return assessment
 
         findings = []

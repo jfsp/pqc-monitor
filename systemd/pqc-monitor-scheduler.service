@@ -5,8 +5,6 @@
 #
 # Installation:
 #   sudo cp systemd/pqc-monitor-scheduler.service /etc/systemd/system/
-#   sudo cp scripts/wait-for-db.sh /opt/pqc-monitor/scripts/
-#   sudo chmod +x /opt/pqc-monitor/scripts/wait-for-db.sh
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now pqc-monitor-scheduler
 #
@@ -38,12 +36,14 @@ WorkingDirectory=/opt/pqc-monitor
 # ── Environment ──────────────────────────────────────────────────────────────
 EnvironmentFile=/etc/pqc-monitor/pqc-monitor.env
 Environment=PYTHONUNBUFFERED=1
+Environment=PQC_DB_PATH=/var/lib/pqc-monitor/pqc_monitor.db
 
 # ── Startup ───────────────────────────────────────────────────────────────────
-# Wait up to 60 s for the web service to create the database file before
-# launching the scheduler. Path and timeout are positional args to the script
-# so systemd never needs to expand shell variables in this directive.
-ExecStartPre=/opt/pqc-monitor/scripts/wait-for-db.sh /var/lib/pqc-monitor/pqc_monitor.db 60
+# Wait for the web service to create the database before starting.
+# PQC_DB_PATH must match database.path in config.yaml.
+# Timeout and poll interval are positional args; no shell variable expansion
+# occurs in this directive so $waited/$limit do not trigger systemd warnings.
+ExecStartPre=/opt/pqc-monitor/scripts/wait-for-db.sh $PQC_DB_PATH 60
 
 ExecStart=/opt/pqc-monitor/.venv/bin/python3 \
     /opt/pqc-monitor/pqc_monitor.py scheduler-daemon

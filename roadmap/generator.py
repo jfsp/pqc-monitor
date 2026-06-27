@@ -659,6 +659,22 @@ def generate_domain_roadmap(assessment: dict) -> DomainRoadmap:
     has_pqc = bool(assessment.get("has_pqc"))
     cdn_name = assessment.get("cdn_name", "")
 
+    # Domains with no TLS service have nothing to remediate — skip them.
+    if level == "na":
+        logger.debug(f"Skipping roadmap for {domain}: no TLS service (level=na)")
+        return DomainRoadmap(
+            domain=domain,
+            current_score=0,
+            current_level="na",
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            items=[],
+            phase1_items=0, phase2_items=0, phase3_items=0,
+            total_effort_days_min=0, total_effort_days_max=0,
+            estimated_completion="",
+            has_pqc=False,
+            score_after_phase1=0, score_after_phase2=0, score_after_phase3=0,
+        )
+
     findings = assessment.get("findings_json") or assessment.get("findings") or []
     if isinstance(findings, str):
         try:
@@ -742,7 +758,19 @@ def generate_sector_roadmap(assessments: list, sector: str = "",
             avg_current_score=0.0,
         )
 
-    domain_roadmaps = [generate_domain_roadmap(a) for a in assessments]
+    # Exclude no-TLS domains — they have nothing to remediate.
+    scored = [a for a in assessments if a.get("level") != "na"]
+    na_count = len(assessments) - len(scored)
+    if na_count:
+        logger.debug(f"Sector roadmap: skipping {na_count} domain(s) with no TLS service")
+    if not scored:
+        return SectorRoadmap(
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            sector=sector, region=region, domain_count=0,
+            avg_current_score=0.0,
+        )
+
+    domain_roadmaps = [generate_domain_roadmap(a) for a in scored]
     scores = [r.current_score for r in domain_roadmaps]
 
     # Aggregate counts and effort
@@ -790,7 +818,7 @@ def generate_sector_roadmap(assessments: list, sector: str = "",
         generated_at=datetime.now(timezone.utc).isoformat(),
         sector=sector,
         region=region,
-        domain_count=len(assessments),
+        domain_count=len(scored),
         avg_current_score=round(sum(scores) / len(scores), 1),
         domains=domain_summaries,
         phase1_domain_count=p1_domains,
@@ -806,7 +834,7 @@ def generate_sector_roadmap(assessments: list, sector: str = "",
     )
 
     logger.info(
-        f"Sector roadmap: {len(assessments)} domains | "
+        f"Sector roadmap: {len(scored)} domains ({na_count} skipped, no TLS) | "
         f"avg_score={sector_roadmap.avg_current_score} | "
         f"effort {total_min}–{total_max}d"
     )

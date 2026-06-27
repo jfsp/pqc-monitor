@@ -464,13 +464,31 @@ def _dnsdumpster_api(
             logger.warning(f"DNSDumpster request failed for {domain} (page {page}): {exc}")
             break
 
+        # ── Parse JSON body first — needed for quota detection on any status ──
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+
+        # ── Quota exhaustion detection (may arrive as 429 OR 200 with error) ──
+        if isinstance(data, dict) and data.get("error"):
+            err_msg = str(data["error"])
+            if "quota" in err_msg.lower() or "daily" in err_msg.lower():
+                _DNSDUMPSTER_QUOTA_EXHAUSTED = True
+                logger.warning(
+                    "DNSDumpster daily quota exceeded — "
+                    "disabling for this session, activating passive DNS fallback"
+                )
+                raise DnsDumpsterQuotaError(err_msg)
+
         if resp.status_code == 429:
+            # Rate limit (not quota) — back off and retry the same page
             logger.warning(
                 f"DNSDumpster rate limit hit for {domain} — "
                 "respecting 2-second limit between requests"
             )
             time.sleep(2)
-            continue  # retry same page
+            continue
 
         if resp.status_code == 401:
             logger.warning("DNSDumpster API key rejected (401) — check X-API-Key value")
@@ -485,25 +503,6 @@ def _dnsdumpster_api(
                 f"DNSDumpster API error for {domain} (page {page}): "
                 f"HTTP {resp.status_code}"
             )
-            break
-
-        try:
-            data = resp.json()
-        except Exception as exc:
-            logger.warning(f"DNSDumpster returned non-JSON for {domain}: {exc}")
-            break
-
-        # ── Quota exhaustion detection ─────────────────────────────
-        if isinstance(data, dict) and data.get("error"):
-            err_msg = data["error"]
-            if "quota" in err_msg.lower() or "daily" in err_msg.lower():
-                _DNSDUMPSTER_QUOTA_EXHAUSTED = True
-                logger.warning(
-                    f"DNSDumpster daily quota exceeded — "
-                    f"disabling for this session, activating passive DNS fallback"
-                )
-                raise DnsDumpsterQuotaError(err_msg)
-            logger.warning(f"DNSDumpster API error for {domain}: {err_msg}")
             break
 
         # Harvest FQDNs from all record sections that carry a 'host' field

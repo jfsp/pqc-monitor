@@ -323,11 +323,23 @@ class Database:
                 """).fetchall()
         return [self._parse_assessment_row(r) for r in rows]
 
-    def get_assessments_by_service_type(
-        self, run_id: str = None, service_type: str = None
-    ) -> list:
+    def get_assessed_domains(self, domains: list) -> set:
         """
-        Return assessments filtered by service_type.
+        Return the subset of *domains* that already have at least one
+        assessment record in the database.  Used by the CLI --skip-scanned
+        flag to skip re-scanning domains with existing results.
+        """
+        if not domains:
+            return set()
+        placeholders = ",".join("?" * len(domains))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT DISTINCT domain FROM assessments WHERE domain IN ({placeholders})",
+                domains
+            ).fetchall()
+        return {r["domain"] for r in rows}
+
+    def get_assessments_by_service_type(
         Both run_id and service_type are optional filters.
         service_type=None returns all; service_type='web_primary' returns only those rows.
         """

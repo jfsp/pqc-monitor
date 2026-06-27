@@ -159,13 +159,22 @@ def discover(ctx, query, max_domains, no_validate, output):
 @click.option("--dns-enumerate", "dns_enumerate", is_flag=True,
               help="Run DNS deep-dive enumeration before scanning (CT SANs, "
                    "wordlist, DNSDumpster if key configured)")
+@click.option("--skip-scanned", "skip_scanned", is_flag=True,
+              help="Skip domains that already have an assessment in the database. "
+                   "Use --force to override.")
+@click.option("--force", is_flag=True,
+              help="Force re-scan of all domains even if already assessed "
+                   "(overrides --skip-scanned).")
 @click.pass_context
-def scan(ctx, domains, domain, sector, region, country_code, country, shodan, dns_enumerate):
+def scan(ctx, domains, domain, sector, region, country_code, country,
+         shodan, dns_enumerate, skip_scanned, force):
     """Scan domains for cryptographic posture and PQC readiness.
 
     Examples:
       pqc_monitor.py scan --domains domains.txt
       pqc_monitor.py scan --domain example.com --domain bank.es
+      pqc_monitor.py scan --domains list.txt --skip-scanned
+      pqc_monitor.py scan --domains list.txt --skip-scanned --force
     """
     print(DISCLAIMER)
     cfg = ctx.obj["config"]
@@ -182,12 +191,33 @@ def scan(ctx, domains, domain, sector, region, country_code, country, shodan, dn
         click.echo("❌ No domains specified. Use --domains FILE or --domain DOMAIN", err=True)
         sys.exit(1)
 
+    # ── Skip already-scanned domains ──────────────────────────────────────────
+    if skip_scanned and not force:
+        _check_db = Database(cfg.get("db_path", "data/pqc_monitor.db"))
+        already_assessed = _check_db.get_assessed_domains(domain_list)
+        if already_assessed:
+            skipped = sorted(already_assessed)
+            click.echo(
+                f"⏭️  Skipping {len(skipped)} already-assessed domain(s) "
+                f"(use --force to re-scan):"
+            )
+            for d in skipped:
+                click.echo(f"     {d}")
+            domain_list = [d for d in domain_list if d not in already_assessed]
+            if not domain_list:
+                click.echo("✅ All domains already assessed. Nothing to scan.")
+                return
+    elif force and skip_scanned:
+        click.echo("⚠️  --force overrides --skip-scanned: scanning all domains.")
+
     click.echo(f"🔬 Scanning {len(domain_list)} domains...")
     orchestrator = ScanOrchestrator(cfg)
 
     # ── Optional DNS deep-dive before scanning ─────────────────────────────
     if dns_enumerate:
-        from scanner.dns_enumerator import enumerate_domain
+        from scanner.dns_enumerator import (
+            enumerate_domain, is_dnsdumpster_quota_exhausted, DnsDumpsterQuotaError
+        )
         from data.database import Database as _DB
         dd_key  = cfg.get("dnsdumpster_api_key", "")
         use_wl  = cfg.get("dns_use_wordlist", True)
@@ -197,6 +227,7 @@ def scan(ctx, domains, domain, sector, region, country_code, country, shodan, dn
                    f"wordlist={'on' if use_wl else 'off'}, "
                    f"dnsdumpster={'on' if use_dd else 'off — no key'})...")
         discovered: set = set(domain_list)
+        dd_quota_warned = False
         for dom in list(domain_list):
             try:
                 result = enumerate_domain(
@@ -206,6 +237,14 @@ def scan(ctx, domains, domain, sector, region, country_code, country, shodan, dn
                     use_dnsdumpster=use_dd,
                     dnsdumpster_api_key=dd_key,
                 )
+                # Surface quota exhaustion the first time it occurs
+                if use_dd and is_dnsdumpster_quota_exhausted() and not dd_quota_warned:
+                    click.echo(
+                        "  ⚠️  DNSDumpster daily quota exceeded — "
+                        "passive DNS fallback active for remaining domains",
+                        err=True
+                    )
+                    dd_quota_warned = True
                 new_hosts = [
                     c["host"] for c in result.tls_candidates
                     if c["host"] not in discovered

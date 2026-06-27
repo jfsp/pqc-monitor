@@ -720,10 +720,13 @@ class Database:
         orgs = self.get_community_orgs(community_id)
         return self._build_group_aggregate(orgs)
 
-    def get_country_aggregate(self, country_code: str) -> list:
+    def get_country_aggregate(self, country_code: str,
+                               allowed_org_ids: set = None) -> list:
         """
         Return per-org PQC readiness summary for all orgs with the given
         ISO 3166-1 alpha-2 country_code (case-insensitive).
+        If allowed_org_ids is provided, only those orgs are included
+        (used to scope results for community managers).
         """
         with self._connect() as conn:
             rows = conn.execute("""
@@ -736,6 +739,8 @@ class Database:
                 ORDER BY o.name
             """, (country_code,)).fetchall()
         orgs = [dict(r) for r in rows]
+        if allowed_org_ids is not None:
+            orgs = [o for o in orgs if o["id"] in allowed_org_ids]
         return self._build_group_aggregate(orgs)
 
     def get_countries(self) -> list[dict]:
@@ -749,9 +754,12 @@ class Database:
             """).fetchall()
         return [dict(r) for r in rows]
 
-    def get_region_aggregate(self, region: str) -> list:
+    def get_region_aggregate(self, region: str,
+                              allowed_org_ids: set = None) -> list:
         """
         Return per-org PQC readiness summary for all orgs in a region.
+        If allowed_org_ids is provided, only those orgs are included
+        (used to scope results for community managers).
         """
         with self._connect() as conn:
             rows = conn.execute("""
@@ -764,6 +772,8 @@ class Database:
                 ORDER BY o.name
             """, (region,)).fetchall()
         orgs = [dict(r) for r in rows]
+        if allowed_org_ids is not None:
+            orgs = [o for o in orgs if o["id"] in allowed_org_ids]
         return self._build_group_aggregate(orgs)
 
     def _build_group_aggregate(self, orgs: list[dict]) -> dict:

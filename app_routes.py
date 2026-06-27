@@ -46,6 +46,20 @@ def _dns_config() -> dict:
     """Return dns_enumeration config block from app config (or defaults)."""
     return current_app.config.get("DNS_ENUM_CONFIG", {})
 
+def _allowed_org_ids(user, db) -> set | None:
+    """
+    Return the set of org IDs visible to `user`, or None for admins
+    (meaning no restriction). Community managers see only the orgs that
+    belong to their assigned communities (plus any directly assigned orgs).
+    """
+    if user.is_admin:
+        return None
+    allowed = set(user.org_ids)
+    for cid in user.community_ids:
+        for o in db.get_community_orgs(cid):
+            allowed.add(o["id"])
+    return allowed
+
 # ── Root redirect ─────────────────────────────────────────────────────────────
 
 @app_bp.route("/")
@@ -690,13 +704,9 @@ def api_regions():
     db   = _db()
     user = current_user()
     orgs = db.get_organisations()
-    if not user.is_admin:
-        # Scope to orgs the user can see
-        allowed_org_ids = set(user.org_ids)
-        for cid in user.community_ids:
-            for o in db.get_community_orgs(cid):
-                allowed_org_ids.add(o["id"])
-        orgs = [o for o in orgs if o["id"] in allowed_org_ids]
+    allowed = _allowed_org_ids(user, db)
+    if allowed is not None:
+        orgs = [o for o in orgs if o["id"] in allowed]
     regions = sorted({o["region"] for o in orgs if o.get("region")})
     return jsonify(regions)
 
@@ -706,8 +716,9 @@ def api_regions():
 def api_region_report(region):
     """Return aggregate PQC-readiness report for a region as JSON."""
     db   = _db()
+    user = current_user()
     from reports.community_report import build_report
-    rows   = db.get_region_aggregate(region)
+    rows   = db.get_region_aggregate(region, allowed_org_ids=_allowed_org_ids(user, db))
     report = build_report(region, "Region", rows)
     return jsonify(report)
 
@@ -717,8 +728,9 @@ def api_region_report(region):
 def api_region_report_csv(region):
     """Download region report as CSV."""
     db   = _db()
+    user = current_user()
     from reports.community_report import build_report, export_csv
-    rows     = db.get_region_aggregate(region)
+    rows     = db.get_region_aggregate(region, allowed_org_ids=_allowed_org_ids(user, db))
     report   = build_report(region, "Region", rows)
     csv_data = export_csv(report)
     fname    = f"region_{region.replace(' ','_')}.csv"
@@ -736,15 +748,11 @@ def api_countries():
     db   = _db()
     user = current_user()
     countries = db.get_countries()
-    if not user.is_admin:
-        # Scope to countries present in the user's visible orgs
+    allowed = _allowed_org_ids(user, db)
+    if allowed is not None:
         orgs = db.get_organisations()
-        allowed_org_ids = set(user.org_ids)
-        for cid in user.community_ids:
-            for o in db.get_community_orgs(cid):
-                allowed_org_ids.add(o["id"])
-        visible_orgs = [o for o in orgs if o["id"] in allowed_org_ids]
-        visible_ccs  = {o["country_code"] for o in visible_orgs if o.get("country_code")}
+        visible_ccs = {o["country_code"] for o in orgs
+                       if o["id"] in allowed and o.get("country_code")}
         countries = [c for c in countries if c["country_code"] in visible_ccs]
     return jsonify(countries)
 
@@ -754,12 +762,13 @@ def api_countries():
 def api_country_report(country_code):
     """Return aggregate PQC-readiness report for a country as JSON."""
     db   = _db()
+    user = current_user()
     countries = db.get_countries()
     match = next((c for c in countries
                   if c["country_code"].upper() == country_code.upper()), None)
     label = match["country"] if match else country_code.upper()
     from reports.community_report import build_report
-    rows   = db.get_country_aggregate(country_code)
+    rows   = db.get_country_aggregate(country_code, allowed_org_ids=_allowed_org_ids(user, db))
     report = build_report(label, "Country", rows)
     return jsonify(report)
 
@@ -769,12 +778,13 @@ def api_country_report(country_code):
 def api_country_report_csv(country_code):
     """Download country report as CSV."""
     db   = _db()
+    user = current_user()
     countries = db.get_countries()
     match = next((c for c in countries
                   if c["country_code"].upper() == country_code.upper()), None)
     label = match["country"] if match else country_code.upper()
     from reports.community_report import build_report, export_csv
-    rows     = db.get_country_aggregate(country_code)
+    rows     = db.get_country_aggregate(country_code, allowed_org_ids=_allowed_org_ids(user, db))
     report   = build_report(label, "Country", rows)
     csv_data = export_csv(report)
     fname    = f"country_{country_code.upper()}.csv"
@@ -789,12 +799,13 @@ def api_country_report_csv(country_code):
 def api_country_report_pdf(country_code):
     """Download country report as PDF."""
     db   = _db()
+    user = current_user()
     countries = db.get_countries()
     match = next((c for c in countries
                   if c["country_code"].upper() == country_code.upper()), None)
     label = match["country"] if match else country_code.upper()
     from reports.community_report import build_report, export_pdf
-    rows   = db.get_country_aggregate(country_code)
+    rows   = db.get_country_aggregate(country_code, allowed_org_ids=_allowed_org_ids(user, db))
     report = build_report(label, "Country", rows)
     try:
         pdf_bytes = export_pdf(report)
@@ -811,8 +822,9 @@ def api_country_report_pdf(country_code):
 def api_region_report_pdf(region):
     """Download region report as PDF."""
     db   = _db()
+    user = current_user()
     from reports.community_report import build_report, export_pdf
-    rows   = db.get_region_aggregate(region)
+    rows   = db.get_region_aggregate(region, allowed_org_ids=_allowed_org_ids(user, db))
     report = build_report(region, "Region", rows)
     try:
         pdf_bytes = export_pdf(report)

@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # shodan-test.sh — verify the Shodan API key configured in PQC-Monitor
 #
-# Usage:
-#   bash scripts/shodan-test.sh [ip|domain]
+# Runs two host lookups to confirm both key validity and plan capability:
+#   1. 8.8.8.8      — in Shodan's free shared dataset; succeeds on any plan
+#   2. google.com   — resolves to a CDN IP outside the free dataset;
+#                     succeeds only on paid plans with full index access
 #
-# The target is optional; defaults to 8.8.8.8 (Google DNS) which is
-# freely accessible on the oss plan.  Passing a domain resolves it to
-# an IP first, but note that CDN/anycast IPs (e.g. google.com) may
-# return 403 on the oss plan even with a valid key — use a stable,
-# well-known IP for a reliable connectivity test.
+# Usage:
+#   bash scripts/shodan-test.sh
 #
 # The script reads the API key from the same sources pqc_monitor.py uses:
 #   1. SHODAN_API_KEY environment variable
@@ -16,15 +15,14 @@
 #   3. shodan.api_key in config/config.yaml (dev fallback)
 #
 # Exit codes:
-#   0 — key is valid and the host lookup succeeded
-#   1 — key is missing, invalid, quota/plan error, or lookup failed
+#   0 — key is valid (free-tier test passed; paid-tier result informational)
+#   1 — key is missing, invalid, or the free-tier test itself failed
 #   2 — shodan Python library not installed
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 set -euo pipefail
 
-TARGET="${1:-8.8.8.8}"
 CONFIG_PROD="/etc/pqc-monitor/config.yaml"
 CONFIG_DEV="$(dirname "$0")/../config/config.yaml"
 
@@ -53,13 +51,12 @@ fi
 
 # ── Run the test via inline Python ────────────────────────────────────────────
 
-python3 - "$API_KEY" "$TARGET" <<'PYEOF'
+python3 - "$API_KEY" <<'PYEOF'
 import sys
 import json
 import socket
 
 api_key = sys.argv[1]
-target  = sys.argv[2]
 
 try:
     import shodan as shodan_lib
@@ -83,94 +80,109 @@ plan    = info.get("plan", "unknown")
 credits = info.get("query_credits", 0)
 scan_cr = info.get("scan_credits", 0)
 
-# ── 2. Resolve target to IP if a hostname was given ───────────────────────────
-# The oss plan only allows lookups against IPs in Shodan's shared dataset.
-# CDN/anycast IPs from gethostbyname() (e.g. google.com → 173.x.x.x) are
-# often outside that set and return 403.  Use a stable IP like 8.8.8.8 to
-# confirm the key and plan are working correctly.
-ip = target
-if not target[0].isdigit():
+# ── 2. Helper: single host lookup ─────────────────────────────────────────────
+def lookup(target: str) -> dict:
+    """
+    Resolve *target* to an IP if needed, then call api.host().
+    Returns a result dict — never raises.
+    """
+    ip = target
+    if not target[0].isdigit():
+        try:
+            ip = socket.gethostbyname(target)
+        except socket.gaierror as e:
+            return {"target": target, "ip": None, "status": "dns_error", "detail": str(e)}
+
     try:
-        ip = socket.gethostbyname(target)
-    except socket.gaierror as e:
-        print(json.dumps({
-            "account": {"plan": plan, "query_credits": credits, "scan_credits": scan_cr},
-            "error": f"Could not resolve {target}: {e}"
-        }))
-        sys.exit(1)
+        host = api.host(ip)
+    except shodan_lib.APIError as e:
+        err = str(e)
+        if "403" in err or "access denied" in err.lower():
+            return {"target": target, "ip": ip, "status": "plan_restricted",
+                    "detail": err}
+        if "no information available" in err.lower():
+            return {"target": target, "ip": ip, "status": "no_data",
+                    "detail": err}
+        return {"target": target, "ip": ip, "status": "error", "detail": err}
+    except Exception as e:
+        return {"target": target, "ip": ip, "status": "error", "detail": str(e)}
 
-# ── 3. Host lookup ────────────────────────────────────────────────────────────
-try:
-    host = api.host(ip)
-except shodan_lib.APIError as e:
-    err = str(e)
-    no_data = "no information available" in err.lower()
-    plan_restricted = "403" in err or "access denied" in err.lower()
-    print(json.dumps({
-        "account": {"plan": plan, "query_credits": credits, "scan_credits": scan_cr},
-        "host_lookup": {
-            "target": target,
-            "ip": ip,
-            "status": "no_data" if no_data else "plan_restricted" if plan_restricted else "error",
-            "detail": err,
-            "hint": (
-                "oss plan cannot query this IP — try bash scripts/shodan-test.sh 8.8.8.8"
-                if plan_restricted else None
-            ),
-        }
-    }, indent=2))
-    sys.exit(0 if no_data else 1)
-except Exception as e:
-    print(json.dumps({
-        "account": {"plan": plan, "query_credits": credits, "scan_credits": scan_cr},
-        "error": f"Host lookup failed: {e}"
-    }))
-    sys.exit(1)
+    tls_services = []
+    for svc in host.get("data", []):
+        ssl = svc.get("ssl", {})
+        if not ssl:
+            continue
+        cert   = ssl.get("cert", {})
+        pubkey = cert.get("pubkey", {})
+        tls_services.append({
+            "port":     svc.get("port", 0),
+            "tls":      [v for v in ssl.get("versions", []) if not v.startswith("-")],
+            "cipher":   ssl.get("cipher", {}).get("name", ""),
+            "key_type": pubkey.get("type", "").upper(),
+            "key_bits": pubkey.get("bits", 0),
+            "subject":  cert.get("subject", {}).get("CN", ""),
+            "issuer":   cert.get("issuer", {}).get("CN", ""),
+            "expires":  cert.get("expires", ""),
+            "sig_alg":  cert.get("sig_alg", ""),
+        })
 
-# ── 4. Extract TLS services ───────────────────────────────────────────────────
-tls_services = []
-for svc in host.get("data", []):
-    ssl = svc.get("ssl", {})
-    if not ssl:
-        continue
-    port   = svc.get("port", 0)
-    cert   = ssl.get("cert", {})
-    pubkey = cert.get("pubkey", {})
-    tls_services.append({
-        "port":     port,
-        "tls":      [v for v in ssl.get("versions", []) if not v.startswith("-")],
-        "cipher":   ssl.get("cipher", {}).get("name", ""),
-        "key_type": pubkey.get("type", "").upper(),
-        "key_bits": pubkey.get("bits", 0),
-        "subject":  cert.get("subject", {}).get("CN", ""),
-        "issuer":   cert.get("issuer", {}).get("CN", ""),
-        "expires":  cert.get("expires", ""),
-        "sig_alg":  cert.get("sig_alg", ""),
-    })
+    return {
+        "target":       target,
+        "ip":           ip,
+        "status":       "ok",
+        "org":          host.get("org", ""),
+        "country":      host.get("country_name", ""),
+        "asn":          host.get("data", [{}])[0].get("asn", "") if host.get("data") else "",
+        "ports":        host.get("ports", []),
+        "tls_ports":    len(tls_services),
+        "tls_services": tls_services,
+    }
 
-# ── 5. Output ─────────────────────────────────────────────────────────────────
+# ── 3. Test 1 — free-tier IP (8.8.8.8) ───────────────────────────────────────
+# Should succeed on any valid key regardless of plan.
+# Failure here means the key is broken or the account is suspended.
+free_result = lookup("8.8.8.8")
+
+# ── 4. Test 2 — restricted IP (google.com CDN) ────────────────────────────────
+# Resolves to a CDN/anycast IP outside the oss shared dataset.
+# Success → paid plan with full index access.
+# 403    → oss / restricted plan (key is valid but dataset is limited).
+paid_result = lookup("google.com")
+
+if paid_result["status"] == "plan_restricted":
+    paid_result["note"] = (
+        "Expected on oss/free plan — key is valid but full index requires a paid plan"
+    )
+elif paid_result["status"] == "ok":
+    paid_result["note"] = "Full index access confirmed — paid plan"
+
+# ── 5. Derive overall plan capability ─────────────────────────────────────────
+if free_result["status"] == "ok" and paid_result["status"] == "ok":
+    capability = "full"
+elif free_result["status"] == "ok":
+    capability = "restricted (oss/free — shared dataset only)"
+else:
+    capability = "unknown — free-tier test failed"
+
+# ── 6. Output ─────────────────────────────────────────────────────────────────
 result = {
     "account": {
-        "plan": plan,
+        "plan":          plan,
         "query_credits": credits,
-        "scan_credits": scan_cr,
+        "scan_credits":  scan_cr,
+        "capability":    capability,
         "note": (
             "oss plan uses rate limits, not a credit bucket — credits=0 is normal"
             if plan == "oss" else
             ("WARNING: query credits low or exhausted" if credits < 10 else "ok")
         ),
     },
-    "host_lookup": {
-        "target":      target,
-        "ip":          ip,
-        "org":         host.get("org", ""),
-        "country":     host.get("country_name", ""),
-        "asn":         host.get("data", [{}])[0].get("asn", "") if host.get("data") else "",
-        "total_ports": len(host.get("data", [])),
-        "ports":       host.get("ports", []),
-        "tls_ports":   len(tls_services),
-        "tls_services": tls_services,
-    }
+    "test_free_tier":  free_result,
+    "test_paid_tier":  paid_result,
 }
 print(json.dumps(result, indent=2))
+
+# Exit 1 only if the free-tier test (key validity check) failed
+if free_result["status"] not in ("ok", "no_data"):
+    sys.exit(1)
 PYEOF

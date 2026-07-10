@@ -63,7 +63,10 @@ def create_app(config: dict = None) -> Flask:
     def api_domain_detail(domain):
         history = db.get_domain_history(domain)
         latest_scans = db.get_domain_scans(domain)
-        return jsonify({"domain": domain, "history": history, "scans": latest_scans[:5]})
+        extra = db.get_latest_domain_extra(
+            domain, data_types=["cipher_enum", "chain", "cdn", "ssllabs"])
+        return jsonify({"domain": domain, "history": history,
+                        "scans": latest_scans[:5], "extra": extra})
 
     @app.route("/api/trends")
     def api_trends():
@@ -664,6 +667,17 @@ footer {
         </div>
         <div class="panel-body" id="detail-body"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- ═══ DOMAIN FULL TLS DETAIL VIEW (drill-down, no nav tab) ═══ -->
+  <div id="view-domain-full" class="view">
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title" id="df-title">TLS Details</div>
+        <button class="btn-outline" onclick="closeDomainFull()">← Back</button>
+      </div>
+      <div class="panel-body" id="df-body"></div>
     </div>
   </div>
 
@@ -1560,11 +1574,44 @@ function renderTLSChart(items) {
   });
 }
 
+// Cipher security-level → colour
+function cipherLevelColor(lvl) {
+  return { recommended:'var(--ready)', acceptable:'var(--accent)',
+           deprecated:'#f59e0b', disallowed:'var(--critical)' }[lvl] || 'var(--muted)';
+}
+// SSL Labs grade → colour
+function sslLabsGradeColor(g) {
+  if (!g) return 'var(--muted)';
+  if (g.startsWith('A')) return 'var(--ready)';
+  if (g === 'B') return '#f59e0b';
+  if (g === 'C') return '#fb923c';
+  return 'var(--critical)';
+}
+function sslLabsBadge(sl, domain) {
+  const url = (sl && sl.report_url) || `https://www.ssllabs.com/ssltest/analyze.html?d=${encodeURIComponent(domain)}`;
+  if (!sl || !sl.grade) {
+    return `<div style="font-size:.8rem;margin-top:.25rem">SSL Labs: <span style="color:var(--muted)">no report</span>
+      <a href="${url}" target="_blank" rel="noopener" style="color:var(--accent);font-size:.72rem;margin-left:.4rem">open ssllabs.com ↗</a></div>`;
+  }
+  return `<div style="font-size:.8rem;margin-top:.25rem">SSL Labs:
+    <span style="background:rgba(255,255,255,.06);border:1px solid ${sslLabsGradeColor(sl.grade)};color:${sslLabsGradeColor(sl.grade)};padding:.05rem .45rem;border-radius:4px;font-family:var(--font-mono);font-weight:700">${sl.grade}</span>
+    <a href="${url}" target="_blank" rel="noopener" style="color:var(--accent);font-size:.72rem;margin-left:.4rem">full report ↗</a>
+    ${sl.test_time?`<span style="color:var(--muted);font-size:.7rem;margin-left:.4rem">(${sl.test_time.slice(0,10)})</span>`:''}</div>`;
+}
+
+let _detailDomain     = null;   // domain currently shown in modal / full view
+let _detailData       = null;   // cached /api/domain response
+let _detailAssessment = null;   // cached latest assessment row
+
 async function showDomainDetail(domain) {
   const r = await fetch(`/api/domain/${encodeURIComponent(domain)}`);
   const d = await r.json();
+  _detailDomain = domain;
+  _detailData   = d;
   const history = d.history || [];
   const latest = history[history.length - 1] || {};
+  const enumData = (d.extra||{}).cipher_enum || null;
+  const ssllabs  = (d.extra||{}).ssllabs || null;
 
   document.getElementById('detail-title').textContent = `Domain: ${domain}`;
   const body = document.getElementById('detail-body');
@@ -1572,7 +1619,21 @@ async function showDomainDetail(domain) {
   // Get latest findings
   const assessments = await (await fetch(`/api/assessments`)).json();
   const a = assessments.find(x => x.domain === domain) || {};
+  _detailAssessment = a;
   const findings = tryJSON(a.findings_json) || [];
+
+  const allCiphers = tryJSON(a.cipher_suites) || [];
+  const enumCount  = enumData ? (enumData.supported_ciphers||[]).length : 0;
+  const cipherSummary = enumData ? `
+    <div style="font-size:.8rem;margin-top:.25rem">Ciphers accepted: <span style="color:var(--text)">${enumCount}</span>
+      <span style="font-size:.72rem;margin-left:.35rem">
+        ${enumData.recommended_count?`<span style="color:${cipherLevelColor('recommended')}">${enumData.recommended_count} recommended</span>`:''}
+        ${enumData.acceptable_count?` · <span style="color:${cipherLevelColor('acceptable')}">${enumData.acceptable_count} acceptable</span>`:''}
+        ${enumData.deprecated_count?` · <span style="color:${cipherLevelColor('deprecated')}">${enumData.deprecated_count} deprecated</span>`:''}
+        ${enumData.disallowed_count?` · <span style="color:${cipherLevelColor('disallowed')}">${enumData.disallowed_count} disallowed</span>`:''}
+      </span>
+    </div>` : `
+    <div style="font-size:.8rem;margin-top:.25rem">Ciphers: <span style="color:var(--text)">${allCiphers.slice(0,3).join(', ')||'—'}${allCiphers.length>3?` (+${allCiphers.length-3} more)`:''}</span></div>`;
 
   body.innerHTML = `
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-bottom:1.5rem">
@@ -1584,9 +1645,11 @@ async function showDomainDetail(domain) {
       <div>
         <div style="color:var(--muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">Details</div>
         <div style="font-size:.8rem">TLS: <span style="color:var(--accent)">${(tryJSON(a.tls_versions)||[]).join(', ')||'—'}</span></div>
-        <div style="font-size:.8rem;margin-top:.25rem">Ciphers: <span style="color:var(--text)">${(tryJSON(a.cipher_suites)||[]).slice(0,2).join(', ')||'—'}</span></div>
+        ${cipherSummary}
         <div style="font-size:.8rem;margin-top:.25rem">PQC: <span style="${a.has_pqc?'color:#a78bfa':'color:var(--muted)'}">${a.has_pqc?'Detected':'Not detected'}</span></div>
         ${a.cert_expiry_days!=null?`<div style="font-size:.8rem;margin-top:.25rem">Cert expires: <span style="color:${a.cert_expiry_days<30?'var(--critical)':'var(--text)'}">${a.cert_expiry_days} days</span></div>`:''}
+        ${sslLabsBadge(ssllabs, domain)}
+        <button class="btn-outline" style="margin-top:.7rem;font-size:.75rem" onclick="showDomainFull()">Full TLS Details →</button>
       </div>
     </div>
     <div style="color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.75rem">Findings (${findings.length})</div>
@@ -1601,6 +1664,150 @@ async function showDomainDetail(domain) {
   `;
   document.getElementById('domain-detail').style.display = 'block';
   document.getElementById('domain-detail').scrollIntoView({ behavior: 'smooth' });
+}
+
+// ─── Full TLS detail view (drill-down) ──────────────────────────────────────
+const CAN_SCAN = {{ 'true' if is_admin else 'false' }};
+const _CIPHER_LEVEL_ORDER = { recommended:0, acceptable:1, deprecated:2, disallowed:3 };
+let _sslLabsPollTimer = null;
+
+function closeDomainFull() {
+  if (_sslLabsPollTimer) { clearTimeout(_sslLabsPollTimer); _sslLabsPollTimer = null; }
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.getElementById('view-dashboard').classList.add('active');
+}
+
+function showDomainFull() {
+  if (!_detailDomain) return;
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.getElementById('view-domain-full').classList.add('active');
+  document.getElementById('df-title').textContent = `TLS Details: ${_detailDomain}`;
+  renderDomainFull();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function renderDomainFull() {
+  const d        = _detailData || {};
+  const a        = _detailAssessment || {};
+  const extra    = d.extra || {};
+  const enumData = extra.cipher_enum || null;
+  const chain    = extra.chain || null;
+  const ssllabs  = extra.ssllabs || null;
+  const body     = document.getElementById('df-body');
+
+  // ── Cipher table ──
+  let cipherHtml;
+  if (enumData && (enumData.supported_ciphers||[]).length) {
+    const rows = [...enumData.supported_ciphers].sort((x, y) => {
+      const lv = (_CIPHER_LEVEL_ORDER[x.security_level]??9) - (_CIPHER_LEVEL_ORDER[y.security_level]??9);
+      if (lv) return lv;
+      if (x.tls_version !== y.tls_version) return x.tls_version < y.tls_version ? 1 : -1;
+      return (y.bits||0) - (x.bits||0);
+    }).map(c => `
+      <tr>
+        <td style="font-family:var(--font-mono);font-size:.74rem">${c.iana_name || c.openssl_name}</td>
+        <td>${c.tls_version||''}</td>
+        <td>${c.bits||''}</td>
+        <td style="font-size:.74rem;color:var(--muted)">${c.category||''}</td>
+        <td><span style="color:${cipherLevelColor(c.security_level)};font-weight:600;font-size:.74rem">${(c.security_level||'').toUpperCase()}</span></td>
+      </tr>`).join('');
+    cipherHtml = `
+      <table class="data-table" style="margin-bottom:1.5rem">
+        <thead><tr><th>Cipher suite (IANA)</th><th>Protocol</th><th>Bits</th><th>Category</th><th>Assessment</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div style="color:var(--muted);font-size:.7rem;margin-bottom:1.5rem">
+        Enumerated ${enumData.timestamp?enumData.timestamp.slice(0,19).replace('T',' '):''} UTC
+        · TLS 1.3: ${enumData.tls13_supported?'yes':'no'} · TLS 1.2: ${enumData.tls12_supported?'yes':'no'}
+        · Note: active enumeration probes a curated suite list; extremely rare suites may not be covered.
+      </div>`;
+  } else {
+    const allCiphers = tryJSON(a.cipher_suites) || [];
+    cipherHtml = allCiphers.length ? `
+      <div style="font-size:.8rem;margin-bottom:1.5rem">${allCiphers.map(c=>`<div style="font-family:var(--font-mono);font-size:.74rem">${c}</div>`).join('')}</div>
+      <div style="color:var(--muted);font-size:.72rem;margin-bottom:1.5rem">No cipher enumeration data for this domain — re-scan with cipher_enum enabled for the full accepted-suite list.</div>`
+      : `<div style="color:var(--muted);font-size:.8rem;margin-bottom:1.5rem">No cipher data available. Re-scan this domain.</div>`;
+  }
+
+  // ── Chain summary ──
+  const chainHtml = chain ? `
+    <div style="font-size:.8rem;margin-bottom:1.5rem">
+      Chain length: <span style="color:var(--text)">${chain.chain_length??'—'}</span>
+      · Complete: <span style="color:${chain.chain_complete?'var(--ready)':'var(--critical)'}">${chain.chain_complete?'yes':'no'}</span>
+      ${chain.root_ca?` · Root: <span style="color:var(--text)">${chain.root_ca}</span>`:''}
+    </div>` : '';
+
+  // ── SSL Labs panel ──
+  const slUrl = (ssllabs && ssllabs.report_url) || `https://www.ssllabs.com/ssltest/analyze.html?d=${encodeURIComponent(_detailDomain)}`;
+  const slEndpoints = (ssllabs && ssllabs.endpoints || []).map(e => `
+      <div style="font-size:.76rem;margin-top:.25rem">
+        <span style="font-family:var(--font-mono)">${e.ip}</span> —
+        <span style="color:${sslLabsGradeColor(e.grade)};font-weight:700">${e.grade||'?'}</span>
+        ${e.has_warnings?'<span style="color:#f59e0b;font-size:.7rem;margin-left:.3rem">warnings</span>':''}
+      </div>`).join('');
+  const slHtml = `
+    <div style="color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">Qualys SSL Labs</div>
+    <div id="df-ssllabs">
+      ${ssllabs && ssllabs.grade ? `
+        <div style="font-size:.9rem">Grade:
+          <span style="background:rgba(255,255,255,.06);border:1px solid ${sslLabsGradeColor(ssllabs.grade)};color:${sslLabsGradeColor(ssllabs.grade)};padding:.1rem .6rem;border-radius:4px;font-family:var(--font-mono);font-weight:700;font-size:1.05rem">${ssllabs.grade}</span>
+          <a href="${slUrl}" target="_blank" rel="noopener" style="color:var(--accent);font-size:.76rem;margin-left:.6rem">full report on ssllabs.com ↗</a>
+        </div>
+        ${slEndpoints}
+        <div style="color:var(--muted);font-size:.7rem;margin-top:.4rem">
+          Assessed ${ssllabs.test_time?ssllabs.test_time.slice(0,19).replace('T',' ')+' UTC':'—'}
+          · engine ${ssllabs.engine_version||'?'} · criteria ${ssllabs.criteria_version||'?'}
+          · grade is informational only (not part of the PQC score)
+        </div>`
+      : `<div style="color:var(--muted);font-size:.8rem">No SSL Labs report stored for this domain.
+          <a href="${slUrl}" target="_blank" rel="noopener" style="color:var(--accent)">check ssllabs.com ↗</a></div>`}
+      ${CAN_SCAN ? `<button class="btn-outline" style="margin-top:.7rem;font-size:.75rem" id="df-ssllabs-btn" onclick="refreshSSLLabs()">Request fresh SSL Labs assessment</button>
+        <span id="df-ssllabs-status" style="color:var(--muted);font-size:.72rem;margin-left:.6rem"></span>` : ''}
+    </div>`;
+
+  body.innerHTML = `
+    <div style="font-size:.8rem;margin-bottom:1rem">TLS protocols: <span style="color:var(--accent)">${(tryJSON(a.tls_versions)||[]).join(', ')||'—'}</span></div>
+    <div style="color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">Accepted cipher suites</div>
+    ${cipherHtml}
+    ${chainHtml ? `<div style="color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">Certificate chain</div>${chainHtml}` : ''}
+    ${slHtml}`;
+}
+
+async function refreshSSLLabs() {
+  const btn = document.getElementById('df-ssllabs-btn');
+  const st  = document.getElementById('df-ssllabs-status');
+  if (!_detailDomain || !btn) return;
+  btn.disabled = true;
+  st.textContent = 'requesting…';
+  try {
+    const r = await fetch(`/api/ssllabs/${encodeURIComponent(_detailDomain)}/refresh`, { method: 'POST' });
+    const d = await r.json();
+    if (d.status === 'unavailable') { st.textContent = d.error || 'SSL Labs not configured'; return; }
+    if (d.status === 'rate_limited') { st.textContent = 'rate limited by SSL Labs — try again later'; btn.disabled = false; return; }
+    _pollSSLLabs(0);
+  } catch (e) {
+    st.textContent = 'request failed'; btn.disabled = false;
+  }
+}
+
+async function _pollSSLLabs(attempt) {
+  const st = document.getElementById('df-ssllabs-status');
+  if (!st) return; // view was closed
+  if (attempt > 40) { st.textContent = 'timed out — check ssllabs.com directly'; return; }
+  try {
+    const r = await fetch(`/api/ssllabs/${encodeURIComponent(_detailDomain)}`);
+    const d = await r.json();
+    if (d.status === 'READY' && d.report) {
+      st.textContent = '';
+      _detailData.extra = _detailData.extra || {};
+      _detailData.extra.ssllabs = d.report;
+      renderDomainFull();
+      return;
+    }
+    if (d.status === 'ERROR') { st.textContent = 'SSL Labs assessment failed'; return; }
+    st.textContent = `SSL Labs: ${d.status||'…'} (assessments take 60+ s)`;
+  } catch (e) { /* transient — keep polling */ }
+  _sslLabsPollTimer = setTimeout(() => _pollSSLLabs(attempt + 1), attempt < 3 ? 5000 : 10000);
 }
 
 // ─── Domain Discovery ────────────────────────────────────────────────────────

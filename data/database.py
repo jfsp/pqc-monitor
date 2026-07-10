@@ -965,6 +965,46 @@ class Database:
                 result[row["data_type"]] = {}
         return result
 
+    def get_latest_domain_extra(self, domain: str,
+                                 data_types: list = None) -> dict:
+        """
+        Return the most recent enrichment blob per data_type for a domain,
+        across ALL runs. Keyed by data_type; each value gains a
+        '_recorded_at' and '_run_id' field for provenance.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT data_type, json_data, recorded_at, run_id "
+                "FROM domain_extra WHERE domain=? "
+                "ORDER BY recorded_at ASC",
+                (domain,)
+            ).fetchall()
+        result = {}
+        wanted = set(data_types) if data_types else None
+        for row in rows:  # ascending — later rows overwrite earlier ones
+            dt = row["data_type"]
+            if wanted and dt not in wanted:
+                continue
+            try:
+                blob = json.loads(row["json_data"])
+            except Exception:
+                blob = {}
+            if isinstance(blob, dict):
+                blob["_recorded_at"] = row["recorded_at"]
+                blob["_run_id"]      = row["run_id"]
+            result[dt] = blob
+        return result
+
+    def get_latest_run_id_for_domain(self, domain: str) -> Optional[str]:
+        """run_id of the most recent assessment of a domain, or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT run_id FROM assessments WHERE domain=? "
+                "ORDER BY assessed_at DESC LIMIT 1",
+                (domain,)
+            ).fetchone()
+        return row["run_id"] if row else None
+
     # ─── Certificate Transparency ─────────────────────────────────
 
     def save_ct_summary(self, summary: dict):

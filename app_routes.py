@@ -202,7 +202,70 @@ def api_domain_detail(domain):
     _audit("view_domain", resource=domain)
     history = db.get_domain_history(domain)
     scans   = db.get_domain_scans(domain)
-    return jsonify({"domain": domain, "history": history, "scans": scans[:5]})
+    extra   = db.get_latest_domain_extra(
+        domain, data_types=["cipher_enum", "chain", "cdn", "ssllabs"])
+    return jsonify({"domain": domain, "history": history,
+                    "scans": scans[:5], "extra": extra})
+
+
+def _ssllabs_client():
+    from scanner.ssllabs_client import SSLLabsClient
+    cfg = current_app.config
+    return SSLLabsClient(cfg.get("SSLLABS_EMAIL", "") or "")
+
+
+def _check_domain_access(user, domain):
+    if user.is_admin:
+        return True
+    allowed = set(current_app.config["AUTH_STORE"].get_user_domains(user.id))
+    return domain in allowed
+
+
+@app_bp.route("/api/ssllabs/<domain>")
+@require_auth
+def api_ssllabs_status(domain):
+    """
+    Poll SSL Labs for the current assessment state of *domain*.
+    Persists the summary to domain_extra when READY.
+    """
+    db   = _db()
+    user = current_user()
+    if not _check_domain_access(user, domain):
+        return jsonify({"error": "forbidden"}), 403
+    client = _ssllabs_client()
+    if not client.available:
+        return jsonify({"status": "unavailable",
+                        "error": "SSL Labs not configured (ssllabs.email)"}), 200
+    status, summary = client.poll(domain)
+    if status == "READY" and summary:
+        run_id = db.get_latest_run_id_for_domain(domain)
+        if run_id:
+            db.save_domain_extra(run_id, domain, "ssllabs", summary)
+    return jsonify({"status": status, "report": summary})
+
+
+@app_bp.route("/api/ssllabs/<domain>/refresh", methods=["POST"])
+@require_auth
+def api_ssllabs_refresh(domain):
+    """
+    Trigger a FRESH SSL Labs assessment (startNew=on, publish=off).
+    Restricted to users with scan permission — this causes external
+    scanning activity by Qualys against the target host.
+    """
+    if not current_user().can("scan.run"):
+        return jsonify({"error": "forbidden"}), 403
+    client = _ssllabs_client()
+    if not client.available:
+        return jsonify({"status": "unavailable",
+                        "error": "SSL Labs not configured (ssllabs.email)"}), 200
+    _audit("ssllabs.refresh", resource=domain)
+    status, summary = client.start_assessment(domain)
+    if status == "READY" and summary:
+        db = _db()
+        run_id = db.get_latest_run_id_for_domain(domain)
+        if run_id:
+            db.save_domain_extra(run_id, domain, "ssllabs", summary)
+    return jsonify({"status": status, "report": summary})
 
 
 @app_bp.route("/api/trends")

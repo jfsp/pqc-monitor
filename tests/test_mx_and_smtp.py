@@ -93,3 +93,46 @@ class TestMxRepairLogic(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDomainColumnRepair(unittest.TestCase):
+    """The domain PRIMARY-KEY repair across tables (server-observed bug)."""
+
+    def _seed(self, path):
+        from data.database import Database
+        db = Database(path)
+        rid = db.create_run(["bde.es"])
+        def save(dom, score=0, level="na"):
+            db.save_assessment(rid, {
+                "domain": dom, "scan_timestamp": "t", "assessment_timestamp": "t",
+                "guidelines_used": [], "score": score, "level": level,
+                "findings": [], "services_assessed": 0, "tls_versions_found": [],
+                "cipher_suites_found": [], "key_types_found": [], "has_pqc": False,
+                "certificate_expiry_days": None, "errors": []})
+        save("5 smtp.bde.es")               # rename target collides ↓
+        save("smtp.bde.es", score=80)       # correct row already present
+        save("20 mail01.bancaditalia.it")   # clean rename
+        save("primary DNS domain")          # unrecoverable → drop
+        db.finish_run(rid, "completed")
+        return db
+
+    def test_rename_merge_drop(self):
+        import tempfile, os, sqlite3
+        from scripts.fix_mx_entries import repair_domain_column
+        d = tempfile.mkdtemp(); p = os.path.join(d, "t.db")
+        self._seed(p)
+        conn = sqlite3.connect(p); conn.row_factory = sqlite3.Row
+        actions = repair_domain_column(conn, dry_run=False)
+        conn.commit()
+        got = sorted(r[0] for r in
+                     conn.execute("SELECT DISTINCT domain FROM assessments"))
+        self.assertEqual(got, ["mail01.bancaditalia.it", "smtp.bde.es"])
+        # collision kept the CORRECT (score-80) row, dropped the bad duplicate
+        score = conn.execute(
+            "SELECT score FROM assessments WHERE domain='smtp.bde.es'"
+        ).fetchone()[0]
+        self.assertEqual(score, 80)
+        self.assertGreater(actions, 0)
+        # idempotent
+        self.assertEqual(repair_domain_column(conn, dry_run=True), 0)
+        conn.close()

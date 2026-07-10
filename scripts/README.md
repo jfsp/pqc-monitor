@@ -62,16 +62,26 @@ as a normal scan) — fresh SSL Labs assessments remain on-demand from the UI.
 
 ## fix_mx_entries.py
 
-Repair malformed **MX host entries** in stored DNS enumeration data. Older
-scans saved MX values verbatim — e.g. `5 SMTP.domain.com` — which is not a
-hostname (it carries the MX *priority*, irrelevant as a TLS scan target) and
-often has the wrong case or a trailing dot.
+Repair malformed **MX host entries** in the database. Older scans saved MX
+values verbatim — e.g. `5 SMTP.domain.com` — which is not a hostname (it
+carries the MX *priority*, irrelevant as a TLS scan target) and often has
+the wrong case or a trailing dot. In some databases these bad values became
+the **`domain` primary key** of real scan/assessment rows (because the bad
+host was fed in as a scan target), not just enrichment data.
 
-Repairs, in place, inside every `dns_enum` blob in `domain_extra`:
-`mx_hosts[]`, `subdomains[]`, and `tls_candidates[].host`. Strips the
-priority to a bare FQDN, lower-cases, drops unusable entries (a lone `5`,
-the `.` from a null-MX `0 .`), dedupes, and only rewrites a blob when
-something changed. **No network, idempotent.**
+Repairs, in one pass:
+
+1. The `domain` key column across every domain-keyed table (`raw_scans`,
+   `assessments`, `ct_queries`, `ct_certificates`, `domain_extra`,
+   `roadmaps`, `domain_organisations`). Per malformed value it **renames**
+   to the normalised FQDN, **merges** (drops the duplicate) when a correct
+   row already exists, or **drops** rows whose value has no recoverable
+   hostname (e.g. `primary DNS domain`, a lone `5`).
+2. The `dns_enum` blobs in `domain_extra` (`mx_hosts[]`, `subdomains[]`,
+   `tls_candidates[].host`).
+
+**No network, idempotent.** `--dry-run` prints exactly which rows would be
+renamed / merged / dropped before you commit.
 
 ### Options
 

@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
 """
-PQC-Monitor: Fix malformed MX host entries in stored DNS enumeration data
-=========================================================================
+PQC-Monitor: Fix malformed MX host entries in the database
+==========================================================
 Older scans stored MX values verbatim, e.g. "5 SMTP.domain.com" — which is
 not a hostname (it carries the MX *priority*, a mail-routing preference that
 is irrelevant as a TLS scan target) and often the wrong case / a trailing
-dot. This script repairs those entries in-place inside the `dns_enum`
-enrichment blobs in `domain_extra`.
+dot. In some databases these malformed values ended up as the *domain* key
+of actual scan/assessment rows (because the bad host was fed in as a scan
+target), not just inside DNS-enrichment blobs.
 
-Affected fields inside each `dns_enum` blob:
-  - mx_hosts[]                      "5 SMTP.x.com"      → "smtp.x.com"
-  - subdomains[]                    (MX hosts are also added here)
-  - tls_candidates[].host           (scan targets built from MX hosts)
+This script repairs BOTH places:
 
-What it does
-────────────
-  - Strips a leading numeric priority to a bare FQDN.
-  - Lower-cases and removes trailing dots.
-  - Drops entries that are not valid hostnames (e.g. a lone "5", or "." from
-    a null-MX "0 ."), and de-duplicates.
-  - Rewrites the blob only if something actually changed.
+1. The `domain` primary-key column across every domain-keyed table:
+     raw_scans, assessments, ct_queries, ct_certificates, domain_extra,
+     roadmaps, domain_organisations
+   e.g. "5 smtp.bde.es"  → "smtp.bde.es"
+        "20 mail01.x.it" → "mail01.x.it"
+   Unrecoverable values (no hostname at all, e.g. "primary DNS domain" or a
+   lone "5") are DELETED — they can never be a valid scan target.
 
-It does NOT re-run DNS or touch the network. Old raw scans are untouched.
+2. The `dns_enum` enrichment blobs in `domain_extra` (mx_hosts[],
+   subdomains[], tls_candidates[].host).
+
+Collision handling for the domain column
+─────────────────────────────────────────
+If normalising "5 smtp.bde.es" → "smtp.bde.es" and a correct "smtp.bde.es"
+row ALREADY exists in that table, renaming would collide. In that case the
+malformed row is DELETED (the correct row already has good data), so the
+DB is left clean either way. --dry-run reports which rows rename, merge
+(collision → delete), or drop (unrecoverable).
+
+It does NOT re-run DNS or touch the network.
 
 Usage
 ─────
@@ -185,6 +194,91 @@ def repair_blob(blob: dict) -> tuple[dict, list]:
     return blob, notes
 
 
+# ── domain primary-key repair across tables ───────────────────────────────────
+
+# Every table that keys on a `domain` column. If a future schema adds one,
+# add it here.
+_DOMAIN_TABLES = [
+    "raw_scans",
+    "assessments",
+    "ct_queries",
+    "ct_certificates",
+    "domain_extra",
+    "roadmaps",
+    "domain_organisations",
+]
+
+
+def _table_exists(conn, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,)
+    ).fetchone()
+    return row is not None
+
+
+def _distinct_bad_domains(conn, table: str) -> list[str]:
+    """Domains in *table* whose value differs from its normalised form."""
+    try:
+        vals = [r[0] for r in conn.execute(
+            f"SELECT DISTINCT domain FROM {table}").fetchall()]
+    except sqlite3.OperationalError:
+        return []
+    return [v for v in vals if v is not None and v != normalise_mx_host(v)]
+
+
+def repair_domain_column(conn, dry_run: bool) -> int:
+    """
+    Repair malformed values in the `domain` key column across all
+    domain-keyed tables. Returns the number of (table,row-group) actions taken.
+
+    Per malformed value:
+      - normalises to a bare FQDN;
+      - if the target name is unrecoverable ("") → DELETE the rows;
+      - else if a row with the target name already exists → DELETE the bad
+        rows (correct data already present — avoids a UNIQUE/duplicate clash);
+      - else → UPDATE (rename) the bad rows to the good name.
+    """
+    actions = 0
+    for table in _DOMAIN_TABLES:
+        if not _table_exists(conn, table):
+            continue
+        bad_values = _distinct_bad_domains(conn, table)
+        for bad in bad_values:
+            good = normalise_mx_host(bad)
+            n_rows = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE domain=?", (bad,)
+            ).fetchone()[0]
+
+            if not good:
+                logger.info("  [%s] DROP %r (%d row(s)) — no valid hostname",
+                            table, bad, n_rows)
+                if not dry_run:
+                    conn.execute(f"DELETE FROM {table} WHERE domain=?", (bad,))
+                actions += 1
+                continue
+
+            exists = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE domain=?", (good,)
+            ).fetchone()[0]
+
+            if exists:
+                logger.info("  [%s] MERGE %r → %r already present; "
+                            "dropping %d duplicate row(s)",
+                            table, bad, good, n_rows)
+                if not dry_run:
+                    conn.execute(f"DELETE FROM {table} WHERE domain=?", (bad,))
+            else:
+                logger.info("  [%s] RENAME %r → %r (%d row(s))",
+                            table, bad, good, n_rows)
+                if not dry_run:
+                    conn.execute(
+                        f"UPDATE {table} SET domain=? WHERE domain=?",
+                        (good, bad))
+            actions += 1
+    return actions
+
+
 # ── Main pass ─────────────────────────────────────────────────────────────────
 
 def main(argv=None) -> int:
@@ -199,6 +293,15 @@ def main(argv=None) -> int:
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+
+    # ── 1. Repair the domain primary-key column across all tables ──
+    logger.info("Checking domain key column across %d table(s)…",
+                len(_DOMAIN_TABLES))
+    domain_actions = repair_domain_column(conn, args.dry_run)
+    if domain_actions == 0:
+        logger.info("  no malformed domain keys found")
+
+    # ── 2. Repair dns_enum enrichment blobs ────────────────────────
     rows = conn.execute(
         "SELECT rowid AS rid, run_id, domain, json_data FROM domain_extra "
         "WHERE data_type='dns_enum'"
@@ -231,11 +334,12 @@ def main(argv=None) -> int:
             )
 
     if args.dry_run:
-        logger.info("DRY-RUN complete — %d blob(s) would be repaired. No writes.",
-                    fixed)
+        logger.info("DRY-RUN complete — %d domain-key action(s) and %d blob(s) "
+                    "would be repaired. No writes.", domain_actions, fixed)
     else:
         conn.commit()
-        logger.info("Done — repaired %d blob(s).", fixed)
+        logger.info("Done — %d domain-key action(s), %d blob(s) repaired.",
+                    domain_actions, fixed)
 
     conn.close()
     return 0

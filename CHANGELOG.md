@@ -38,10 +38,17 @@ This project uses [Semantic Versioning](https://semver.org/).
     defaulting to the hardcoded `True`).
 
 ### Added
-- **`scripts/fix_mx_entries.py`**: repairs malformed MX host entries in
-  existing `dns_enum` blobs in `domain_extra` (`mx_hosts`, `subdomains`,
-  `tls_candidates[].host`). No network; idempotent; `--dry-run` / `--config`
-  / `--db`. Uses the same normalisation as the scanner.
+- **`scripts/fix_mx_entries.py`**: repairs malformed MX host entries in the
+  database. Repairs BOTH (a) the `domain` primary-key column across every
+  domain-keyed table — raw_scans, assessments, ct_queries, ct_certificates,
+  domain_extra, roadmaps, domain_organisations — where a bad MX host was fed
+  in as a scan target (e.g. `5 smtp.bde.es`, `20 mail01.x.it`,
+  `primary DNS domain`), and (b) the `dns_enum` enrichment blobs
+  (`mx_hosts`, `subdomains`, `tls_candidates[].host`). Per malformed domain
+  key it renames to the normalised FQDN, or — on collision with an existing
+  correct row — drops the duplicate, or deletes rows whose value has no
+  recoverable hostname. No network; idempotent; `--dry-run` / `--config`
+  / `--db`.
 - **Tests**: `tests/test_mx_and_smtp.py` (12 tests) — MX normalisation,
   candidate building, STARTTLS port coverage, protocol dispatch, and the
   repair-script cleaning logic.

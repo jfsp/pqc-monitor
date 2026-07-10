@@ -289,6 +289,17 @@ priority-prefixed string through into `mx_hosts`, `subdomains` and
   `--dry-run`/`--config`/`--db`. Self-contained normaliser (no dnspython
   import) with a test asserting it agrees with the scanner's.
 
+  UPDATE (post-1.9.1): on the production DB the malformed values were NOT in
+  `dns_enum` blobs (that DB had 0 such blobs) but in the `domain`
+  PRIMARY-KEY column of real rows — `5 smtp.bde.es`,
+  `20 mail01.bancaditalia.it`, even `primary DNS domain`. The script now
+  ALSO repairs the `domain` column across all 7 domain-keyed tables
+  (raw_scans, assessments, ct_queries, ct_certificates, domain_extra,
+  roadmaps, domain_organisations): RENAME → normalised FQDN; MERGE (drop the
+  duplicate) when a correct row already exists; DROP rows with no
+  recoverable hostname. Idempotent. Run `--dry-run` first — it prints every
+  rename/merge/drop before you commit.
+
 **Bug fix 2 — SMTP with TLS reported as "no TLS"; 465/587/2525 not scanned**
 
 Root cause: `probe_starttls()` selected the EHLO/STARTTLS upgrade with a

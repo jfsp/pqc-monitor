@@ -77,6 +77,15 @@ TLS12_CIPHER_GROUPS: list[tuple[str, str, str]] = [
     ("AES128-SHA256",                   "RSA-CBC",          "deprecated"),
     ("AES256-SHA",                      "RSA-CBC",          "deprecated"),
     ("AES128-SHA",                      "RSA-CBC",          "deprecated"),
+    # CAMELLIA (non-NIST-approved; common on European servers)
+    ("ECDHE-RSA-CAMELLIA256-SHA384",    "ECDHE-CBC",        "deprecated"),
+    ("ECDHE-RSA-CAMELLIA128-SHA256",    "ECDHE-CBC",        "deprecated"),
+    ("DHE-RSA-CAMELLIA256-SHA",         "DHE-CBC",          "deprecated"),
+    ("DHE-RSA-CAMELLIA128-SHA",         "DHE-CBC",          "deprecated"),
+    ("CAMELLIA256-SHA",                 "RSA-CBC",          "deprecated"),
+    ("CAMELLIA128-SHA",                 "RSA-CBC",          "deprecated"),
+    # SEED (non-NIST-approved legacy block cipher)
+    ("SEED-SHA",                        "RSA-CBC",          "deprecated"),
     # 3DES (broken)
     ("ECDHE-RSA-DES-CBC3-SHA",          "3DES",             "disallowed"),
     ("DES-CBC3-SHA",                    "3DES",             "disallowed"),
@@ -118,6 +127,13 @@ _OPENSSL_TO_IANA: dict[str, str] = {
     "AES128-SHA256":                    "TLS_RSA_WITH_AES_128_CBC_SHA256",
     "AES256-SHA":                       "TLS_RSA_WITH_AES_256_CBC_SHA",
     "AES128-SHA":                       "TLS_RSA_WITH_AES_128_CBC_SHA",
+    "ECDHE-RSA-CAMELLIA256-SHA384":    "TLS_ECDHE_RSA_WITH_CAMELLIA_256_CBC_SHA384",
+    "ECDHE-RSA-CAMELLIA128-SHA256":    "TLS_ECDHE_RSA_WITH_CAMELLIA_128_CBC_SHA256",
+    "DHE-RSA-CAMELLIA256-SHA":         "TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA",
+    "DHE-RSA-CAMELLIA128-SHA":         "TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA",
+    "CAMELLIA256-SHA":                  "TLS_RSA_WITH_CAMELLIA_256_CBC_SHA",
+    "CAMELLIA128-SHA":                  "TLS_RSA_WITH_CAMELLIA_128_CBC_SHA",
+    "SEED-SHA":                         "TLS_RSA_WITH_SEED_CBC_SHA",
     "DES-CBC3-SHA":                     "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
     "ECDHE-RSA-DES-CBC3-SHA":          "TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA",
     "RC4-SHA":                          "TLS_RSA_WITH_RC4_128_SHA",
@@ -357,69 +373,120 @@ def enumerate_ciphers(domain: str, port: int = 443, timeout: float = 6.0,
     return result
 
 
+def _cipher_names(enum_result: CipherEnumResult, predicate) -> list[str]:
+    """IANA names of accepted ciphers matching *predicate(cipher_dict)*."""
+    names = []
+    for c in enum_result.supported_ciphers:
+        d = c if isinstance(c, dict) else c.__dict__
+        if predicate(d):
+            names.append(d.get("iana_name") or d.get("openssl_name", "?"))
+    return sorted(set(names))
+
+
+def _fmt_names(names: list[str], limit: int = 20) -> str:
+    """Comma-joined cipher list, truncated for very long sets."""
+    if not names:
+        return ""
+    shown = names[:limit]
+    tail  = f" (+{len(names) - limit} more)" if len(names) > limit else ""
+    return ", ".join(shown) + tail
+
+
 def cipher_enum_findings(enum_result: CipherEnumResult) -> list[dict]:
     """
     Convert a CipherEnumResult into Finding-compatible dicts
-    for the CryptoAssessor.
+    for the CryptoAssessor.  Each finding names the specific
+    cipher suites (IANA) that should be removed.
     """
     findings = []
     if not enum_result.success:
         return findings
 
+    def _has(sub: str):
+        return lambda d: sub in d.get("category", "") or sub in d.get("openssl_name", "")
+
     if enum_result.has_null_cipher:
+        names = _cipher_names(enum_result, _has("NULL"))
         findings.append({
             "severity": "critical", "category": "cipher_enum",
-            "message": "Server accepts NULL cipher suites (plaintext traffic possible)",
+            "message": "Server accepts NULL cipher suites (plaintext traffic possible): "
+                       + _fmt_names(names),
             "guideline": "all",
             "recommendation": "Disable all NULL cipher suites immediately.",
+            "ciphers": names,
         })
 
     if enum_result.has_export_cipher:
+        names = _cipher_names(enum_result, lambda d: "EXPORT" in d.get("category", ""))
         findings.append({
             "severity": "critical", "category": "cipher_enum",
-            "message": "Server accepts EXPORT-grade cipher suites (FREAK/DROWN attack surface)",
+            "message": "Server accepts EXPORT-grade cipher suites (FREAK/DROWN attack surface): "
+                       + _fmt_names(names),
             "guideline": "nist_800_131a",
             "recommendation": "Disable all EXPORT cipher suites immediately.",
+            "ciphers": names,
         })
 
     if enum_result.has_anon_cipher:
+        names = _cipher_names(enum_result, lambda d: "ANON" in d.get("category", ""))
         findings.append({
             "severity": "critical", "category": "cipher_enum",
-            "message": "Server accepts anonymous (ADH/AECDH) cipher suites — no server authentication",
+            "message": "Server accepts anonymous (ADH/AECDH) cipher suites — no server "
+                       "authentication: " + _fmt_names(names),
             "guideline": "all",
             "recommendation": "Disable all anonymous cipher suites.",
+            "ciphers": names,
         })
 
     if enum_result.has_rc4:
+        names = _cipher_names(enum_result, _has("RC4"))
         findings.append({
             "severity": "critical", "category": "cipher_enum",
-            "message": "Server accepts RC4 cipher suites (broken stream cipher)",
+            "message": "Server accepts RC4 cipher suites (broken stream cipher): "
+                       + _fmt_names(names),
             "guideline": "nist_800_131a",
             "recommendation": "Disable RC4 cipher suites.",
+            "ciphers": names,
         })
 
     if enum_result.has_3des:
+        names = _cipher_names(enum_result, lambda d: "3DES" in d.get("category", ""))
         findings.append({
             "severity": "high", "category": "cipher_enum",
-            "message": "Server accepts 3DES cipher suites (SWEET32 attack surface)",
+            "message": "Server accepts 3DES cipher suites (SWEET32 attack surface): "
+                       + _fmt_names(names),
             "guideline": "bsi_tr02102",
             "recommendation": "Disable 3DES (DES-CBC3) cipher suites.",
+            "ciphers": names,
         })
 
     if enum_result.has_no_forward_secrecy and not enum_result.tls13_supported:
+        names = _cipher_names(
+            enum_result,
+            lambda d: d.get("tls_version") == "TLSv1.2"
+                      and "ECDHE" not in d.get("category", "")
+                      and "DHE" not in d.get("category", "")
+        )
         findings.append({
             "severity": "high", "category": "cipher_enum",
-            "message": "Server accepts RSA key-exchange cipher suites (no forward secrecy)",
+            "message": "Server accepts RSA key-exchange cipher suites (no forward secrecy): "
+                       + _fmt_names(names),
             "guideline": "bsi_tr02102",
             "recommendation": "Disable RSA key-exchange ciphers; require ECDHE or DHE.",
+            "ciphers": names,
         })
 
     if enum_result.deprecated_count > 0:
+        names = _cipher_names(
+            enum_result, lambda d: d.get("security_level") == "deprecated")
         findings.append({
             "severity": "medium", "category": "cipher_enum",
-            "message": f"Server accepts {enum_result.deprecated_count} deprecated cipher suite(s)",
+            "message": f"Server accepts {enum_result.deprecated_count} deprecated "
+                       f"cipher suite(s): " + _fmt_names(names),
             "guideline": "nist_800_131a",
-            "recommendation": "Restrict to recommended AEAD cipher suites only.",
+            "recommendation": "Remove the listed suites; restrict to recommended "
+                              "AEAD cipher suites only.",
+            "ciphers": names,
         })
 
     if not enum_result.tls13_supported:

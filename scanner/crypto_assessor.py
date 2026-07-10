@@ -17,6 +17,14 @@ from dataclasses import dataclass, asdict, field
 
 logger = logging.getLogger(__name__)
 
+try:
+    from scanner.cipher_enum import _OPENSSL_TO_IANA
+except ImportError:  # stand-alone / relative execution
+    try:
+        from cipher_enum import _OPENSSL_TO_IANA
+    except ImportError:
+        _OPENSSL_TO_IANA = {}
+
 GUIDELINES_DIR = os.path.join(os.path.dirname(__file__), "..", "guidelines")
 
 # PQC readiness levels
@@ -41,6 +49,7 @@ class Finding:
     message: str
     guideline: str       # which guideline triggered this
     recommendation: str = ""
+    ciphers: list = field(default_factory=list)  # named suites (cipher_enum findings)
 
 
 @dataclass
@@ -153,6 +162,7 @@ class CryptoAssessor:
             findings.extend(tls_findings)
 
             cipher = svc.get("cipher_suite", "")
+            cipher = _OPENSSL_TO_IANA.get(cipher, cipher)  # normalise to IANA
             if cipher and cipher not in assessment.cipher_suites_found:
                 assessment.cipher_suites_found.append(cipher)
             cipher_score, cipher_findings = self._assess_cipher(cipher)
@@ -185,6 +195,19 @@ class CryptoAssessor:
             scores.append(enum_score)
             findings.extend(enum_penalty_findings)
 
+            # Merge the FULL enumerated cipher set (IANA names) so the
+            # assessment record reflects everything the server accepts,
+            # not just the single passively-negotiated suite per service.
+            for c in cipher_enum.get("supported_ciphers", []) or []:
+                if not isinstance(c, dict):
+                    continue
+                name = c.get("iana_name") or c.get("openssl_name")
+                if name and name not in assessment.cipher_suites_found:
+                    assessment.cipher_suites_found.append(name)
+                ver = c.get("tls_version")
+                if ver and ver not in assessment.tls_versions_found:
+                    assessment.tls_versions_found.append(ver)
+
         # ── CDN context ───────────────────────────────────────────
         if cdn_result and cdn_result.get("detected"):
             assessment.cdn_name     = cdn_result.get("cdn_name", "")
@@ -201,6 +224,7 @@ class CryptoAssessor:
                         message=f.get("message", ""),
                         guideline=f.get("guideline", "all"),
                         recommendation=f.get("recommendation", ""),
+                        ciphers=f.get("ciphers", []) or [],
                     ))
 
         # PQC bonus / penalty

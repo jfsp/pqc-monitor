@@ -11,10 +11,14 @@ scanning:
   ports:               # TLS-bearing ports to probe
     - 443              # HTTPS
     - 8443             # Alt HTTPS
-    - 465              # SMTPS
-    - 993              # IMAPS
+    - 465              # SMTPS (implicit TLS)
+    - 993              # IMAPS (implicit TLS)
+    - 995              # POP3S (implicit TLS)
     - 636              # LDAPS
     - 5061             # SIP-TLS
+  # STARTTLS ports (25 SMTP, 587/2525 submission, 143 IMAP, 110 POP3) are
+  # probed automatically via protocol upgrade when use_starttls is true.
+  use_starttls: true
   user_agent: "PQCMonitor/1.0 (security research; non-intrusive)"
 
 dashboard:

@@ -35,9 +35,25 @@ TLS_PORTS = {
 }
 
 # STARTTLS ports (require protocol-level upgrade before TLS)
+# NOTE: implicit-TLS variants (465 SMTPS, 993 IMAPS, 995 POP3S) live in
+# TLS_PORTS above — they are wrapped directly. The ports here speak plaintext
+# first and must be upgraded via EHLO/STARTTLS (SMTP), STARTTLS (IMAP),
+# STLS (POP3). 2525 is a widely-used alternative SMTP submission port.
 STARTTLS_PORTS = {
     25:   "smtp",
     587:  "submission",
+    2525: "submission-alt",
+    143:  "imap",
+    110:  "pop3",
+    389:  "ldap",
+}
+
+# Protocol family per STARTTLS port — drives the upgrade handshake so it is
+# selected by PROTOCOL, not by a hardcoded port number.
+STARTTLS_PROTOCOL = {
+    25:   "smtp",
+    587:  "smtp",
+    2525: "smtp",
     143:  "imap",
     110:  "pop3",
     389:  "ldap",
@@ -96,6 +112,8 @@ def discover_tls_services(
     probe_ports = ports if ports is not None else list(TLS_PORTS.keys())
     if include_starttls:
         probe_ports += list(STARTTLS_PORTS.keys())
+    # Dedupe while preserving order (callers may already include STARTTLS ports)
+    probe_ports = list(dict.fromkeys(probe_ports))
 
     ip = _resolve_ip(domain)
     if not ip:

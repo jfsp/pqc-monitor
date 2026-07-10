@@ -20,13 +20,16 @@ from scanner.tls_probe import _parse_certificate, _detect_pqc, _infer_key_exchan
 
 logger = logging.getLogger(__name__)
 
-# STARTTLS protocol upgrade bytes
-_STARTTLS_COMMANDS = {
-    25:  (b"EHLO pqcmonitor\r\n", b"STARTTLS\r\n"),
-    587: (b"EHLO pqcmonitor\r\n", b"STARTTLS\r\n"),
-    143: (b". CAPABILITY\r\n",    b". STARTTLS\r\n"),
-    110: (b"CAPA\r\n",            None),   # POP3 STLS
-    389: None,                             # LDAP StartTLS (binary – skip)
+# Protocol family per STARTTLS port. Selecting the handshake by PROTOCOL
+# (not by a hardcoded port number) means alternative ports such as 2525
+# work the same as the well-known ones.
+_PORT_PROTOCOL = {
+    25:   "smtp",
+    587:  "smtp",
+    2525: "smtp",
+    143:  "imap",
+    110:  "pop3",
+    389:  "ldap",
 }
 _POP3_STARTTLS = b"STLS\r\n"
 
@@ -46,8 +49,20 @@ def _recv_line(sock: socket.socket, timeout: float = 5.0) -> bytes:
     return buf
 
 
-def _recv_multiline(sock: socket.socket, timeout: float = 3.0) -> bytes:
-    """Read a multi-line SMTP/IMAP greeting (stop when we see a non-dash 3-digit code)."""
+def _recv_multiline(sock: socket.socket, timeout: float = 3.0,
+                    imap_tag: bytes = None) -> bytes:
+    """
+    Read a multi-line SMTP/IMAP/POP3 greeting or response.
+
+    SMTP/POP3: continuation lines use "<code>-<text>"; the final line uses
+    "<code> <text>" (space at column 4). We stop on the first line whose
+    4th byte is a space (or that is too short to be a continuation).
+
+    IMAP: pass *imap_tag* (e.g. b"a001") to stop when the tagged response
+    line arrives; otherwise falls back to the SMTP rule. We deliberately do
+    NOT stop merely because a line ends in "OK"/"NO" — that misfires on
+    banners/hostnames containing those letters.
+    """
     buf = b""
     sock.settimeout(timeout)
     while True:
@@ -55,11 +70,15 @@ def _recv_multiline(sock: socket.socket, timeout: float = 3.0) -> bytes:
         buf += line
         if not line:
             break
-        # SMTP continuation: "250-…"; final line: "250 …"
+        stripped = line.rstrip(b"\r\n")
+        if imap_tag is not None:
+            if stripped.startswith(imap_tag):
+                break
+            continue
+        # SMTP/POP3 continuation is "<code>-…"; final line is "<code> …"
         if len(line) >= 4 and line[3:4] == b" ":
             break
-        # IMAP tagged response ends with "OK" or "NO"
-        if line.strip().endswith(b"OK") or line.strip().endswith(b"NO"):
+        if len(line) < 4:
             break
     return buf
 
@@ -82,8 +101,16 @@ def probe_starttls(domain: str, port: int, timeout: int = 10) -> dict:
         "raw_cipher_list": [], "error": None,
     }
 
-    if port == 389:
+    proto = _PORT_PROTOCOL.get(port)
+
+    if proto == "ldap":
         base["error"] = "ldap_starttls_not_supported"
+        return base
+    if proto is None:
+        # Unknown STARTTLS port: without a known upgrade sequence we cannot
+        # safely negotiate. Report explicitly rather than silently wrapping a
+        # plaintext socket (which would look like "no TLS").
+        base["error"] = f"starttls_protocol_unknown_for_port:{port}"
         return base
 
     try:
@@ -99,10 +126,14 @@ def probe_starttls(domain: str, port: int, timeout: int = 10) -> dict:
         greeting = _recv_multiline(sock, timeout)
         logger.debug(f"{domain}:{port} greeting: {greeting[:80]!r}")
 
-        if port in (25, 587):
-            # SMTP EHLO
+        if proto == "smtp":
+            # SMTP/submission EHLO → STARTTLS (ports 25, 587, 2525)
             sock.sendall(b"EHLO pqcmonitor.local\r\n")
-            _recv_multiline(sock, timeout)
+            ehlo = _recv_multiline(sock, timeout)
+            if b"STARTTLS" not in ehlo.upper():
+                base["error"] = "smtp_starttls_not_offered"
+                sock.close()
+                return base
             sock.sendall(b"STARTTLS\r\n")
             resp = _recv_line(sock, timeout)
             if not resp.startswith(b"220"):
@@ -110,16 +141,16 @@ def probe_starttls(domain: str, port: int, timeout: int = 10) -> dict:
                 sock.close()
                 return base
 
-        elif port == 143:
-            # IMAP STARTTLS
+        elif proto == "imap":
+            # IMAP STARTTLS (tagged)
             sock.sendall(b"a001 STARTTLS\r\n")
-            resp = _recv_line(sock, timeout)
+            resp = _recv_multiline(sock, timeout, imap_tag=b"a001")
             if b"OK" not in resp.upper():
                 base["error"] = f"imap_starttls_rejected:{resp[:40]!r}"
                 sock.close()
                 return base
 
-        elif port == 110:
+        elif proto == "pop3":
             # POP3 STLS
             sock.sendall(b"CAPA\r\n")
             _recv_multiline(sock, timeout)

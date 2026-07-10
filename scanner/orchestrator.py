@@ -40,7 +40,7 @@ from data.database import Database
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PORTS     = [443, 8443, 465, 993, 636]
+DEFAULT_PORTS     = [443, 8443, 465, 993, 995, 636]
 STARTTLS_PORT_SET = set(STARTTLS_PORTS.keys())
 
 # T2-1: canonical service_type label per port number

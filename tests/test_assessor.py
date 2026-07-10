@@ -348,3 +348,53 @@ class TestGuidelineJSON(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestAllFailedScansAreNa(unittest.TestCase):
+    """A domain whose every scan failed must be na, not scored on PQC alone.
+
+    Regression: re-assessment replayed stored failed scans (connection
+    refused / timeout) and produced score=30 / level=weak because the PQC
+    penalty ran even though no TLS handshake ever succeeded.
+    """
+
+    def setUp(self):
+        import os
+        from scanner.crypto_assessor import CryptoAssessor
+        gd = os.path.join(os.path.dirname(__file__), "..", "guidelines")
+        self.assessor = CryptoAssessor(
+            ["nist_800_131a", "bsi_tr02102", "ccn_stic_221"], gd)
+
+    def test_all_failed_scans_is_na(self):
+        failed = [
+            {"domain": "x.com", "port": 443, "success": False,
+             "error": "connection_refused",
+             "timestamp": datetime.now(timezone.utc).isoformat(),
+             "certificate": {}},
+            {"domain": "x.com", "port": 25, "success": False,
+             "error": "timeout",
+             "timestamp": datetime.now(timezone.utc).isoformat(),
+             "certificate": {}},
+        ]
+        a = self.assessor.assess_domain("x.com", failed)
+        self.assertEqual(a.level, "na")
+        self.assertEqual(a.score, 0)
+        self.assertEqual(a.findings, [])
+
+    def test_one_success_still_scores(self):
+        mixed = [
+            {"domain": "x.com", "port": 25, "success": False,
+             "error": "timeout",
+             "timestamp": datetime.now(timezone.utc).isoformat(),
+             "certificate": {}},
+            {"domain": "x.com", "port": 443, "success": True,
+             "tls_version": "TLSv1.3",
+             "cipher_suite": "TLS_AES_256_GCM_SHA384", "cipher_bits": 256,
+             "timestamp": datetime.now(timezone.utc).isoformat(),
+             "certificate": {"key_type": "RSA", "key_size_bits": 2048,
+                             "signature_algorithm": "sha256WithRSAEncryption",
+                             "days_to_expiry": 200}},
+        ]
+        a = self.assessor.assess_domain("x.com", mixed)
+        self.assertNotEqual(a.level, "na")
+        self.assertEqual(a.services_assessed, 1)

@@ -9,6 +9,19 @@ This project uses [Semantic Versioning](https://semver.org/).
 ## [1.9.1] — 2026-07-09
 
 ### Fixed
+- **No-TLS domains scored "30 / weak" after re-assessment instead of "na"**:
+  `assess_domain()` only returned the `na` level when `scan_results` was
+  *empty*. A domain whose every stored scan *failed* (connection refused /
+  timeout on all ports — a host with no reachable TLS) skipped that guard,
+  fell through the per-service loop with zero services assessed, and was then
+  scored purely on the unconditional PQC penalty (`+30`, "No PQC detected"),
+  yielding score 30 / weak with a single PQC finding. Now, if no service
+  completes a TLS handshake, the domain is `na` (score 0, no findings) — the
+  same as having no scan data. This surfaced when re-assessing hosts that
+  were previously (correctly) "No TLS": `scripts/reassess_all.py` replayed
+  their stored failed scans through the assessor. The script now also skips
+  domains whose stored scans all failed, leaving their existing `na` row
+  untouched.
 - **MX records stored with priority prefix / non-FQDN** (e.g.
   `"5 SMTP.domain.com"`): MX rdata is `<priority> <exchange>`; the priority
   is a mail-routing preference, irrelevant as a scan target. The direct-DNS

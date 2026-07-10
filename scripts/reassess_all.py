@@ -224,6 +224,19 @@ _counts = {"ok": 0, "skipped": 0, "error": 0}
 def _score_only(domain: str):
     """Reassess a single domain from stored data. No network."""
     raw_scans = db.get_domain_scans(domain)          # newest-first, all runs
+
+    # If every stored scan for this domain failed (no successful TLS
+    # handshake on any port/run), there is nothing to re-assess — the domain
+    # has no reachable TLS. Skip it so we don't rewrite its assessment. The
+    # assessor treats this as na anyway, but skipping avoids creating a fresh
+    # na row and a redundant trend point.
+    if raw_scans and not any(
+        s.get("success") or s.get("source") == "shodan" for s in raw_scans
+    ):
+        _counts["skipped"] += 1
+        logger.info("– %s (no successful TLS scan on record — skipped)", domain)
+        return
+
     extra     = latest_extra(domain)
     chain     = extra.get("chain")
     cenum     = extra.get("cipher_enum")

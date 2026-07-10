@@ -144,6 +144,7 @@ class CryptoAssessor:
         findings = []
         scores = []
 
+        any_success = False
         for svc in scan_results:
             if not svc.get("success") and svc.get("source") != "shodan":
                 if svc.get("error"):
@@ -151,6 +152,7 @@ class CryptoAssessor:
                         f"Port {svc.get('port','?')}: {svc['error']}"
                     )
                 continue
+            any_success = True
 
             assessment.services_assessed += 1
 
@@ -188,6 +190,19 @@ class CryptoAssessor:
             chain_score, chain_penalty_findings = self._assess_chain(chain_analysis)
             scores.append(chain_score)
             findings.extend(chain_penalty_findings)
+
+        # No service completed a TLS handshake (all connections failed /
+        # refused / timed out). This is "no reachable TLS", identical to
+        # having no scan data at all — return na rather than scoring the
+        # domain purely on the PQC penalty (which would mislabel a host with
+        # no TLS as "weak / 30"). Matters especially for re-assessment, which
+        # replays stored failed scans through this method.
+        if not any_success:
+            assessment.errors.append("No reachable TLS service")
+            assessment.score = 0
+            assessment.level = LEVEL_NA
+            assessment.findings = []
+            return assessment
 
         # ── Cipher enumeration score adjustment ───────────────────
         if cipher_enum:

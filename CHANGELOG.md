@@ -19,9 +19,9 @@ This project uses [Semantic Versioning](https://semver.org/).
   completes a TLS handshake, the domain is `na` (score 0, no findings) — the
   same as having no scan data. This surfaced when re-assessing hosts that
   were previously (correctly) "No TLS": `scripts/reassess_all.py` replayed
-  their stored failed scans through the assessor. The script now also skips
-  domains whose stored scans all failed, leaving their existing `na` row
-  untouched.
+  their stored failed scans through the assessor. The script now writes a
+  fresh `na` assessment for such domains (so the newest row is always
+  correct, rather than leaving a stale row as the latest).
 - **MX records stored with priority prefix / non-FQDN** (e.g.
   `"5 SMTP.domain.com"`): MX rdata is `<priority> <exchange>`; the priority
   is a mail-routing preference, irrelevant as a scan target. The direct-DNS

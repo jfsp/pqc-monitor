@@ -218,7 +218,7 @@ logger.info("Created reassessment run_id=%s", new_run_id)
 # the loaded guideline dicts).
 assessor = CryptoAssessor(guideline_ids, guidelines_dir)
 
-_counts = {"ok": 0, "skipped": 0, "error": 0}
+_counts = {"ok": 0, "na": 0, "error": 0}
 
 
 def _score_only(domain: str):
@@ -226,16 +226,18 @@ def _score_only(domain: str):
     raw_scans = db.get_domain_scans(domain)          # newest-first, all runs
 
     # If every stored scan for this domain failed (no successful TLS
-    # handshake on any port/run), there is nothing to re-assess — the domain
-    # has no reachable TLS. Skip it so we don't rewrite its assessment. The
-    # assessor treats this as na anyway, but skipping avoids creating a fresh
-    # na row and a redundant trend point.
+    # handshake on any port/run), the host has no reachable TLS. Write a
+    # fresh na assessment so the newest row is correct — don't skip, or a
+    # stale (possibly wrong) row would remain the latest for this domain.
+    # assess_domain([]) yields exactly the canonical na result.
     if raw_scans and not any(
         s.get("success") or s.get("source") == "shodan" for s in raw_scans
     ):
-        _counts["skipped"] += 1
-        logger.info("– %s (no successful TLS scan on record — skipped)", domain)
-        return
+        na = assessor.assess_domain(domain, [])   # → score 0, level na, no findings
+        db.save_assessment(new_run_id, na.to_dict())
+        _counts["na"] += 1
+        logger.info("○ %s (no reachable TLS — recorded na)", domain)
+        return "na"
 
     extra     = latest_extra(domain)
     chain     = extra.get("chain")
@@ -334,10 +336,13 @@ def _process(domain: str):
     try:
         if args.rescan:
             _rescan(domain)
+            _counts["ok"] += 1
+            logger.info("✓ %s", domain)
         else:
-            _score_only(domain)
-        _counts["ok"] += 1
-        logger.info("✓ %s", domain)
+            status = _score_only(domain)   # "na" (already logged) or None
+            if status != "na":
+                _counts["ok"] += 1
+                logger.info("✓ %s", domain)
     except Exception as e:
         _counts["error"] += 1
         logger.warning("✗ %s — %s", domain, e)
@@ -361,6 +366,6 @@ except KeyboardInterrupt:
     sys.exit(130)
 
 elapsed = time.time() - start
-logger.info("Done in %.1fs — ok=%d error=%d | run_id=%s",
-            elapsed, _counts["ok"], _counts["error"], new_run_id)
+logger.info("Done in %.1fs — ok=%d na=%d error=%d | run_id=%s",
+            elapsed, _counts["ok"], _counts["na"], _counts["error"], new_run_id)
 logger.info("The dashboard now shows the reassessed results (newest per domain).")

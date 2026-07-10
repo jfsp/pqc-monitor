@@ -209,9 +209,10 @@ class TestCryptoAssessor(unittest.TestCase):
     # ─── No scan data ─────────────────────────────────────────────
 
     def test_empty_scan_list(self):
+        # Since v1.4.0 a domain with no TLS service is level="na"
         a = self.assessor.assess_domain("x.com", [])
         self.assertEqual(a.score, 0)
-        self.assertEqual(a.level, "critical")
+        self.assertEqual(a.level, "na")
 
     def test_failed_scan(self):
         a = self.assessor.assess_domain("x.com", [

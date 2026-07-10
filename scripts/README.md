@@ -11,6 +11,55 @@ They load `config/config.yaml` automatically. Override with `--config`.
 
 ---
 
+## reassess_all.py
+
+Reassess **every domain already in the database** so existing rows pick up
+the v1.9.0 fixes (full enumerated cipher set merged into `cipher_suites`;
+findings that name the specific offending suites).
+
+Two modes, very different resource profiles:
+
+| Mode | Network | CPU | When |
+|------|---------|-----|------|
+| **score-only** (default) | none | light | Fixes both v1.9.0 bugs on existing data — the `cipher_enum` blobs are already on disk. **Start here.** |
+| `--rescan` | dozens of TCP conns/domain | heavy (~5–15 s/domain) | Only for domains whose `cipher_enum` blob is genuinely missing. |
+
+It writes one new `scan_run` tagged `reassess-all (<mode>)`; old rows are
+kept (history preserved), the dashboard shows the newest per domain.
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `--config PATH` | config.yaml (db path, guidelines, SSL Labs email) |
+| `--db PATH` | override the database path directly |
+| `--rescan` | full network rescan (heavy); default is score-only |
+| `--only-missing` | only domains lacking a `cipher_enum` blob |
+| `--workers N` | parallelism (default 2; capped at 4 with `--rescan`) |
+| `--sleep S` | delay between domains (default 0 score-only, 2.0 rescan) |
+| `--limit N` | process at most N domains (staged rollout / smoke test) |
+| `--dry-run` | report only; write nothing |
+
+### Recommended sequence
+
+```bash
+cd /opt/pqc-monitor
+# 1. Preview
+python3 scripts/reassess_all.py --dry-run
+# 2. Fix existing data — no traffic, no API calls:
+python3 scripts/reassess_all.py
+# 3. (Optional) fill genuinely-missing cipher data, gently:
+python3 scripts/reassess_all.py --rescan --only-missing --workers 2 --sleep 3
+```
+
+On the production Google Cloud VM, prefer the defaults (2 workers,
+score-only). For a large `--rescan`, stage with `--limit 20` first and keep
+`--sleep` ≥ 2 to spread outbound connections. SSL Labs is **not** triggered
+by this script even in `--rescan` mode (it only reads SSL Labs cache, same
+as a normal scan) — fresh SSL Labs assessments remain on-demand from the UI.
+
+---
+
 ## bulk_org_assign.py
 
 Bulk-assign domains to an organisation by TLD pattern.

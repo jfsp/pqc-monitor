@@ -1,8 +1,8 @@
 # PQC-Monitor — Developer Handover Document
 
-**Version:** 1.8.0
-**Date:** 2026-06-27
-**Status:** Active development — bugs fixed, DNS enumeration reworked
+**Version:** 1.9.0
+**Date:** 2026-07-09
+**Status:** Active development — full cipher detail + SSL Labs integration
 **Purpose:** Context transfer for continuing development in a new session
 **Repository:** https://github.com/jfsp/pqc-monitor
 
@@ -90,6 +90,7 @@ sudo scripts/deploy.sh --from abc1234
 | 1.6.3 | Fix: deploy.sh restart guard broke on non-root systemctl is-active |
 | 1.7.0 | Group Report: By Country; SVG charts; sortable table; bulk_assign.py |
 | 1.8.0 | Fix: community report scoping; DNS enum quota detection + passive fallback; --skip-scanned; test scripts |
+| 1.9.0 | Full cipher detail in UI (drill-down view); findings name specific ciphers; CAMELLIA/SEED probes; SSL Labs API v4 integration (T3-3, display-only) |
 
 ### 2.8 — v1.8.0 detail
 
@@ -185,6 +186,82 @@ needed there.
 **Files changed:** `app_routes.py`, `data/database.py`,
 `scanner/dns_enumerator.py`, `pqc_monitor.py`, `scripts/shodan-test.sh` (new),
 `scripts/dnsdumpster-test.sh` (new).
+
+---
+
+### 2.9 — v1.9.0 detail
+
+**Full TLS cipher detail + SSL Labs integration (T3-3)**
+
+#### Fix 1 — Domain detail did not show the full accepted cipher set
+
+Root cause: the full enumeration lived in `domain_extra['cipher_enum']` but
+`assessments.cipher_suites` only stored the single passively-negotiated suite
+per service, `/api/domain/<domain>` never returned `domain_extra`, and the
+modal truncated to 2 ciphers.
+
+- `scanner/crypto_assessor.py`: merges all enumerated suites (IANA) into
+  `cipher_suites_found` / `tls_versions_found`; passive cipher names are
+  normalised OpenSSL→IANA before `_assess_cipher()` (this also fixed a latent
+  bug: guideline cipher lists are IANA, so passive names never matched and
+  always fell through to the generic 60 score).
+- `data/database.py`: `get_latest_domain_extra(domain, data_types)` (latest
+  blob per type across runs, `_recorded_at`/`_run_id` provenance) and
+  `get_latest_run_id_for_domain(domain)`.
+- `app_routes.py` + legacy `dashboard/app.py` endpoint: domain detail now
+  returns `"extra": {cipher_enum, chain, cdn, ssllabs}`.
+- `dashboard/app.py` UI: modal shows cipher counts by security level, an
+  SSL Labs grade badge with link, and a **Full TLS Details →** button opening
+  the new `view-domain-full` drill-down (sibling view in `.main`, depth
+  verified with the §9.2 checker; no nav tab — reached from the modal only).
+  The full view renders every accepted suite (IANA name, protocol, bits,
+  category, colour-coded assessment), chain summary, and the SSL Labs panel.
+
+#### Fix 2 — CIPHER_ENUM findings now name the ciphers to remove
+
+`cipher_enum_findings()` appends the sorted IANA names to every finding
+message (truncated at 20 with "+N more") and adds a `ciphers` list field.
+Note: `extra_findings` are computed at scan time and persisted in
+`findings_json` — existing assessments keep their old messages until the
+domain is re-scanned (`reassess` reuses stored extras but findings are
+regenerated from the stored `cipher_enum` blob, so a reassess run also
+picks up the named lists).
+
+#### Added — CAMELLIA/SEED probes
+
+7 new entries in `TLS12_CIPHER_GROUPS` + `_OPENSSL_TO_IANA`, all
+`deprecated` (non-NIST-approved): ECDHE/DHE/RSA CAMELLIA CBC variants and
+SEED-SHA. Closes the visible gap vs SSL Labs on European servers.
+
+#### Added — SSL Labs API v4 (`scanner/ssllabs_client.py`)
+
+- **Design**: cache-only during scan runs (`fromCache=on`, maxAge 168h) —
+  fresh SSL Labs assessments take 60+ s and are concurrency-limited, so they
+  are only triggered on demand from the detail view (`startNew=on`,
+  `publish=off`) and polled by the UI (5 s → 10 s backoff, 40 attempts).
+- **Grade is display-only** — it does NOT feed the PQC score (decided
+  2026-07-09).
+- **Registration**: v4 requires a one-time registration with an
+  organisational email (free-mail providers rejected). Helper:
+  `python3 -c "from scanner.ssllabs_client import register_email; print(register_email('First','Last','Org','you@org.example'))"`.
+  Config `ssllabs.email` (or env `PQC_SSLLABS_EMAIL`); empty = disabled.
+  `app_factory.py` exposes it as `app.config["SSLLABS_EMAIL"]`.
+- **Endpoints** (`app_routes.py`): `GET /api/ssllabs/<domain>` (auth +
+  domain-scoping; persists summary to `domain_extra` when READY) and
+  `POST /api/ssllabs/<domain>/refresh` (requires `scan.run` — it causes
+  external scanning by Qualys against the target; audited as
+  `ssllabs.refresh`).
+- **Storage**: `domain_extra['ssllabs']` = {host, status, grade (worst
+  across endpoints), grades, endpoints[], engine_version, criteria_version,
+  test_time, retrieved_at, report_url}.
+- **Rate limits**: 429 (client cool-off) and 529 (service overload) are
+  surfaced as `rate_limited`; scan-time lookups fail soft.
+
+**Files changed:** `scanner/cipher_enum.py`, `scanner/crypto_assessor.py`,
+`scanner/orchestrator.py`, `scanner/ssllabs_client.py` (new),
+`data/database.py`, `app_routes.py`, `app_factory.py`, `dashboard/app.py`,
+`pqc_monitor.py`, `config/config.yaml.example`,
+`tests/test_ssllabs_and_cipher_detail.py` (new), `tests/test_assessor.py`, `scripts/reassess_all.py` (new).
 
 ---
 
@@ -635,7 +712,7 @@ synced. New Python modules must be added to `WEB_TRIGGERS` or `SCHEDULER_TRIGGER
 ### Tier 3 — New modules, moderate complexity
 
 - **[T3-2]** Geographic map view (choropleth + dot; requires T2-3; Leaflet.js)
-- **[T3-3]** SSL Labs integration (async polling; results in domain_extra)
+- ~~**[T3-3]** SSL Labs integration~~ — **delivered in v1.9.0** (cache-only during scans + on-demand fresh; results in domain_extra; display-only grade)
 - **[T3-4]** Sector benchmarking (AVG score by sector+region across all runs)
 
 ### Tier 4 — Significant architectural changes

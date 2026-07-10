@@ -6,6 +6,61 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.9.0] — 2026-07-09
+
+### Fixed
+- **Domain detail showed only the passively-negotiated cipher suite**: the
+  full active cipher enumeration (stored in `domain_extra['cipher_enum']`)
+  never reached the UI, and the modal truncated `cipher_suites` to 2 entries.
+  The assessor now merges the complete enumerated suite set (IANA names) into
+  `assessments.cipher_suites`, `/api/domain/<domain>` returns the latest
+  enrichment blobs (`cipher_enum`, `chain`, `cdn`, `ssllabs`), and the modal
+  shows a per-security-level summary with a **Full TLS Details** drill-down
+  view listing every accepted suite (protocol, bits, category, assessment).
+- **CIPHER_ENUM findings did not name the offending suites**: every
+  cipher-enumeration finding (NULL/EXPORT/ANON/RC4/3DES/no-FS/deprecated) now
+  lists the specific IANA cipher suite names to remove, both in the message
+  and in a machine-readable `ciphers` field.
+- **Passive cipher names never matched guideline rules**: the passively
+  negotiated cipher (OpenSSL notation, e.g. `ECDHE-RSA-AES128-GCM-SHA256`)
+  is now normalised to IANA notation before `_assess_cipher()`, so guideline
+  `recommended`/`deprecated` lists (which use IANA names) match correctly.
+- **`tests/test_assessor.py`**: `test_empty_scan_list` still expected
+  `level="critical"` for a no-TLS domain — stale since the v1.4.0 `na` change.
+
+### Added
+- **CAMELLIA and SEED cipher probes** (`scanner/cipher_enum.py`): 7 new
+  probe entries + IANA mappings, closing the coverage gap vs SSL Labs on
+  European servers (e.g. `TLS_RSA_WITH_CAMELLIA_128_CBC_SHA`).
+- **SSL Labs integration (T3-3)** — `scanner/ssllabs_client.py`:
+  - Qualys SSL Labs **API v4** client (one-time registration required;
+    registered organisational email sent as auth header; helper
+    `register_email()` included). v3 was deprecated 2023-12-31.
+  - **Cache-only during scan runs** (`fromCache=on`, never triggers external
+    assessments inline); summary stored in `domain_extra['ssllabs']`.
+  - **On-demand fresh assessment** from the Full TLS Details view
+    (`startNew=on`, `publish=off`), polled by the UI; restricted to users
+    with `scan.run` permission. New endpoints:
+    `GET /app/api/ssllabs/<domain>` (poll + persist when READY),
+    `POST /app/api/ssllabs/<domain>/refresh`.
+  - Grade + link to the public ssllabs.com report shown in the domain modal
+    and detail view. **Display only — the grade does not affect the PQC
+    score** (by design decision).
+  - Config: `ssllabs.enabled` / `ssllabs.email` (or `PQC_SSLLABS_EMAIL`).
+- **`data/database.py`**: `get_latest_domain_extra(domain, data_types)` —
+  most recent enrichment blob per type across all runs (with `_recorded_at` /
+  `_run_id` provenance); `get_latest_run_id_for_domain(domain)`.
+- **Tests**: `tests/test_ssllabs_and_cipher_detail.py` (7 tests).
+- **`scripts/reassess_all.py`**: reassess every existing domain to backfill
+  the two fixes above. Score-only by default (no traffic/CPU-light —
+  reuses stored `cipher_enum`/chain/CDN blobs and regenerates the named
+  findings); `--rescan` for a resource-guarded network rescan
+  (`--workers`/`--sleep`/`--limit`/`--only-missing`/`--dry-run`).
+- **`scanner/crypto_assessor.py`**: `Finding` gains an optional machine-
+  readable `ciphers` list, carried through from cipher-enum findings.
+
+---
+
 ## [1.8.0] — 2026-06-27
 
 ### Fixed

@@ -60,6 +60,38 @@ as a normal scan) — fresh SSL Labs assessments remain on-demand from the UI.
 
 ---
 
+## fix_mx_entries.py
+
+Repair malformed **MX host entries** in stored DNS enumeration data. Older
+scans saved MX values verbatim — e.g. `5 SMTP.domain.com` — which is not a
+hostname (it carries the MX *priority*, irrelevant as a TLS scan target) and
+often has the wrong case or a trailing dot.
+
+Repairs, in place, inside every `dns_enum` blob in `domain_extra`:
+`mx_hosts[]`, `subdomains[]`, and `tls_candidates[].host`. Strips the
+priority to a bare FQDN, lower-cases, drops unusable entries (a lone `5`,
+the `.` from a null-MX `0 .`), dedupes, and only rewrites a blob when
+something changed. **No network, idempotent.**
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `--config PATH` | config.yaml (to locate db_path) |
+| `--db PATH` | override the database path directly |
+| `--dry-run` | report changes without writing |
+
+```bash
+cd /opt/pqc-monitor
+python3 scripts/fix_mx_entries.py --dry-run     # preview
+python3 scripts/fix_mx_entries.py               # apply
+```
+
+Run this once after upgrading to 1.9.1. New scans store MX hosts correctly,
+so it does not need to be repeated.
+
+---
+
 ## bulk_org_assign.py
 
 Bulk-assign domains to an organisation by TLD pattern.

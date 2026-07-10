@@ -1,8 +1,8 @@
 # PQC-Monitor — Developer Handover Document
 
-**Version:** 1.9.0
+**Version:** 1.9.1
 **Date:** 2026-07-09
-**Status:** Active development — full cipher detail + SSL Labs integration
+**Status:** Active development — full cipher detail + SSL Labs integration; MX + SMTP/STARTTLS fixes
 **Purpose:** Context transfer for continuing development in a new session
 **Repository:** https://github.com/jfsp/pqc-monitor
 
@@ -91,6 +91,7 @@ sudo scripts/deploy.sh --from abc1234
 | 1.7.0 | Group Report: By Country; SVG charts; sortable table; bulk_assign.py |
 | 1.8.0 | Fix: community report scoping; DNS enum quota detection + passive fallback; --skip-scanned; test scripts |
 | 1.9.0 | Full cipher detail in UI (drill-down view); findings name specific ciphers; CAMELLIA/SEED probes; SSL Labs API v4 integration (T3-3, display-only) |
+| 1.9.1 | Fix: MX priority/non-FQDN normalisation (+ DB repair script); SMTP/STARTTLS reported no-TLS on 465/587/2525 (protocol-based dispatch, added 2525) |
 
 ### 2.8 — v1.8.0 detail
 
@@ -262,6 +263,65 @@ SEED-SHA. Closes the visible gap vs SSL Labs on European servers.
 `data/database.py`, `app_routes.py`, `app_factory.py`, `dashboard/app.py`,
 `pqc_monitor.py`, `config/config.yaml.example`,
 `tests/test_ssllabs_and_cipher_detail.py` (new), `tests/test_assessor.py`, `scripts/reassess_all.py` (new).
+
+---
+
+### 2.10 — v1.9.1 detail
+
+**Bug fix 1 — MX records stored as "5 SMTP.domain.com"**
+
+MX rdata is `<priority> <exchange>`. The direct-DNS MX path
+(`_resolve(domain,"MX")` → `parts[-1]`) split it, but the DNSDumpster
+harvest (`record.get("host")`) and passive-DNS paths let the raw
+priority-prefixed string through into `mx_hosts`, `subdomains` and
+`tls_candidates[].host`.
+
+- `scanner/dns_enumerator.py`: new `_normalise_mx_host(value)` — strips a
+  leading numeric priority, lower-cases, removes the trailing dot, and
+  rejects anything that is not a hostname (a lone `5`; the `.` from a
+  null-MX `0 .`; hosts without a dot). Applied in the direct MX loop, the
+  DNSDumpster `mx` section, and as a final guard in `_build_candidates()`
+  (which also skips any candidate whose host still isn't a usable FQDN).
+- `scripts/fix_mx_entries.py` (new): repairs existing `dns_enum` blobs
+  in `domain_extra` in place. Cleans `mx_hosts`, `subdomains` and
+  `tls_candidates[].host`, dedupes, drops unusable entries, and only
+  rewrites a blob when something changed. No network, idempotent,
+  `--dry-run`/`--config`/`--db`. Self-contained normaliser (no dnspython
+  import) with a test asserting it agrees with the scanner's.
+
+**Bug fix 2 — SMTP with TLS reported as "no TLS"; 465/587/2525 not scanned**
+
+Root cause: `probe_starttls()` selected the EHLO/STARTTLS upgrade with a
+hardcoded `if port in (25, 587)`. Any other SMTP port fell through the
+`if/elif` chain and attempted a *direct* `ctx.wrap_socket()` on a still-
+plaintext socket → handshake failure → recorded as no TLS. Port 2525 was
+in neither `TLS_PORTS` nor `STARTTLS_PORTS`, so it was never even probed.
+
+- `scanner/starttls_probe.py`: dispatch by **protocol family**
+  (`_PORT_PROTOCOL[port]` → smtp/imap/pop3/ldap), not port number, so
+  25/587/2525 all take the SMTP path. Unknown ports now return an explicit
+  `starttls_protocol_unknown_for_port:<n>` error instead of wrapping a
+  plaintext socket. Greeting/EHLO parser hardened: dropped the IMAP
+  `endswith("OK")` heuristic (misfired on SMTP banners), added an
+  `if b"STARTTLS" not in ehlo` guard, and IMAP now reads a tagged
+  multiline response.
+- `scanner/service_discovery.py`: added 2525 (`submission-alt`) to
+  `STARTTLS_PORTS` + new `STARTTLS_PROTOCOL` map; deduped probe ports so
+  callers that already include STARTTLS ports don't double-probe. Implicit-
+  TLS ports (465/993/995) stay in `TLS_PORTS` and are wrapped directly.
+- `scanner/orchestrator.py`: `DEFAULT_PORTS` now includes 995;
+  `_build_candidates()` MX ports are 25/587/465/2525.
+- `pqc_monitor.py` + `config/config.yaml.example`: `scanning.use_starttls`
+  is now actually read (was always the hardcoded default `True`); mail
+  ports documented.
+
+Verified with a mock STARTTLS server: 2525 and 587 both complete the
+upgrade and report TLS 1.3.
+
+**Files changed:** `scanner/dns_enumerator.py`, `scanner/starttls_probe.py`,
+`scanner/service_discovery.py`, `scanner/orchestrator.py`, `pqc_monitor.py`,
+`config/config.yaml.example`, `scripts/fix_mx_entries.py` (new),
+`tests/test_mx_and_smtp.py` (new).
 
 ---
 

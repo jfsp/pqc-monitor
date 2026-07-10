@@ -6,6 +6,48 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.9.1] — 2026-07-09
+
+### Fixed
+- **MX records stored with priority prefix / non-FQDN** (e.g.
+  `"5 SMTP.domain.com"`): MX rdata is `<priority> <exchange>`; the priority
+  is a mail-routing preference, irrelevant as a scan target. The direct-DNS
+  path already split it, but the DNSDumpster and passive-DNS paths let the
+  raw string through into `mx_hosts`, `subdomains`, and
+  `tls_candidates[].host`. Added `_normalise_mx_host()` (strips priority,
+  lower-cases, removes trailing dot, rejects non-hostnames such as a lone
+  `5` or the `.` from a null-MX `0 .`) and applied it at every MX ingestion
+  point plus a final safety net in `_build_candidates()`.
+- **SMTP/STARTTLS servers reported as "no TLS"; 465/587/2525 not scanned**:
+  `probe_starttls()` hardcoded `if port in (25, 587)` for the EHLO/STARTTLS
+  upgrade, so any other SMTP port fell through and attempted a *direct* TLS
+  wrap on a plaintext socket — the handshake failed and the service was
+  recorded as having no TLS. Port **2525** was in no port map at all.
+  - STARTTLS handshake now dispatches by **protocol family** (smtp/imap/pop3),
+    not port number, so alternative ports work identically.
+  - Added **2525** to `STARTTLS_PORTS`/`STARTTLS_PROTOCOL`; MX scan candidates
+    now include 25/587/465/2525; added 995 (POP3S) to the default probe set.
+  - Unknown STARTTLS ports now fail with an explicit
+    `starttls_protocol_unknown_for_port:<n>` error instead of silently
+    wrapping a plaintext socket (which looked like "no TLS").
+  - Hardened the SMTP greeting/EHLO parser: removed the IMAP
+    `endswith("OK")` heuristic that could prematurely terminate an SMTP
+    banner, and added an explicit check that the server advertises STARTTLS
+    before issuing it.
+  - `scanning.use_starttls` is now actually read from config (was always
+    defaulting to the hardcoded `True`).
+
+### Added
+- **`scripts/fix_mx_entries.py`**: repairs malformed MX host entries in
+  existing `dns_enum` blobs in `domain_extra` (`mx_hosts`, `subdomains`,
+  `tls_candidates[].host`). No network; idempotent; `--dry-run` / `--config`
+  / `--db`. Uses the same normalisation as the scanner.
+- **Tests**: `tests/test_mx_and_smtp.py` (12 tests) — MX normalisation,
+  candidate building, STARTTLS port coverage, protocol dispatch, and the
+  repair-script cleaning logic.
+
+---
+
 ## [1.9.0] — 2026-07-09
 
 ### Fixed

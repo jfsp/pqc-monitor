@@ -112,6 +112,9 @@ def create_app(config: dict = None) -> Flask:
         "use_wordlist":        cfg.get("dns_use_wordlist", True),
         "use_ct":              cfg.get("dns_use_ct", True),
     }
+    app.config["SSLLABS_EMAIL"] = (
+        cfg.get("ssllabs_email", "") if cfg.get("ssllabs_enabled", True) else ""
+    )
 
     # ── Blueprints ────────────────────────────────────────────────────────────
     app.register_blueprint(auth_bp)

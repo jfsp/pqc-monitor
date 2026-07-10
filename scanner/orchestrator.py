@@ -34,6 +34,7 @@ from scanner.shodan_client import ShodanClient
 from scanner.crypto_assessor import CryptoAssessor
 from scanner.chain_validator import analyse_chain, chain_findings
 from scanner.cipher_enum import enumerate_ciphers, cipher_enum_findings
+from scanner.ssllabs_client import SSLLabsClient
 from scanner.cdn_detector import detect_cdn, cdn_findings
 from data.database import Database
 
@@ -84,6 +85,8 @@ class ScanOrchestrator:
 
         self.db = Database(cfg.get("db_path", "data/pqc_monitor.db"))
         self.shodan = ShodanClient(cfg.get("shodan_api_key", ""))
+        self.ssllabs_enabled = cfg.get("ssllabs_enabled", True)
+        self.ssllabs = SSLLabsClient(cfg.get("ssllabs_email", ""))
 
         guideline_ids  = cfg.get("guidelines",
                                   ["nist_800_131a", "bsi_tr02102", "ccn_stic_221"])
@@ -260,6 +263,23 @@ class ScanOrchestrator:
                 )
             except Exception as e:
                 logger.debug(f"Cipher enum failed for {domain}: {e}")
+
+        # ── 4b. SSL Labs cached report (display only — no scoring) ─
+        # Cache-only lookup (fromCache=on): never triggers a new SSL Labs
+        # assessment during a scan run. Fresh assessments are on-demand
+        # from the domain detail view.
+        if self.ssllabs_enabled and self.ssllabs.available and results:
+            try:
+                ssllabs_summary = self.ssllabs.get_cached(domain)
+                if ssllabs_summary:
+                    self.db.save_domain_extra(run_id, domain, "ssllabs",
+                                               ssllabs_summary)
+                    logger.debug(
+                        f"{domain} ssllabs: grade={ssllabs_summary.get('grade')} "
+                        f"(cached {ssllabs_summary.get('test_time')})"
+                    )
+            except Exception as e:
+                logger.debug(f"SSL Labs lookup failed for {domain}: {e}")
 
         # ── 5. CDN detection ──────────────────────────────────────
         cdn_result = None

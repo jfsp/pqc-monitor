@@ -78,6 +78,12 @@ def load_config(config_path: str = None) -> dict:
         ),
         "dns_use_wordlist": raw.get("dns_enumeration", {}).get("use_wordlist", True),
         "dns_use_ct":       raw.get("dns_enumeration", {}).get("use_ct", True),
+        # SSL Labs API v4 (requires one-time registration; email is the auth header)
+        "ssllabs_email":   os.environ.get(
+            "PQC_SSLLABS_EMAIL",
+            raw.get("ssllabs", {}).get("email", "")
+        ),
+        "ssllabs_enabled": raw.get("ssllabs", {}).get("enabled", True),
     }
 
 

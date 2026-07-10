@@ -48,6 +48,19 @@ dns_enumeration:
   use_wordlist: true          # built-in 120-prefix brute-force
   use_ct: true                # crt.sh Certificate Transparency harvest
 
+ssllabs:
+  # Qualys SSL Labs API v4 integration (grade shown in domain detail;
+  # display only — does not affect the PQC score).
+  # Requires a ONE-TIME registration with an organisational email
+  # (Gmail/Yahoo/Hotmail are rejected by Qualys):
+  #   python3 -c "from scanner.ssllabs_client import register_email; \
+  #               print(register_email('First','Last','Org','you@org.example'))"
+  # The registered email is sent as the auth header on every API call.
+  # Can also be set via the PQC_SSLLABS_EMAIL environment variable.
+  # Leave email blank to disable the integration.
+  enabled: true
+  email: ""
+
 guidelines:
   active:
     - nist_800_131a

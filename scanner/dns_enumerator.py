@@ -168,6 +168,38 @@ class DnsEnumerationResult:
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
+def _normalise_mx_host(value: str) -> str:
+    """
+    Normalise an MX value to a bare hostname (FQDN), dropping the priority.
+
+    MX rdata is "<priority> <exchange>" e.g. "5 smtp.example.com." — the
+    priority is a mail-routing preference and is meaningless as a scan target.
+    Some sources (DNSDumpster, zone dumps) hand back the whole "5 SMTP.x.com"
+    string in a single field; others include a trailing dot. This collapses
+    all of those to "smtp.example.com".
+
+    Returns "" if the value doesn't contain a plausible hostname.
+    """
+    if not value:
+        return ""
+    token = value.strip()
+    parts = token.split()
+    # "<priority> <host>" → take the host; a lone numeric priority yields nothing
+    if len(parts) >= 2 and parts[0].isdigit():
+        token = parts[-1]
+    elif len(parts) == 1 and parts[0].isdigit():
+        return ""
+    else:
+        token = parts[-1] if parts else token
+    host = token.rstrip(".").lower()
+    # Reject anything that isn't a hostname (no dot, or stray characters).
+    if "." not in host or " " in host:
+        return ""
+    if not all(c.isalnum() or c in "-._" for c in host):
+        return ""
+    return host
+
+
 def _resolve(domain: str, rtype: str, timeout: float = 5.0) -> list[str]:
     """
     Query *domain* for records of *rtype*.  Returns a list of string values.
@@ -399,6 +431,10 @@ def _dnsdumpster_api(
         for section in ("a", "aaaa", "cname", "mx", "ns"):
             for record in data.get(section, []):
                 host = record.get("host", "").lower().strip().rstrip(".")
+                # MX host fields can arrive as "5 smtp.example.com" — strip
+                # any leading priority to a bare FQDN.
+                if section == "mx":
+                    host = _normalise_mx_host(host) or host
                 if host and (host == domain or host.endswith(f".{domain}")):
                     if host not in fqdns:
                         fqdns.add(host)
@@ -577,10 +613,13 @@ def _build_candidates(
         for port in _DEFAULT_PROBE_PORTS:
             add(sub, port, "subdomain")
 
-    # MX hosts → SMTP-specific ports only
+    # MX hosts → SMTP-specific ports only (implicit 465 + STARTTLS 25/587/2525)
     for mx in mx_hosts:
-        for port in [25, 587, 465]:
-            add(mx, port, "mx_record")
+        mx_host = _normalise_mx_host(mx) or mx.rstrip(".").lower()
+        if "." not in mx_host or " " in mx_host:
+            continue  # skip anything that isn't a usable FQDN
+        for port in [25, 587, 465, 2525]:
+            add(mx_host, port, "mx_record")
 
     return candidates
 
@@ -639,10 +678,10 @@ def enumerate_domain(
 
     # ── MX ────────────────────────────────────────────────────────
     mx_raw = _resolve(domain, "MX", timeout)
-    # MX records look like "10 mail.example.com." — extract host
+    # MX rdata is "<priority> <exchange>"; keep only the hostname (the
+    # priority is a routing preference, irrelevant as a scan target).
     for rec in mx_raw:
-        parts = rec.split()
-        host = (parts[-1] if parts else rec).rstrip(".")
+        host = _normalise_mx_host(rec)
         if host and host not in result.mx_hosts:
             result.mx_hosts.append(host)
             all_subs.add(host)

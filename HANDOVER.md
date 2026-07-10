@@ -199,7 +199,7 @@ needed there.
 Root cause: the full enumeration lived in `domain_extra['cipher_enum']` but
 `assessments.cipher_suites` only stored the single passively-negotiated suite
 per service, `/api/domain/<domain>` never returned `domain_extra`, and the
-modal truncated to 2 ciphers.
+modal truncated to 2 ciphers which meant it never reached the dashboard.
 
 - `scanner/crypto_assessor.py`: merges all enumerated suites (IANA) into
   `cipher_suites_found` / `tls_versions_found`; passive cipher names are
@@ -217,6 +217,22 @@ modal truncated to 2 ciphers.
   verified with the §9.2 checker; no nav tab — reached from the modal only).
   The full view renders every accepted suite (IANA name, protocol, bits,
   category, colour-coded assessment), chain summary, and the SSL Labs panel.
+
+  Now: the assessor merges the full enumerated suite set (IANA names) into `assessments.cipher_suites`; `/api/domain/<domain>` returns the latest `cipher_enum`/`chain`/`cdn`/ `ssllabs` blobs; the modal shows a per-security-level summary with a **Full TLS Details** drill-down view (`view-domain-full`) listing every accepted suite (protocol, bits, category, colour-coded assessment).
+
+- **CAMELLIA / SEED probes** added to `cipher_enum.py` (coverage gap vs SSL
+  Labs on European servers).
+- **SSL Labs API v4 integration** (`scanner/ssllabs_client.py`): cache-only
+  during scan runs (`fromCache=on`, never triggers external assessments
+  inline); on-demand fresh assessment from the detail view (`startNew=on`,
+  `publish=off`, `scan.run` permission), polled by the UI. Grade + report
+  link shown in the modal/detail. **Display only — does not affect the PQC
+  score** (explicit decision). Requires one-time `register_email()` with an
+  organisational email; config `ssllabs.email` or `PQC_SSLLABS_EMAIL`.
+- **`scripts/reassess_all.py`**: reassess every existing domain. Score-only
+  by default (no traffic/CPU-light, reuses stored blobs, regenerates named
+  findings); `--rescan` for a resource-guarded network rescan
+  (`--workers`/`--sleep`/`--limit`/`--only-missing`/`--dry-run`).
 
 #### Fix 2 — CIPHER_ENUM findings now name the ciphers to remove
 
@@ -291,8 +307,8 @@ priority-prefixed string through into `mx_hosts`, `subdomains` and
 
   UPDATE (post-1.9.1): on the production DB the malformed values were NOT in
   `dns_enum` blobs (that DB had 0 such blobs) but in the `domain`
-  PRIMARY-KEY column of real rows — `5 smtp.bde.es`,
-  `20 mail01.bancaditalia.it`, even `primary DNS domain`. The script now
+  PRIMARY-KEY column of real rows — `5 smtp.domain.org`,
+  `20 mail01.otherdomain.org`, even `primary DNS domain`. The script now
   ALSO repairs the `domain` column across all 7 domain-keyed tables
   (raw_scans, assessments, ct_queries, ct_certificates, domain_extra,
   roadmaps, domain_organisations): RENAME → normalised FQDN; MERGE (drop the
@@ -333,6 +349,55 @@ upgrade and report TLS 1.3.
 `scanner/service_discovery.py`, `scanner/orchestrator.py`, `pqc_monitor.py`,
 `config/config.yaml.example`, `scripts/fix_mx_entries.py` (new),
 `tests/test_mx_and_smtp.py` (new).
+
+
+### 2. Production actions taken this session (on the live DB)
+
+1. Ran `fix_mx_entries.py` — repaired malformed `domain` keys
+   (`5 smtp.bde.es` → `smtp.bde.es`, `20 mail01.bancaditalia.it` → …,
+   `primary DNS domain` deleted).
+2. Discovered a batch of no-TLS hosts (`a-bancox2.bde.es`, `x-www.bde.es`,
+   several `escb.eu`) showing **"30 weak"**. Root cause: a reassess run
+   (`06b6e9c1`, 2026-07-10 08:53) executed with the **pre-fix assessor**.
+   Confirmed via `services_assessed=0` on those rows.
+3. Deleted the erroneous rows manually:
+   `DELETE FROM assessments WHERE services_assessed=0 AND level!='na';`
+   After the delete, the hosts correctly show **No TLS** again (the older
+   `na` row became the newest).
+
+The fixed assessor + reassess prevent recurrence: a re-run now writes a
+correct `na` that becomes the newest row.
+
+---
+
+### 3. Deployment checklist (next session / when applying)
+
+- Deliver as a zip (per workflow — never server-side patch scripts).
+- After deploy, confirm the assessor fix is actually present:
+  `grep -n "No reachable TLS service" /opt/pqc-monitor/scanner/crypto_assessor.py`
+  (the deployed copy has diverged from the repo before — always verify).
+- SSL Labs: one-time `register_email()`, then set `ssllabs.email` in
+  `/etc/…/config.yaml` (empty = disabled; everything else still works).
+- MX repair: `python3 scripts/fix_mx_entries.py --dry-run` against
+  `/var/lib/pqc-monitor/pqc_monitor.db`, review, then apply. One-time.
+- Reassess to propagate fixes to what's displayed (dashboard shows
+  newest-per-domain): `python3 scripts/reassess_all.py` (score-only, no
+  traffic). Use `--rescan --only-missing` only if `domain_extra` shows
+  domains genuinely lacking cipher data. Mind the e2-micro: keep workers
+  low (default 2), score-only unless a rescan is required.
+
+### 5. Open threads / suggestions (not done)
+
+- **Repo→/opt sync script** (requested earlier, separate from this session):
+  full-tree sync excluding `.git`, overwrite mode (only new/changed files)
+  + audit mode, never overwrite local `/opt` config unless `--force`.
+- **`--service smtp` filter** for a targeted rescan (re-probe only
+  mail-bearing hosts to pick up the STARTTLS fix without a full rescan).
+- **Group-report view** (`view-group-report`) is referenced but absent from
+  the rendered shell — pre-existing, not caused by this session's changes.
+- General reminder: the dashboard shows **newest-per-domain**, so any
+  assessor change only reaches the display after a reassess. A wrong newest
+  row (from buggy logic) persists until overwritten or deleted.
 
 ---
 

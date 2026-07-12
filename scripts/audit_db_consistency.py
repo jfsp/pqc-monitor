@@ -485,18 +485,54 @@ def check_geo(conn, st, rep: Report, geo: dict[str, dict]) -> None:
 
 def check_quality(conn, st, rep: Report) -> None:
     sec = "F. Data quality"
-    # 1.9.1 invariant
+    # 1.9.1 invariant: services_assessed=0 with a real level.
+    # Distinguish the SYSTEMIC case (a write path dropping the column — every
+    # scored row is 0, as with the save_assessment() bug fixed 2026-07-12)
+    # from genuine per-row anomalies.
+    (scored,) = conn.execute(
+        "SELECT COUNT(*) FROM assessments WHERE level!='na'").fetchone()
     rows = conn.execute(
         "SELECT id, domain, level, score FROM assessments "
         "WHERE services_assessed=0 AND level!='na'").fetchall()
-    for r in rows:
+    if scored and len(rows) == scored:
         rep.add("ERROR", sec,
-                f"assessments[{r['id']}] {r['domain']!r}: services_assessed=0 but "
-                f"level={r['level']!r} (score {r['score']}) — no-TLS rows must be 'na'",
-                [f"DELETE FROM assessments WHERE id={r['id']}; "
-                 f"-- or re-run scripts/reassess_all.py"])
+                f"SYSTEMIC: all {scored} scored assessment rows have "
+                f"services_assessed=0 — the write path is dropping the column "
+                f"(check save_assessment() in data/database.py includes "
+                f"services_assessed in its INSERT), then backfill",
+                ["-- fix the INSERT, then: python3 scripts/backfill_services_assessed.py --dry-run"])
+    elif len(rows) > 50:
+        ex = [r["domain"] for r in rows[:5]]
+        rep.add("ERROR", sec,
+                f"{len(rows)} scored assessment rows have services_assessed=0 "
+                f"(e.g. {ex}) — no-TLS rows must be 'na'; if these predate the "
+                f"save_assessment() fix, backfill instead of deleting",
+                ["-- python3 scripts/backfill_services_assessed.py --dry-run"])
+    else:
+        for r in rows:
+            rep.add("ERROR", sec,
+                    f"assessments[{r['id']}] {r['domain']!r}: services_assessed=0 but "
+                    f"level={r['level']!r} (score {r['score']}) — no-TLS rows must be 'na'",
+                    [f"DELETE FROM assessments WHERE id={r['id']}; "
+                     f"-- or: python3 scripts/backfill_services_assessed.py"])
 
-    allowed = ("na", "critical", "weak", "moderate", "good", "excellent")
+    # key_types dropped by the same bug class (migration 5 column)
+    try:
+        (kt_empty,) = conn.execute(
+            "SELECT COUNT(*) FROM assessments WHERE level!='na' AND "
+            "(key_types IS NULL OR key_types IN ('', '[]'))").fetchone()
+        if scored and kt_empty == scored:
+            rep.add("WARN", sec,
+                    f"SYSTEMIC: all {scored} scored rows have empty key_types — "
+                    f"same write-path bug class; backfill reconstructs from "
+                    f"raw_scans.key_type",
+                    ["-- python3 scripts/backfill_services_assessed.py --dry-run"])
+    except sqlite3.OperationalError:
+        pass  # pre-migration-5 schema
+
+    # level taxonomy (crypto_assessor.py: critical 0-25, weak 26-50,
+    # moderate 51-75, ready 76-100, na = no TLS service)
+    allowed = ("na", "critical", "weak", "moderate", "ready")
     ph = ",".join("?" * len(allowed))
     for r in conn.execute(
             f"SELECT id, domain, level FROM assessments WHERE level NOT IN ({ph})", allowed):

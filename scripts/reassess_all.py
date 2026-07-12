@@ -94,6 +94,10 @@ parser.add_argument("--rescan", action="store_true",
                          "no traffic.")
 parser.add_argument("--only-missing", action="store_true",
                     help="Only domains lacking a cipher_enum enrichment blob.")
+parser.add_argument("--only-missing-groups", action="store_true",
+                    help="Only domains lacking a group_enum blob — i.e. those "
+                         "whose PQC status predates offered-group detection. "
+                         "Use with --rescan to correct historical PQC values.")
 parser.add_argument("--workers", type=int, default=2,
                     help="Parallel workers (default 2; keep low on small VMs).")
 parser.add_argument("--sleep", type=float, default=None,
@@ -163,7 +167,7 @@ def all_domains() -> list[str]:
 def latest_extra(domain: str) -> dict:
     """Latest enrichment blobs across all runs for a domain."""
     return db.get_latest_domain_extra(
-        domain, data_types=["cipher_enum", "chain", "cdn"])
+        domain, data_types=["cipher_enum", "chain", "cdn", "group_enum"])
 
 
 domains = all_domains()
@@ -172,6 +176,20 @@ if not domains:
     sys.exit(1)
 
 # Filter to missing-cipher-data domains if requested
+if args.only_missing_groups:
+    before = len(domains)
+    keep = []
+    for domain in domains:
+        extra = _extra(domain)
+        if not extra.get("group_enum"):
+            keep.append(domain)
+    domains = keep
+    logger.info("--only-missing-groups: %d of %d domains lack group_enum data "
+                "(their PQC status is unreliable)", len(domains), before)
+    if not args.rescan:
+        logger.warning("--only-missing-groups without --rescan does nothing useful: "
+                       "group_enum data can only be produced by a network rescan.")
+
 if args.only_missing:
     filtered = []
     for d in domains:
@@ -242,6 +260,7 @@ def _score_only(domain: str):
     extra     = latest_extra(domain)
     chain     = extra.get("chain")
     cenum     = extra.get("cipher_enum")
+    genum     = extra.get("group_enum")
     cdn       = extra.get("cdn")
 
     # Rebuild the "extra findings" that are normally produced at scan time,
@@ -273,6 +292,7 @@ def _score_only(domain: str):
         domain, raw_scans,
         chain_analysis=chain,
         cipher_enum=cenum,
+        group_enum=genum,
         cdn_result=cdn,
         extra_findings=extra_findings,
     )

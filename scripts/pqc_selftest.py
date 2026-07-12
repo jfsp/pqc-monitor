@@ -9,22 +9,24 @@ path (scanner.tls_probe / scanner.cipher_enum) — not a reimplementation.
 Run manually or from CI; NOT wired into app startup.
 
   python3 scripts/pqc_selftest.py                 # default reference hosts
-  python3 scripts/pqc_selftest.py www.cloudflare.com example.com
-  python3 scripts/pqc_selftest.py --sslscan       # cross-check vs sslscan
+  python3 scripts/pqc_selftest.py www.bportugal.pt example.com
+  python3 scripts/pqc_selftest.py --testssl       # cross-check vs testssl.sh
   python3 scripts/pqc_selftest.py --json          # machine-readable output
 
 Exit code 0 = all expectations met, 1 = at least one mismatch/error.
 
-Why an external cross-check (--sslscan) is useful
-─────────────────────────────────────────────────
-The in-process probe reports the group the server *negotiates with our
-ClientHello*. sslscan links its own OpenSSL and enumerates every group the
-server *offers*. Those can differ: a server may offer X25519MLKEM768 yet
-negotiate classical X25519 if our stack doesn't advertise the hybrid. The
-cross-check turns that silent gap into a visible diff.
+Why testssl.sh and NOT sslscan
+──────────────────────────────
+We grade on the groups a server OFFERS. Only testssl.sh reports that directly:
 
-Requirements for --sslscan: a recent sslscan linked against OpenSSL >= 3.5
-(older builds don't know the hybrid groups and will report false negatives).
+    KEMs offered                 MLKEM1024 X25519MLKEM768
+
+sslscan (as of 2.1.5) reports only "Server Key Exchange Group(s)" — the group
+it NEGOTIATED — so it cannot corroborate the offered set and will look like a
+false negative if used as the oracle. It is the wrong instrument for this
+measurement, regardless of its OpenSSL version.
+
+  Install: https://github.com/testssl/testssl.sh  (e.g. /usr/local/bin/testssl.sh)
 
 SPDX-License-Identifier: GPL-3.0-or-later
 Copyright (C) 2024 PQC-Monitor Contributors
@@ -52,12 +54,19 @@ from scanner.group_enum import enumerate_groups              # noqa: E402
 # override on the command line for ad-hoc checks. `expect_pqc=None` means
 # "don't assert, just report" — use for hosts whose config may change.
 DEFAULT_HOSTS: list[tuple[str, int, bool | None]] = [
-    ("www.google.com",              443, True),   # offers X25519MLKEM768
-    ("pq.cloudflareresearch.com",   443, True),   # Cloudflare PQC reference
-    ("example.com",                 443, False),  # classical-only baseline
+    ("www.google.com",   443, True),   # offers MLKEM1024 + X25519MLKEM768
+    ("cloudflare.com",   443, True),   # offers X25519MLKEM768
+    ("example.com",      443, False),  # classical-only baseline
 ]
 
 _PQC_GROUP_RE = re.compile("|".join(re.escape(i) for i in PQC_KEM_INDICATORS), re.I)
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(t: str) -> str:
+    return _ANSI_RE.sub("", t)
 
 
 def _is_pqc_group(name: str) -> bool:
@@ -114,94 +123,104 @@ def probe_host(host: str, port: int, timeout: int) -> dict:
     return out
 
 
-# ── Optional external oracle: sslscan ─────────────────────────────────────────
+# ── Optional external oracle: testssl.sh ──────────────────────────────────────
 
-def sslscan_groups(host: str, port: int, timeout: int) -> dict:
-    """Parse the KEM groups sslscan reports as *offered*. Returns
-    {'available': bool, 'groups': [...], 'has_pqc': bool, 'error': str}."""
-    exe = shutil.which("sslscan")
+def testssl_groups(host: str, port: int, timeout: int) -> dict:
+    """Parse the KEM groups testssl.sh reports as *offered*.
+
+    testssl prints (ANSI-coloured):
+        KEMs offered                 MLKEM1024 X25519MLKEM768
+    Returns {'available': bool, 'groups': [...], 'has_pqc': bool, 'error': str}.
+    """
+    exe = (shutil.which("testssl.sh") or shutil.which("testssl")
+           or ("/usr/local/bin/testssl.sh"
+               if os.path.exists("/usr/local/bin/testssl.sh") else None))
     if not exe:
-        return {"available": False, "error": "sslscan not installed"}
+        return {"available": False,
+                "error": "testssl.sh not found (see github.com/testssl/testssl.sh)"}
     try:
-        # --iana-names keeps naming aligned; not all builds support it, so we
-        # fall back to a bare invocation on failure.
-        cmd = [exe, "--no-colour", f"{host}:{port}"]
+        # --fs runs the forward-secrecy section, which is what emits "KEMs offered".
+        cmd = [exe, "--color", "0", "--fs", f"{host}:{port}"]
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout + 20)
+                              timeout=timeout + 120)
         text = proc.stdout + proc.stderr
     except (subprocess.TimeoutExpired, OSError) as e:
-        return {"available": True, "error": f"sslscan run failed: {e}"}
+        return {"available": True, "error": f"testssl run failed: {e}"}
 
+    text = _strip_ansi(text)   # belt-and-braces: --color 0 should suffice
     groups: list[str] = []
-    # Typical line (note: no colon in sslscan output):
-    #   "KEMs offered                 X25519MLKEM768"
-    m = re.search(r"^[ \t]*KEMs?\s+offered\b[ \t:]*(.+?)[ \t]*$", text,
-                  re.I | re.M)
+    m = re.search(r"^\s*KEMs?\s+offered\b[ \t:]*(.+?)\s*$", text, re.I | re.M)
     if m:
         groups = [g for g in re.split(r"[\s,]+", m.group(1).strip()) if g]
-    # Some builds annotate the group inline on TLS 1.3 suite lines instead.
     if not groups:
+        # Fallback: some versions annotate the group on TLS 1.3 suite lines.
         groups = sorted(set(re.findall(r"\b\w*(?:MLKEM|Kyber)\w*\b", text, re.I)))
+    if not groups:
+        return {"available": True, "groups": [], "has_pqc": False,
+                "error": "no 'KEMs offered' line in testssl output"}
     return {
         "available": True,
         "groups": groups,
         "has_pqc": any(_is_pqc_group(g) for g in groups),
         "error": "",
-        "version": _sslscan_version(exe),
     }
-
-
-def _sslscan_version(exe: str) -> str:
-    try:
-        p = subprocess.run([exe, "--version"], capture_output=True, text=True,
-                           timeout=10)
-        return (p.stdout + p.stderr).strip().splitlines()[0] if (p.stdout or p.stderr) else ""
-    except Exception:
-        return ""
 
 
 # ── Reporting ─────────────────────────────────────────────────────────────────
 
 def evaluate(res: dict, expect_pqc: bool | None, xcheck: dict | None) -> tuple[str, list[str]]:
-    """Return (status, notes). status in {PASS, FAIL, WARN, ERROR}."""
+    """Return (status, notes). status in {PASS, FAIL, WARN, ERROR}.
+
+    Grades on OFFERED groups. The negotiated group is reported for contrast but
+    never decides the verdict — it depends on our client, not the server.
+    """
     notes: list[str] = []
     if not res.get("ok"):
         return "ERROR", [res.get("error", "unknown error")]
 
-    # Grade on OFFERED (server property); negotiated is reported for contrast.
     detected = bool(res.get("has_pqc_offered"))
     negotiated = bool(res.get("has_pqc_kem"))
+    failed = False
+
     if detected and not negotiated:
         notes.append("server OFFERS PQC but our client negotiated classical "
-                     "— expected on stacks that don't advertise the hybrid")
+                     "— expected when the local stack can't advertise the hybrid")
 
-    # sslscan divergence: offered (sslscan) vs negotiated (us).
+    # Cross-check against testssl, which also reports OFFERED KEMs: like-for-like.
     if xcheck and xcheck.get("available") and not xcheck.get("error"):
-        offered = xcheck.get("has_pqc")
-        if offered and not detected:
-            notes.append("sslscan sees PQC OFFERED but we negotiated classical "
-                         "— server supports it; our ClientHello didn't select it")
-        elif detected and not offered:
-            notes.append("we detected PQC but sslscan did not "
-                         "(check sslscan/OpenSSL version >= 3.5)")
+        theirs = {g.lower() for g in xcheck.get("groups", [])}
+        ours = {g.lower() for g in (res.get("offered_pqc") or [])}
         if xcheck.get("groups"):
-            notes.append("sslscan groups: " + ", ".join(xcheck["groups"]))
+            notes.append("testssl KEMs offered: " + ", ".join(xcheck["groups"]))
+        missed, extra = theirs - ours, ours - theirs
+        if missed:
+            notes.append("MISMATCH: testssl saw KEMs we missed: " + ", ".join(sorted(missed)))
+            failed = True
+        if extra:
+            notes.append("MISMATCH: we report KEMs testssl did not: " + ", ".join(sorted(extra)))
+            failed = True
+        if not missed and not extra:
+            notes.append("cross-check agrees with testssl")
     elif xcheck and xcheck.get("error"):
-        notes.append("sslscan: " + xcheck["error"])
+        notes.append("testssl: " + xcheck["error"])
 
+    if expect_pqc is not None and detected != expect_pqc:
+        notes.append(f"expected pqc_offered={expect_pqc}, got {detected}")
+        failed = True
+
+    if failed:
+        return "FAIL", notes
     if expect_pqc is None:
         return ("PASS" if detected else "WARN"), notes
-    if detected == expect_pqc:
-        return "PASS", notes
-    return "FAIL", notes + [f"expected pqc={expect_pqc}, got {detected}"]
+    return "PASS", notes
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="PQC detection self-test")
     ap.add_argument("hosts", nargs="*",
                     help="host[:port] to test (default: built-in reference set)")
-    ap.add_argument("--sslscan", action="store_true",
-                    help="cross-check against sslscan if installed")
+    ap.add_argument("--testssl", action="store_true",
+                    help="cross-check offered groups against testssl.sh")
     ap.add_argument("--timeout", type=int, default=10)
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args()
@@ -220,13 +239,13 @@ def main() -> int:
 
     for host, port, expect in targets:
         res = probe_host(host, port, args.timeout)
-        xcheck = sslscan_groups(host, port, args.timeout) if args.sslscan else None
+        xcheck = testssl_groups(host, port, args.timeout) if args.testssl else None
         status, notes = evaluate(res, expect, xcheck)
         if status in ("FAIL", "ERROR"):
             exit_code = 1
         results.append({"host": host, "port": port, "expect_pqc": expect,
                         "status": status, "result": res, "notes": notes,
-                        "sslscan": xcheck})
+                        "testssl": xcheck})
 
     if args.json:
         print(json.dumps({"stack_can_offer_pqc": stack_ok, "results": results},
@@ -237,8 +256,9 @@ def main() -> int:
           f"group() {'yes' if hasattr(ssl.SSLSocket, 'group') else 'NO'} · "
           f"can offer PQC: {'yes' if stack_ok else 'NO'}")
     if not stack_ok:
-        print("  ⚠  This stack cannot negotiate hybrid groups — in-process "
-              "detection will report classical. Use --sslscan as the oracle.")
+        print("  Note: this stack can't NEGOTIATE hybrid groups, so 'negotiated' "
+              "will read classical.\n        Grading uses OFFERED groups, which "
+              "does not depend on the local stack — results remain valid.")
     print("-" * 78)
     for r in results:
         res = r["result"]

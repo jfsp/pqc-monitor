@@ -276,8 +276,9 @@ class Database:
                 INSERT INTO assessments
                 (run_id, domain, assessed_at, guidelines_used, score, level,
                  findings_json, tls_versions, cipher_suites, has_pqc,
-                 cert_expiry_days, errors_json, service_type)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 cert_expiry_days, errors_json, service_type,
+                 services_assessed, key_types)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 run_id,
                 assessment.get("domain", ""),
@@ -292,6 +293,8 @@ class Database:
                 assessment.get("certificate_expiry_days"),
                 json.dumps(assessment.get("errors", [])),
                 assessment.get("service_type"),
+                assessment.get("services_assessed", 0),
+                json.dumps(assessment.get("key_types_found", [])),
             ))
 
     def get_latest_assessments(self, run_id: str = None,

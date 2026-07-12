@@ -1710,13 +1710,12 @@ function renderDomainFull() {
         <td style="font-family:var(--font-mono);font-size:.74rem">${c.iana_name || c.openssl_name}</td>
         <td>${c.tls_version||''}</td>
         <td>${c.bits||''}</td>
-        <td style="font-family:var(--font-mono);font-size:.72rem;color:${_isPqcGroup(c.key_group)?'#a78bfa':'var(--muted)'}">${c.key_group||'—'}</td>
         <td style="font-size:.74rem;color:var(--muted)">${c.category||''}</td>
         <td><span style="color:${cipherLevelColor(c.security_level)};font-weight:600;font-size:.74rem">${(c.security_level||'').toUpperCase()}</span></td>
       </tr>`).join('');
     cipherHtml = `
       <table class="data-table" style="margin-bottom:1.5rem">
-        <thead><tr><th>Cipher suite (IANA)</th><th>Protocol</th><th>Bits</th><th>Key Group</th><th>Category</th><th>Assessment</th></tr></thead>
+        <thead><tr><th>Cipher suite (IANA)</th><th>Protocol</th><th>Bits</th><th>Category</th><th>Assessment</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
       <div style="color:var(--muted);font-size:.7rem;margin-bottom:1.5rem">

@@ -73,17 +73,18 @@ def _is_pqc_group(name: str) -> bool:
     return bool(name) and bool(_PQC_GROUP_RE.search(name))
 
 
-def _stack_can_offer_pqc() -> bool:
-    """True if the local Python/OpenSSL can even negotiate a hybrid group.
-    Needs SSLSocket.group() (Py>=3.13) and an OpenSSL new enough to offer the
-    group by default (>=3.5). This is a heuristic, reported for context."""
-    if not hasattr(ssl.SSLSocket, "group"):
-        return False
-    m = re.search(r"OpenSSL\s+(\d+)\.(\d+)", ssl.OPENSSL_VERSION)
-    if not m:
-        return False
-    major, minor = int(m.group(1)), int(m.group(2))
-    return (major, minor) >= (3, 5)
+def _can_report_negotiated_group() -> bool:
+    """True if Python can REPORT the negotiated key-exchange group.
+
+    This is NOT the same as "the stack can do PQC". SSLSocket.group() does not
+    exist in CPython as of 3.13 (unmerged proposal gh-136306), so this is False
+    on every current interpreter — even on OpenSSL 3.5, which negotiates
+    X25519MLKEM768 quite happily. We simply cannot read which group was used.
+
+    Grading does not depend on this: it uses OFFERED groups (group_enum), which
+    are enumerated with a raw ClientHello and need no ssl-module support at all.
+    """
+    return hasattr(ssl.SSLSocket, "group")
 
 
 # ── In-process probe (the code under test) ────────────────────────────────────
@@ -182,9 +183,11 @@ def evaluate(res: dict, expect_pqc: bool | None, xcheck: dict | None) -> tuple[s
     negotiated = bool(res.get("has_pqc_kem"))
     failed = False
 
-    if detected and not negotiated:
+    # Only meaningful if we can actually read the negotiated group; otherwise
+    # has_pqc_kem is "unknown", not "false", and the comparison says nothing.
+    if _can_report_negotiated_group() and detected and not negotiated:
         notes.append("server OFFERS PQC but our client negotiated classical "
-                     "— expected when the local stack can't advertise the hybrid")
+                     "— check the local group preference order")
 
     # Cross-check against testssl, which also reports OFFERED KEMs: like-for-like.
     if xcheck and xcheck.get("available") and not xcheck.get("error"):
@@ -233,7 +236,7 @@ def main() -> int:
     else:
         targets = DEFAULT_HOSTS
 
-    stack_ok = _stack_can_offer_pqc()
+    can_report = _can_report_negotiated_group()
     results = []
     exit_code = 0
 
@@ -248,17 +251,16 @@ def main() -> int:
                         "testssl": xcheck})
 
     if args.json:
-        print(json.dumps({"stack_can_offer_pqc": stack_ok, "results": results},
-                         indent=2))
+        print(json.dumps({"can_report_negotiated_group": can_report,
+                          "results": results}, indent=2))
         return exit_code
 
-    print(f"Local stack: {ssl.OPENSSL_VERSION} · "
-          f"group() {'yes' if hasattr(ssl.SSLSocket, 'group') else 'NO'} · "
-          f"can offer PQC: {'yes' if stack_ok else 'NO'}")
-    if not stack_ok:
-        print("  Note: this stack can't NEGOTIATE hybrid groups, so 'negotiated' "
-              "will read classical.\n        Grading uses OFFERED groups, which "
-              "does not depend on the local stack — results remain valid.")
+    print(f"Local stack: {ssl.OPENSSL_VERSION} · Python {sys.version.split()[0]}")
+    if not can_report:
+        print("  Note: SSLSocket.group() is unavailable (unmerged in CPython), so the "
+              "negotiated\n        group cannot be read and shows as '—'. This is "
+              "expected and harmless:\n        grading uses OFFERED groups, which need "
+              "no ssl-module support.")
     print("-" * 78)
     for r in results:
         res = r["result"]

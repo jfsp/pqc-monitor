@@ -242,9 +242,13 @@ def probe_tls(domain: str, port: int = 443, timeout: int = 10) -> TLSProbeResult
                     result.cipher_bits = cipher[2] or 0
                     result.key_exchange = _infer_key_exchange(cipher[0])
 
-                # Negotiated key-exchange group (Python >=3.13 + OpenSSL >=3.2).
-                # This is where ML-KEM lives — the TLS 1.3 cipher suite does NOT
-                # encode the KEX group, so PQC is invisible without reading it.
+                # Negotiated key-exchange group.
+                # NOTE: SSLSocket.group() does NOT exist in CPython as of 3.13 —
+                # it is part of the unmerged proposal gh-136306 (with get_groups/
+                # set_groups). So this stays empty on every current interpreter and
+                # will populate automatically once CPython ships the API.
+                # PQC grading does NOT depend on this: it uses the OFFERED groups
+                # from scanner/group_enum.py, which is stack-independent.
                 try:
                     result.key_group = tls_sock.group() or "" if hasattr(tls_sock, "group") else ""
                 except (OSError, ssl.SSLError):

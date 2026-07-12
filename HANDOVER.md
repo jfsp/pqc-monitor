@@ -921,8 +921,13 @@ stay as-is until cleaned with `fix_mx_entries.py`-style scripts.
 ### P3 — DB-level invariants (S/M)
 
 **Why:** the 1.9.1 scoring bug (`services_assessed=0` with `level='weak'`)
-sat undetected because nothing at the storage layer forbids it. Make the bad
-row an insert failure instead of a silent inconsistency.
+sat undetected because nothing at the storage layer forbids it. **Proven on
+2026-07-12:** `save_assessment()` had silently dropped `services_assessed`
+AND `key_types` from its INSERT since the columns were added — every row in
+production carried the defaults. A `CHECK`/trigger would have made this an
+insert failure on day one instead of 11,900 silently wrong rows. (Write path
+fixed; historic rows reconstructed by
+`scripts/backfill_services_assessed.py`.)
 
 **How:** SQLite can't `ALTER TABLE … ADD CHECK`, so prefer **triggers** in a
 new migration (avoids the table-rebuild pattern): `BEFORE INSERT` and

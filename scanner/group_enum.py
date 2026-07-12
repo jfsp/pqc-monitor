@@ -90,6 +90,14 @@ HYBRID_GROUPS: frozenset[str] = frozenset({
     "X25519Kyber768Draft00", "P256Kyber768Draft00",
 })
 
+# RFC 8701 GREASE values reserved for supported_groups. A server MUST NOT
+# negotiate these. Used as a host-independent negative control: if a probe
+# reports one as "offered", the probe logic is producing false positives.
+GREASE_GROUPS: dict[str, int] = {
+    "GREASE_0x0A0A": 0x0A0A,
+    "GREASE_0xDADA": 0xDADA,
+}
+
 _HRR_RANDOM = bytes.fromhex(
     "cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c"
 )
@@ -334,3 +342,21 @@ def group_enum_findings(res: GroupEnumResult) -> list[dict]:
                               "(NIST FIPS 203 / ML-KEM).",
         })
     return findings
+
+
+def probe_negative_control(domain: str, port: int = 443,
+                           timeout: float = 6.0) -> dict:
+    """Host-independent soundness check for the enumerator.
+
+    Probes RFC 8701 GREASE codepoints, which no conformant server may ever
+    select. Any "offered" verdict here means the probe reports false positives
+    and every result from it is suspect.
+
+    Returns {"sound": bool, "false_positives": [...], "verdicts": {...}}.
+    """
+    verdicts = {
+        name: _probe_group(domain, port, name, gid, timeout)
+        for name, gid in GREASE_GROUPS.items()
+    }
+    fps = [n for n, v in verdicts.items() if v == "offered"]
+    return {"sound": not fps, "false_positives": fps, "verdicts": verdicts}

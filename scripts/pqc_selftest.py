@@ -48,15 +48,20 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from scanner.tls_probe import probe_tls, PQC_KEM_INDICATORS  # noqa: E402
-from scanner.group_enum import enumerate_groups              # noqa: E402
+from scanner.group_enum import (enumerate_groups,             # noqa: E402
+                                probe_negative_control)
 
 # Reference hosts with expected PQC status. Keep this list small and stable;
 # override on the command line for ad-hoc checks. `expect_pqc=None` means
 # "don't assert, just report" — use for hosts whose config may change.
+# NOTE: there is deliberately no "classical-only" host here. Any public host can
+# end up behind a PQC-enabled CDN without notice (example.com resolves to a
+# Cloudflare edge and duly offers Cloudflare's PQC groups), which makes a
+# host-based negative control unreliable. False positives are caught instead by
+# the GREASE control below, which is host-independent.
 DEFAULT_HOSTS: list[tuple[str, int, bool | None]] = [
     ("www.google.com",   443, True),   # offers MLKEM1024 + X25519MLKEM768
-    ("cloudflare.com",   443, True),   # offers X25519MLKEM768
-    ("example.com",      443, False),  # classical-only baseline
+    ("cloudflare.com",   443, True),   # offers X25519MLKEM768 (+ Kyber draft)
 ]
 
 _PQC_GROUP_RE = re.compile("|".join(re.escape(i) for i in PQC_KEM_INDICATORS), re.I)
@@ -126,24 +131,40 @@ def probe_host(host: str, port: int, timeout: int) -> dict:
 
 # ── Optional external oracle: testssl.sh ──────────────────────────────────────
 
-def testssl_groups(host: str, port: int, timeout: int) -> dict:
+def testssl_groups(host: str, port: int, timeout: int = 300) -> dict:
     """Parse the KEM groups testssl.sh reports as *offered*.
 
     testssl prints (ANSI-coloured):
         KEMs offered                 MLKEM1024 X25519MLKEM768
     Returns {'available': bool, 'groups': [...], 'has_pqc': bool, 'error': str}.
     """
-    exe = (shutil.which("testssl.sh") or shutil.which("testssl")
-           or ("/usr/local/bin/testssl.sh"
-               if os.path.exists("/usr/local/bin/testssl.sh") else None))
+    # testssl.sh must be run from a full checkout (it needs its etc/ data files),
+    # so a bare copy in /usr/local/bin does not work. Honour $PQC_TESTSSL.
+    candidates = [
+        os.environ.get("PQC_TESTSSL"),
+        shutil.which("testssl.sh"), shutil.which("testssl"),
+        "/opt/testssl/testssl.sh", "/usr/local/bin/testssl.sh",
+    ]
+    exe = next((c for c in candidates if c and os.path.exists(c)), None)
     if not exe:
         return {"available": False,
                 "error": "testssl.sh not found (see github.com/testssl/testssl.sh)"}
     try:
-        # --fs runs the forward-secrecy section, which is what emits "KEMs offered".
-        cmd = [exe, "--color", "0", "--fs", f"{host}:{port}"]
+        # --fs emits "KEMs offered". The rest are purely to stop testssl doing
+        # work we don't need — the default scan hits EVERY A record of the host,
+        # which is why google.com takes minutes.
+        cmd = [
+            exe,
+            "--fs",                 # forward-secrecy section → "KEMs offered"
+            "--ip", "one",          # only the first IP, not every A record
+            "--nodns", "min",       # skip rDNS lookups
+            "--warnings", "batch",  # never wait for a keypress
+            "--color", "0",
+            "--quiet",
+            f"{host}:{port}",
+        ]
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout + 120)
+                              timeout=timeout)
         text = proc.stdout + proc.stderr
     except (subprocess.TimeoutExpired, OSError) as e:
         return {"available": True, "error": f"testssl run failed: {e}"}
@@ -224,7 +245,10 @@ def main() -> int:
                     help="host[:port] to test (default: built-in reference set)")
     ap.add_argument("--testssl", action="store_true",
                     help="cross-check offered groups against testssl.sh")
-    ap.add_argument("--timeout", type=int, default=10)
+    ap.add_argument("--timeout", type=int, default=10,
+                    help="per-socket timeout for our own probes")
+    ap.add_argument("--testssl-timeout", type=int, default=300,
+                    help="wall-clock budget for each testssl run")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args()
 
@@ -240,9 +264,18 @@ def main() -> int:
     results = []
     exit_code = 0
 
+    # ── Soundness gate ────────────────────────────────────────────────────────
+    # Probe reserved GREASE codepoints that NO server may ever select. If the
+    # enumerator calls one "offered", it is producing false positives and every
+    # other result in this run is untrustworthy.
+    control_host = targets[0][0]
+    control = probe_negative_control(control_host, targets[0][1], float(args.timeout))
+    if not control["sound"]:
+        exit_code = 1
+
     for host, port, expect in targets:
         res = probe_host(host, port, args.timeout)
-        xcheck = testssl_groups(host, port, args.timeout) if args.testssl else None
+        xcheck = testssl_groups(host, port, args.testssl_timeout) if args.testssl else None
         status, notes = evaluate(res, expect, xcheck)
         if status in ("FAIL", "ERROR"):
             exit_code = 1
@@ -252,6 +285,7 @@ def main() -> int:
 
     if args.json:
         print(json.dumps({"can_report_negotiated_group": can_report,
+                          "negative_control": control,
                           "results": results}, indent=2))
         return exit_code
 
@@ -261,6 +295,12 @@ def main() -> int:
               "negotiated\n        group cannot be read and shows as '—'. This is "
               "expected and harmless:\n        grading uses OFFERED groups, which need "
               "no ssl-module support.")
+    if control["sound"]:
+        print(f"Negative control ({control_host}): GREASE groups correctly rejected  ✓")
+    else:
+        print(f"Negative control ({control_host}): *** FALSE POSITIVES *** "
+              f"{control['false_positives']} reported as offered.\n"
+              f"  The enumerator is unsound — results below cannot be trusted.")
     print("-" * 78)
     for r in results:
         res = r["result"]

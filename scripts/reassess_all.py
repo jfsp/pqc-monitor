@@ -170,7 +170,9 @@ def latest_extra(domain: str) -> dict:
         domain, data_types=["cipher_enum", "chain", "cdn", "group_enum"])
 
 
+logger.info("Loading domain list from the database ...")
 domains = all_domains()
+logger.info("Found %d assessed domains", len(domains))
 if not domains:
     logger.error("No assessed domains found in %s", db_path)
     sys.exit(1)
@@ -178,15 +180,10 @@ if not domains:
 # Filter to domains whose PQC status predates offered-group detection
 if args.only_missing_groups:
     before = len(domains)
-    keep = []
-    for domain in domains:
-        extra = latest_extra(domain)
-        ge = extra.get("group_enum")
-        # A blob only counts if the enumeration actually succeeded; a failed
-        # run must not mask the domain from a retry.
-        if not (ge and ge.get("success")):
-            keep.append(domain)
-    domains = keep
+    # ONE query, not one per domain: get_latest_domain_extra() scans the whole
+    # domain_extra table per call, so the naive loop is unusable at 5k domains.
+    have_groups = db.domains_with_successful_extra("group_enum")
+    domains = [d for d in domains if d not in have_groups]
     logger.info("--only-missing-groups: %d of %d domains lack usable group_enum "
                 "data (their PQC status is unreliable)", len(domains), before)
     if not args.rescan:
@@ -194,13 +191,9 @@ if args.only_missing_groups:
                        "group_enum data can only be produced by a network rescan.")
 
 if args.only_missing:
-    filtered = []
-    for d in domains:
-        extra = latest_extra(d)
-        ce = extra.get("cipher_enum")
-        has_enum = bool(ce and ce.get("supported_ciphers"))
-        if not has_enum:
-            filtered.append(d)
+    ce_all = db.latest_extra_bulk("cipher_enum")     # one query, not one per domain
+    filtered = [d for d in domains
+                if not (ce_all.get(d) or {}).get("supported_ciphers")]
     logger.info("--only-missing: %d of %d domains lack cipher_enum data",
                 len(filtered), len(domains))
     domains = filtered

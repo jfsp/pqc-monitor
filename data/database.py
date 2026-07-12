@@ -187,6 +187,11 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_domain_extra
                 ON domain_extra(run_id, domain);
+            -- get_latest_domain_extra() filters on domain (and often data_type)
+            -- WITHOUT run_id; the index above cannot serve that (wrong leading
+            -- column), causing a full table scan per domain.
+            CREATE INDEX IF NOT EXISTS idx_domain_extra_domain
+                ON domain_extra(domain, data_type, recorded_at);
             """)
 
     # ─── Scan Runs ───────────────────────────────────────────────
@@ -276,9 +281,8 @@ class Database:
                 INSERT INTO assessments
                 (run_id, domain, assessed_at, guidelines_used, score, level,
                  findings_json, tls_versions, cipher_suites, has_pqc,
-                 cert_expiry_days, errors_json, service_type,
-                 services_assessed, key_types)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 cert_expiry_days, errors_json, service_type)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 run_id,
                 assessment.get("domain", ""),
@@ -293,8 +297,6 @@ class Database:
                 assessment.get("certificate_expiry_days"),
                 json.dumps(assessment.get("errors", [])),
                 assessment.get("service_type"),
-                assessment.get("services_assessed", 0),
-                json.dumps(assessment.get("key_types_found", [])),
             ))
 
     def get_latest_assessments(self, run_id: str = None,
@@ -997,6 +999,46 @@ class Database:
                 blob["_run_id"]      = row["run_id"]
             result[dt] = blob
         return result
+
+    def domains_with_successful_extra(self, data_type: str) -> set:
+        """
+        Domains whose MOST RECENT blob of `data_type` has success=True.
+
+        Single query — the bulk counterpart to calling get_latest_domain_extra()
+        per domain, which is a full table scan each time on large estates.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT domain, json_data FROM domain_extra "
+                "WHERE data_type=? ORDER BY recorded_at ASC",
+                (data_type,)
+            ).fetchall()
+        latest: dict = {}
+        for row in rows:            # ascending — later rows overwrite earlier
+            try:
+                blob = json.loads(row["json_data"])
+            except Exception:
+                blob = {}
+            latest[row["domain"]] = bool(isinstance(blob, dict)
+                                         and blob.get("success"))
+        return {d for d, ok in latest.items() if ok}
+
+    def latest_extra_bulk(self, data_type: str) -> dict:
+        """Most recent blob of `data_type` for EVERY domain, in one query.
+        Bulk counterpart to get_latest_domain_extra() (which full-scans per call)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT domain, json_data FROM domain_extra "
+                "WHERE data_type=? ORDER BY recorded_at ASC",
+                (data_type,)
+            ).fetchall()
+        out: dict = {}
+        for row in rows:            # ascending — later rows overwrite earlier
+            try:
+                out[row["domain"]] = json.loads(row["json_data"])
+            except Exception:
+                out[row["domain"]] = {}
+        return out
 
     def get_latest_run_id_for_domain(self, domain: str) -> Optional[str]:
         """run_id of the most recent assessment of a domain, or None."""

@@ -9,7 +9,7 @@ path (scanner.tls_probe / scanner.cipher_enum) — not a reimplementation.
 Run manually or from CI; NOT wired into app startup.
 
   python3 scripts/pqc_selftest.py                 # default reference hosts
-  python3 scripts/pqc_selftest.py www.bportugal.pt example.com
+  python3 scripts/pqc_selftest.py www.cloudflare.com example.com
   python3 scripts/pqc_selftest.py --sslscan       # cross-check vs sslscan
   python3 scripts/pqc_selftest.py --json          # machine-readable output
 
@@ -52,7 +52,7 @@ from scanner.group_enum import enumerate_groups              # noqa: E402
 # override on the command line for ad-hoc checks. `expect_pqc=None` means
 # "don't assert, just report" — use for hosts whose config may change.
 DEFAULT_HOSTS: list[tuple[str, int, bool | None]] = [
-    ("www.bportugal.pt",            443, True),   # offers X25519MLKEM768
+    ("www.google.com",              443, True),   # offers X25519MLKEM768
     ("pq.cloudflareresearch.com",   443, True),   # Cloudflare PQC reference
     ("example.com",                 443, False),  # classical-only baseline
 ]

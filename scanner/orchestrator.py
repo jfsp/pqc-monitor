@@ -26,6 +26,7 @@ import concurrent.futures
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from scanner.tls_probe import probe_tls
+from scanner.group_enum import enumerate_groups
 from scanner.starttls_probe import probe_starttls
 from scanner.service_discovery import (
     discover_tls_services, get_tlsa_records, check_dnssec, STARTTLS_PORTS
@@ -264,6 +265,27 @@ class ScanOrchestrator:
             except Exception as e:
                 logger.debug(f"Cipher enum failed for {domain}: {e}")
 
+        # ── 4c. Offered key-exchange groups (authoritative for PQC) ─
+        # Grades on what the server OFFERS, not what our client negotiates:
+        # negotiation varies by client, offered support does not.
+        group_result = None
+        if results:
+            try:
+                group_result = enumerate_groups(
+                    domain, port=primary_port,
+                    timeout=min(self.timeout, 6),
+                )
+                # NOTE: PQC findings are emitted by the assessor (which knows the
+                # grading basis) — not merged here, to avoid duplicate findings.
+                self.db.save_domain_extra(run_id, domain, "group_enum",
+                                           group_result.to_dict())
+                logger.debug(
+                    f"{domain} group_enum: offered={group_result.offered_groups} "
+                    f"pqc={group_result.pqc_groups}"
+                )
+            except Exception as e:
+                logger.debug(f"Group enumeration failed for {domain}: {e}")
+
         # ── 4b. SSL Labs cached report (display only — no scoring) ─
         # Cache-only lookup (fromCache=on): never triggers a new SSL Labs
         # assessment during a scan run. Fresh assessments are on-demand
@@ -307,6 +329,7 @@ class ScanOrchestrator:
             chain_analysis=chain_result.to_dict() if chain_result else None,
             cipher_enum=enum_result.to_dict() if enum_result else None,
             cdn_result=cdn_result.to_dict() if cdn_result else None,
+            group_enum=group_result.to_dict() if group_result else None,
             extra_findings=(
                 chain_extra_findings + enum_extra_findings + cdn_extra_findings
             ),

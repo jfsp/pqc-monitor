@@ -64,7 +64,7 @@ def create_app(config: dict = None) -> Flask:
         history = db.get_domain_history(domain)
         latest_scans = db.get_domain_scans(domain)
         extra = db.get_latest_domain_extra(
-            domain, data_types=["cipher_enum", "chain", "cdn", "ssllabs"])
+            domain, data_types=["cipher_enum", "chain", "cdn", "ssllabs", "group_enum"])
         return jsonify({"domain": domain, "history": history,
                         "scans": latest_scans[:5], "extra": extra})
 
@@ -1669,6 +1669,8 @@ async function showDomainDetail(domain) {
 // ─── Full TLS detail view (drill-down) ──────────────────────────────────────
 const CAN_SCAN = {{ 'true' if is_admin else 'false' }};
 const _CIPHER_LEVEL_ORDER = { recommended:0, acceptable:1, deprecated:2, disallowed:3 };
+const _PQC_GROUP_RE = /mlkem|kyber|ml-kem|frodo|ntru|sntrup/i;
+function _isPqcGroup(g){ return !!g && _PQC_GROUP_RE.test(g); }
 let _sslLabsPollTimer = null;
 
 function closeDomainFull() {
@@ -1708,12 +1710,13 @@ function renderDomainFull() {
         <td style="font-family:var(--font-mono);font-size:.74rem">${c.iana_name || c.openssl_name}</td>
         <td>${c.tls_version||''}</td>
         <td>${c.bits||''}</td>
+        <td style="font-family:var(--font-mono);font-size:.72rem;color:${_isPqcGroup(c.key_group)?'#a78bfa':'var(--muted)'}">${c.key_group||'—'}</td>
         <td style="font-size:.74rem;color:var(--muted)">${c.category||''}</td>
         <td><span style="color:${cipherLevelColor(c.security_level)};font-weight:600;font-size:.74rem">${(c.security_level||'').toUpperCase()}</span></td>
       </tr>`).join('');
     cipherHtml = `
       <table class="data-table" style="margin-bottom:1.5rem">
-        <thead><tr><th>Cipher suite (IANA)</th><th>Protocol</th><th>Bits</th><th>Category</th><th>Assessment</th></tr></thead>
+        <thead><tr><th>Cipher suite (IANA)</th><th>Protocol</th><th>Bits</th><th>Key Group</th><th>Category</th><th>Assessment</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
       <div style="color:var(--muted);font-size:.7rem;margin-bottom:1.5rem">
@@ -1765,8 +1768,17 @@ function renderDomainFull() {
         <span id="df-ssllabs-status" style="color:var(--muted);font-size:.72rem;margin-left:.6rem"></span>` : ''}
     </div>`;
 
+  const ge = extra.group_enum || null;
+  const geHtml = ge && ge.success ? `
+    <div style="font-size:.8rem;margin-bottom:1rem">
+      Key-exchange groups <span style="color:var(--muted);font-size:.72rem">(offered by server — client-independent)</span>:
+      ${(ge.offered_groups||[]).map(g=>`<span style="font-family:var(--font-mono);font-size:.72rem;padding:.1rem .4rem;margin-right:.3rem;border-radius:3px;background:rgba(255,255,255,.06);color:${_isPqcGroup(g)?'#a78bfa':'var(--text)'};border:1px solid ${_isPqcGroup(g)?'#a78bfa':'transparent'}">${g}</span>`).join('') || '<span style="color:var(--muted)">none</span>'}
+      ${(ge.pqc_groups||[]).length ? `<div style="color:#a78bfa;font-size:.75rem;margin-top:.4rem">✓ Post-quantum key exchange offered${ge.hybrid_only?' (hybrid)':' — pure ML-KEM, hybrid preferred'}</div>` : '<div style="color:var(--muted);font-size:.75rem;margin-top:.4rem">No post-quantum group offered</div>'}
+    </div>` : '';
+
   body.innerHTML = `
     <div style="font-size:.8rem;margin-bottom:1rem">TLS protocols: <span style="color:var(--accent)">${(tryJSON(a.tls_versions)||[]).join(', ')||'—'}</span></div>
+    ${geHtml}
     <div style="color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">Accepted cipher suites</div>
     ${cipherHtml}
     ${chainHtml ? `<div style="color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">Certificate chain</div>${chainHtml}` : ''}

@@ -63,6 +63,7 @@ class TLSProbeResult:
     cipher_suite: str = ""
     cipher_bits: int = 0
     key_exchange: str = ""
+    key_group: str = ""          # negotiated TLS key-exchange group (e.g. X25519MLKEM768)
 
     # Certificate chain
     certificate: Optional[CertificateInfo] = None
@@ -100,14 +101,18 @@ PQC_SIG_INDICATORS = [
 ]
 
 
-def _detect_pqc(cipher_name: str, tls_version: str) -> tuple[bool, bool, list]:
-    """Detect PQC algorithm references in cipher suite or TLS version string."""
-    name_lower = cipher_name.lower()
+def _detect_pqc(cipher_name: str, tls_version: str,
+                key_group: str = "") -> tuple[bool, bool, list]:
+    """Detect PQC references in the cipher suite, TLS version, or negotiated
+    key-exchange group. In TLS 1.3 the cipher suite does NOT encode the KEX
+    group, so ML-KEM is only visible via the negotiated group (key_group)."""
+    hay = " ".join(s.lower() for s in (cipher_name, tls_version, key_group) if s)
     pqc_algos = []
-    has_kem = any(ind in name_lower for ind in PQC_KEM_INDICATORS)
-    has_sig = any(ind in name_lower for ind in PQC_SIG_INDICATORS)
+    has_kem = any(ind in hay for ind in PQC_KEM_INDICATORS)
+    has_sig = any(ind in hay for ind in PQC_SIG_INDICATORS)
     if has_kem:
-        pqc_algos.append(f"PQC-KEM detected in: {cipher_name}")
+        where = key_group or cipher_name
+        pqc_algos.append(f"PQC-KEM detected in: {where}")
     if has_sig:
         pqc_algos.append(f"PQC-Sig detected in: {cipher_name}")
     return has_kem, has_sig, pqc_algos
@@ -237,8 +242,17 @@ def probe_tls(domain: str, port: int = 443, timeout: int = 10) -> TLSProbeResult
                     result.cipher_bits = cipher[2] or 0
                     result.key_exchange = _infer_key_exchange(cipher[0])
 
-                # PQC detection
-                kem, sig, algos = _detect_pqc(result.cipher_suite, result.tls_version)
+                # Negotiated key-exchange group (Python >=3.13 + OpenSSL >=3.2).
+                # This is where ML-KEM lives — the TLS 1.3 cipher suite does NOT
+                # encode the KEX group, so PQC is invisible without reading it.
+                try:
+                    result.key_group = tls_sock.group() or "" if hasattr(tls_sock, "group") else ""
+                except (OSError, ssl.SSLError):
+                    result.key_group = ""
+
+                # PQC detection (cipher suite + TLS version + negotiated group)
+                kem, sig, algos = _detect_pqc(
+                    result.cipher_suite, result.tls_version, result.key_group)
                 result.has_pqc_kem = kem
                 result.has_pqc_sig = sig
                 result.pqc_algorithms = algos

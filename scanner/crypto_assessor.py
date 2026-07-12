@@ -66,6 +66,10 @@ class DomainAssessment:
     cipher_suites_found: list = field(default_factory=list)
     key_types_found: list = field(default_factory=list)
     has_pqc: bool = False
+    pqc_groups: list = field(default_factory=list)   # PQC KEX groups (e.g. X25519MLKEM768)
+    offered_groups: list = field(default_factory=list)  # all KEX groups the server offers
+    pqc_grading_basis: str = "negotiated"            # "offered" (authoritative) | "negotiated"
+    pqc_hybrid_only: bool = False                    # all offered PQC is hybrid (preferred)
     certificate_expiry_days: Optional[int] = None
     errors: list = field(default_factory=list)
     # CDN context
@@ -111,6 +115,7 @@ class CryptoAssessor:
                       chain_analysis: dict = None,
                       cipher_enum: dict = None,
                       cdn_result: dict = None,
+                      group_enum: dict = None,
                       extra_findings: list = None,
                       service_type: str = None) -> DomainAssessment:
         """
@@ -120,6 +125,8 @@ class CryptoAssessor:
         chain_analysis  : ChainAnalysis.to_dict() from chain_validator
         cipher_enum     : CipherEnumResult.to_dict() from cipher_enum
         cdn_result      : CDNDetectionResult.to_dict() from cdn_detector
+        group_enum      : GroupEnumResult.to_dict() from group_enum — the
+                          AUTHORITATIVE source for PQC grading (offered groups).
         extra_findings  : pre-computed Finding dicts to merge in
         """
         from datetime import datetime, timezone
@@ -182,8 +189,25 @@ class CryptoAssessor:
                 if cert.get("days_to_expiry") is not None:
                     assessment.certificate_expiry_days = cert["days_to_expiry"]
 
+            # NEGOTIATED PQC — fallback only. Depends on our client's group list,
+            # so it can under-report a server that offers PQC. Superseded below
+            # by group_enum (offered) whenever that data is available.
             if svc.get("has_pqc_kem") or svc.get("has_pqc_sig") or svc.get("has_pqc"):
                 assessment.has_pqc = True
+                grp = svc.get("key_group") or ""
+                if grp and grp not in assessment.pqc_groups:
+                    assessment.pqc_groups.append(grp)
+
+        # ── PQC grading: OFFERED groups are authoritative ──────────
+        # A server is PQC-ready if it OFFERS a PQC group, regardless of what any
+        # particular client negotiates. Different browsers negotiate differently,
+        # so the negotiated group is not a stable property of the server.
+        if group_enum and group_enum.get("success"):
+            assessment.pqc_grading_basis = "offered"
+            assessment.offered_groups = list(group_enum.get("offered_groups") or [])
+            assessment.has_pqc = bool(group_enum.get("has_pqc_kem"))
+            assessment.pqc_groups = list(group_enum.get("pqc_groups") or [])
+            assessment.pqc_hybrid_only = bool(group_enum.get("hybrid_only"))
 
         # ── Chain analysis score adjustment ───────────────────────
         if chain_analysis:
@@ -245,17 +269,36 @@ class CryptoAssessor:
         # PQC bonus / penalty
         if assessment.has_pqc:
             scores.append(95)
+            grps = ", ".join(assessment.pqc_groups) or "detected"
+            if assessment.pqc_grading_basis == "offered":
+                msg = f"Server offers post-quantum key exchange: {grps}"
+            else:
+                msg = f"PQC key exchange negotiated: {grps}"
             findings.append(Finding(
                 severity="info", category="pqc",
-                message="PQC algorithm detected in TLS negotiation",
+                message=msg,
                 guideline="all",
                 recommendation="Verify PQC implementation follows NIST FIPS 203/204/205"
             ))
+            if assessment.pqc_grading_basis == "offered" and not assessment.pqc_hybrid_only:
+                findings.append(Finding(
+                    severity="low", category="pqc",
+                    message="Server offers pure (non-hybrid) ML-KEM key exchange",
+                    guideline="all",
+                    recommendation="Prefer hybrid groups (e.g. X25519MLKEM768) so the "
+                                   "exchange stays secure if either primitive is broken"
+                ))
         else:
             scores.append(30)
+            if assessment.pqc_grading_basis == "offered":
+                msg = ("Server offers no post-quantum key-exchange group "
+                       "(harvest-now-decrypt-later exposure)")
+            else:
+                msg = ("No Post-Quantum Cryptography algorithms detected "
+                       "(negotiated-only check — server may still offer PQC)")
             findings.append(Finding(
                 severity="medium", category="pqc",
-                message="No Post-Quantum Cryptography algorithms detected",
+                message=msg,
                 guideline="all",
                 recommendation="Plan migration to ML-KEM (FIPS 203) for key exchange "
                                "and ML-DSA (FIPS 204) for signatures"

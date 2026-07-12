@@ -156,6 +156,7 @@ class CipherResult:
     bits: int
     category: str             # ECDHE-AEAD-RSA / ECDHE-AEAD-ECDSA / DHE-AEAD / RSA-AEAD / …
     security_level: str       # recommended / acceptable / deprecated / disallowed
+    key_group: str = ""       # negotiated key-exchange group (TLS 1.3), e.g. X25519MLKEM768
 
 
 @dataclass
@@ -170,6 +171,7 @@ class CipherEnumResult:
     supported_ciphers: list = field(default_factory=list)   # list of CipherResult dicts
     tls13_supported: bool = False
     tls12_supported: bool = False
+    key_group: str = ""          # negotiated TLS 1.3 key-exchange group (e.g. X25519MLKEM768)
 
     # Counts by security level
     recommended_count: int = 0
@@ -247,6 +249,10 @@ def _probe_tls13(domain: str, port: int, timeout: float) -> list[CipherResult]:
             with socket.create_connection((domain, port), timeout=timeout) as sock:
                 with ctx2.wrap_socket(sock, server_hostname=domain) as tls_sock:
                     c = tls_sock.cipher()
+                    try:
+                        grp = tls_sock.group() if hasattr(tls_sock, "group") else None
+                    except (OSError, ssl.SSLError):
+                        grp = None
                     if c and c[0] not in {r.openssl_name for r in results}:
                         results.append(CipherResult(
                             openssl_name=c[0],
@@ -255,6 +261,7 @@ def _probe_tls13(domain: str, port: int, timeout: float) -> list[CipherResult]:
                             bits=c[2] or 256,
                             category="TLS1.3-AEAD",
                             security_level="recommended",
+                            key_group=grp or "",
                         ))
             break  # we got what the server prefers; TLS 1.3 set is small enough
         except Exception:

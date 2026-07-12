@@ -175,17 +175,20 @@ if not domains:
     logger.error("No assessed domains found in %s", db_path)
     sys.exit(1)
 
-# Filter to missing-cipher-data domains if requested
+# Filter to domains whose PQC status predates offered-group detection
 if args.only_missing_groups:
     before = len(domains)
     keep = []
     for domain in domains:
-        extra = _extra(domain)
-        if not extra.get("group_enum"):
+        extra = latest_extra(domain)
+        ge = extra.get("group_enum")
+        # A blob only counts if the enumeration actually succeeded; a failed
+        # run must not mask the domain from a retry.
+        if not (ge and ge.get("success")):
             keep.append(domain)
     domains = keep
-    logger.info("--only-missing-groups: %d of %d domains lack group_enum data "
-                "(their PQC status is unreliable)", len(domains), before)
+    logger.info("--only-missing-groups: %d of %d domains lack usable group_enum "
+                "data (their PQC status is unreliable)", len(domains), before)
     if not args.rescan:
         logger.warning("--only-missing-groups without --rescan does nothing useful: "
                        "group_enum data can only be produced by a network rescan.")

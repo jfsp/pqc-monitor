@@ -33,6 +33,33 @@ Checks
                              0–100; malformed domain values (MX-priority
                              prefixes etc.); assigned domains never
                              scanned (informational)
+  G. Scan lifecycle          orphan run_ids in scan-keyed tables; runs
+                             stuck 'running' > 24h; finished_at before
+                             started_at; 'completed' runs with untouched
+                             targets; scanned-but-never-assessed
+                             (run, domain) pairs; duplicate assessments
+                             per (run, domain); newest raw scan newer
+                             than newest assessment (stale dashboard);
+                             unknown domain_extra data_type; unparseable
+                             json_data; CT summary vs stored certs
+  H. Discovery gaps          unassigned domains inheritable from an
+                             already-assigned registrable domain (ready
+                             INSERT with the real org_id); dns_enum
+                             tls_candidates never scanned; scanned
+                             domains in no domain_list (won't recur in
+                             scheduled scans)
+  I. Access & schedules      schedules pointing at missing/empty lists;
+                             enabled schedules with next_run in the past
+                             (stalled scheduler); unknown user roles; no
+                             active admin; community_managers with no
+                             community grant; inactive users holding
+                             grants; stale lockout counters; audit_log
+                             usernames absent from users
+  J. Hygiene                 PRAGMA quick_check / foreign_key_check;
+                             non-ISO-8601 timestamps (break the app's
+                             lexicographic comparisons); IDN punycode /
+                             unicode duplicates; www hosts scanned
+                             without their apex
 
 Severities
 ──────────
@@ -66,6 +93,7 @@ import sqlite3
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -505,6 +533,346 @@ def check_quality(conn, st, rep: Report) -> None:
     for d in sorted(assigned - st["scanned"]):
         rep.add("INFO", sec, f"domain {d!r} is assigned to an organisation but has never been scanned")
 
+# ── New sections G–J ──────────────────────────────────────────────────────────
+
+RUN_TABLES = ("raw_scans", "assessments", "domain_extra", "roadmaps")
+KNOWN_EXTRA_TYPES = ("cipher_enum", "chain", "cdn", "ssllabs", "dns_enum")
+STUCK_RUN_HOURS = 24
+
+def _iso_utc(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat()
+
+def check_scan_lifecycle(conn, st, rep: Report) -> None:
+    sec = "G. Scan lifecycle"
+    runs = {r["run_id"]: dict(r) for r in conn.execute(
+        "SELECT run_id, started_at, finished_at, status, domain_list FROM scan_runs")}
+
+    # 1. orphan run_ids in scan-keyed tables
+    for tbl in RUN_TABLES:
+        if not table_exists(conn, tbl):
+            continue
+        for (rid,) in conn.execute(f"SELECT DISTINCT run_id FROM {tbl}"):
+            if rid is not None and rid not in runs:
+                rep.add("ERROR", sec,
+                        f"{tbl}: run_id {rid!r} has no scan_runs row",
+                        [f"DELETE FROM {tbl} WHERE run_id={sq(rid)};"])
+
+    cutoff = _iso_utc(datetime.now(timezone.utc) - timedelta(hours=STUCK_RUN_HOURS))
+    for rid, run in sorted(runs.items()):
+        started, finished = run["started_at"] or "", run["finished_at"] or ""
+        # 2. stuck running
+        if run["status"] == "running" and started and started < cutoff:
+            rep.add("WARN", sec,
+                    f"scan_run {rid!r} 'running' since {started} "
+                    f"(> {STUCK_RUN_HOURS}h — crashed run?)",
+                    [f"UPDATE scan_runs SET status='failed' WHERE run_id={sq(rid)};"])
+        # 3. finished before started
+        if started and finished and finished < started:
+            rep.add("ERROR", sec,
+                    f"scan_run {rid!r}: finished_at {finished} < started_at {started}")
+
+    # per-run (domain) coverage from raw_scans / assessments
+    run_scanned: dict[str, set[str]] = defaultdict(set)
+    for rid, d in conn.execute("SELECT run_id, domain FROM raw_scans"):
+        run_scanned[rid].add(norm_domain(d))
+    run_assessed: dict[str, set[str]] = defaultdict(set)
+    for rid, d in conn.execute("SELECT run_id, domain FROM assessments"):
+        run_assessed[rid].add(norm_domain(d))
+
+    for rid, run in sorted(runs.items()):
+        # 4. 'completed' runs with untouched targets
+        if run["status"] == "completed" and run["domain_list"]:
+            try:
+                targets = {norm_domain(str(d)) for d in json.loads(run["domain_list"])}
+            except Exception:
+                rep.add("WARN", sec, f"scan_run {rid!r}: domain_list is not valid JSON")
+                targets = set()
+            missing = sorted(t for t in targets if t and t not in run_scanned.get(rid, set()))
+            if missing:
+                rep.add("WARN", sec,
+                        f"scan_run {rid!r} is 'completed' but {len(missing)} target(s) "
+                        f"have no raw_scans rows (should be 'partial'?): "
+                        f"{missing[:5]}{' …' if len(missing) > 5 else ''}")
+        # 5. scanned but never assessed in the same run
+        if run["status"] == "running":
+            continue  # in-flight runs naturally lag
+        gap = sorted(run_scanned.get(rid, set()) - run_assessed.get(rid, set()))
+        if gap:
+            rep.add("WARN", sec,
+                    f"scan_run {rid!r}: {len(gap)} domain(s) have raw_scans but no "
+                    f"assessment: {gap[:5]}{' …' if len(gap) > 5 else ''} "
+                    f"-- re-run scripts/reassess_all.py")
+
+    # 6. duplicate assessments per (run_id, domain)
+    for rid, d, n in conn.execute(
+            "SELECT run_id, domain, COUNT(*) FROM assessments "
+            "GROUP BY run_id, domain HAVING COUNT(*) > 1"):
+        rep.add("WARN", sec,
+                f"assessments: {n} rows for (run {rid!r}, domain {d!r}) — "
+                f"'newest wins' becomes ambiguous",
+                [f"DELETE FROM assessments WHERE run_id={sq(rid)} AND domain={sq(d)} "
+                 f"AND id NOT IN (SELECT MAX(id) FROM assessments "
+                 f"WHERE run_id={sq(rid)} AND domain={sq(d)});"])
+
+    # 7. newest raw scan newer than newest assessment (stale dashboard)
+    latest_scan: dict[str, str] = {}
+    for d, ts in conn.execute(
+            "SELECT domain, MAX(scanned_at) FROM raw_scans GROUP BY domain"):
+        latest_scan[norm_domain(d)] = (ts or "")[:10]
+    latest_assess: dict[str, str] = {}
+    for d, ts in conn.execute(
+            "SELECT domain, MAX(assessed_at) FROM assessments GROUP BY domain"):
+        latest_assess[norm_domain(d)] = (ts or "")[:10]
+    stale = sorted(d for d, s in latest_scan.items()
+                   if d in latest_assess and s > latest_assess[d])
+    if stale:
+        rep.add("INFO", sec,
+                f"{len(stale)} domain(s) have raw scans newer than their newest "
+                f"assessment — dashboard shows stale state: "
+                f"{stale[:8]}{' …' if len(stale) > 8 else ''}")
+
+    # 8. domain_extra sanity
+    for (dt_,) in conn.execute("SELECT DISTINCT data_type FROM domain_extra"):
+        if dt_ not in KNOWN_EXTRA_TYPES:
+            rep.add("WARN", sec, f"domain_extra: unknown data_type {dt_!r}")
+    for rowid, d, dt_, blob in conn.execute(
+            "SELECT id, domain, data_type, json_data FROM domain_extra"):
+        try:
+            json.loads(blob or "null")
+        except Exception:
+            rep.add("ERROR", sec,
+                    f"domain_extra[{rowid}] ({d!r}, {dt_!r}): json_data is not valid JSON",
+                    [f"DELETE FROM domain_extra WHERE id={rowid};"])
+
+    # 9. CT summary vs stored certificates
+    if table_exists(conn, "ct_queries") and table_exists(conn, "ct_certificates"):
+        cert_counts: dict[str, tuple[int, int]] = {}
+        for d, total, pqc in conn.execute(
+                "SELECT domain, COUNT(*), "
+                "SUM(CASE WHEN is_pqc_signature=1 OR is_pqc_pubkey=1 OR is_hybrid=1 "
+                "THEN 1 ELSE 0 END) FROM ct_certificates GROUP BY domain"):
+            cert_counts[norm_domain(d)] = (total, pqc or 0)
+        for d, total, pqc in conn.execute(
+                "SELECT domain, total_certs, pqc_certs FROM ct_queries "
+                "WHERE id IN (SELECT MAX(id) FROM ct_queries GROUP BY domain)"):
+            nd = norm_domain(d)
+            stored_total, stored_pqc = cert_counts.get(nd, (0, 0))
+            if (total or 0) > 0 and stored_total == 0:
+                rep.add("WARN", sec,
+                        f"ct_queries: {nd!r} reports total_certs={total} but no "
+                        f"ct_certificates rows are stored")
+            if (pqc or 0) > 0 and stored_pqc == 0:
+                rep.add("WARN", sec,
+                        f"ct_queries: {nd!r} reports pqc_certs={pqc} but no stored "
+                        f"certificate carries a PQC/hybrid flag")
+
+def check_discovery_gaps(conn, st, rep: Report) -> None:
+    sec = "H. Discovery gaps"
+    assigned = {norm_domain(r["domain"]) for r in st["dom_org"]}
+    reg_to_orgs: dict[str, set[int]] = defaultdict(set)
+    for r in st["dom_org"]:
+        reg_to_orgs[registrable(r["domain"])].add(r["org_id"])
+
+    # 1. inheritable assignments — the "scan first, group never" gap
+    for d in sorted(st["universe"] - assigned):
+        if not is_wellformed(d):
+            continue
+        oids = sorted(reg_to_orgs.get(registrable(d), set()))
+        if len(oids) == 1:
+            oid = oids[0]
+            name = st["orgs"].get(oid, {}).get("name", "?")
+            rep.add("INFO", sec,
+                    f"unassigned {d!r} shares registrable domain "
+                    f"{registrable(d)!r} with organisation [{oid}] {name!r} — "
+                    f"safe to inherit",
+                    [f"INSERT INTO domain_organisations(domain, org_id, assigned_at) "
+                     f"VALUES({sq(d)}, {oid}, strftime('%Y-%m-%dT%H:%M:%fZ','now'));"])
+        elif len(oids) > 1:
+            rep.add("INFO", sec,
+                    f"unassigned {d!r}: registrable {registrable(d)!r} maps to "
+                    f"several organisations {oids} — resolve manually")
+
+    # 2. dns_enum tls_candidates never scanned
+    if table_exists(conn, "domain_extra"):
+        for d, blob in conn.execute(
+                "SELECT domain, json_data FROM domain_extra WHERE data_type='dns_enum' "
+                "AND id IN (SELECT MAX(id) FROM domain_extra "
+                "WHERE data_type='dns_enum' GROUP BY domain)"):
+            try:
+                cands = json.loads(blob or "{}").get("tls_candidates", [])
+            except Exception:
+                continue
+            hosts = {norm_domain(c.get("host", "")) for c in cands
+                     if isinstance(c, dict) and is_wellformed(c.get("host", ""))}
+            unscanned = sorted(hosts - st["scanned"])
+            if unscanned:
+                rep.add("INFO", sec,
+                        f"{norm_domain(d)!r}: {len(unscanned)} discovered TLS "
+                        f"candidate(s) never scanned: "
+                        f"{unscanned[:6]}{' …' if len(unscanned) > 6 else ''}")
+
+    # 3. scanned domains in no domain_list — will not recur in scheduled scans
+    oneoffs = sorted(st["scanned"] - st["list_domains"])
+    oneoffs = [d for d in oneoffs if is_wellformed(d)]
+    if oneoffs:
+        rep.add("INFO", sec,
+                f"{len(oneoffs)} scanned domain(s) belong to no domain_list, so "
+                f"no schedule will ever rescan them: "
+                f"{oneoffs[:15]}{' …' if len(oneoffs) > 15 else ''}")
+
+def check_access_and_schedules(conn, st, rep: Report) -> None:
+    sec = "I. Access & schedules"
+    now = _iso_utc(datetime.now(timezone.utc))
+    list_ids = {r["id"] for r in st["domain_lists"]}
+    broken_ids = {r["id"] for r in st["broken_lists"]}
+
+    if table_exists(conn, "scheduled_scans"):
+        for r in conn.execute("SELECT id, name, domain_list_id, next_run, enabled "
+                              "FROM scheduled_scans"):
+            if r["domain_list_id"] is not None and r["domain_list_id"] not in list_ids:
+                rep.add("ERROR", sec,
+                        f"scheduled_scans[{r['id']}] {r['name']!r} references missing "
+                        f"domain_list id={r['domain_list_id']}",
+                        [f"DELETE FROM scheduled_scans WHERE id={r['id']};"])
+            elif r["domain_list_id"] in broken_ids and r["enabled"]:
+                rep.add("WARN", sec,
+                        f"scheduled_scans[{r['id']}] {r['name']!r} is enabled but its "
+                        f"domain_list is empty/broken")
+            if r["enabled"] and r["next_run"] and r["next_run"] < now:
+                rep.add("WARN", sec,
+                        f"scheduled_scans[{r['id']}] {r['name']!r}: next_run "
+                        f"{r['next_run']} is in the past — scheduler stalled or down?")
+
+    users = {r["id"]: dict(r) for r in conn.execute(
+        "SELECT id, username, role, is_active, failed_logins, locked_until FROM users")}
+    allowed_roles = ("admin", "analyst", "community_manager")
+    for uid, u in sorted(users.items()):
+        if u["role"] not in allowed_roles:
+            rep.add("ERROR", sec, f"users[{uid}] {u['username']!r}: unknown role {u['role']!r}")
+        if u["locked_until"] and u["locked_until"] < now and (u["failed_logins"] or 0) > 0:
+            rep.add("INFO", sec,
+                    f"users[{uid}] {u['username']!r}: lockout expired but "
+                    f"failed_logins={u['failed_logins']} never reset",
+                    [f"UPDATE users SET failed_logins=0, locked_until=NULL WHERE id={uid};"])
+    if users and not any(u["role"] == "admin" and u["is_active"] for u in users.values()):
+        rep.add("ERROR", sec, "no active admin user exists — the instance is unmanageable")
+
+    cm_grants = {r[0] for r in conn.execute("SELECT DISTINCT user_id FROM user_communities")}
+    for uid, u in sorted(users.items()):
+        if u["role"] == "community_manager" and u["is_active"] and uid not in cm_grants:
+            rep.add("WARN", sec,
+                    f"users[{uid}] {u['username']!r} is a community_manager with no "
+                    f"community grant — sees nothing")
+
+    # inactive users still holding grants
+    grant_tables = ("user_organisations", "user_communities", "user_domain_lists")
+    for tbl in grant_tables:
+        if not table_exists(conn, tbl):
+            continue
+        for (uid,) in conn.execute(f"SELECT DISTINCT user_id FROM {tbl}"):
+            u = users.get(uid)
+            if u and not u["is_active"]:
+                rep.add("INFO", sec,
+                        f"inactive users[{uid}] {u['username']!r} still holds grants in {tbl}",
+                        [f"DELETE FROM {tbl} WHERE user_id={uid};"])
+
+    # grants pointing at empty groups
+    orgs_with_domains = {r["org_id"] for r in st["dom_org"]}
+    for (oid,) in conn.execute("SELECT DISTINCT org_id FROM user_organisations"):
+        if oid in st["orgs"] and oid not in orgs_with_domains:
+            rep.add("INFO", sec,
+                    f"grant to organisation [{oid}] "
+                    f"{st['orgs'][oid]['name']!r} which has no domains")
+    comms_with_orgs = {r["community_id"] for r in st["comm_org"]}
+    for (cid,) in conn.execute("SELECT DISTINCT community_id FROM user_communities"):
+        if cid in st["communities"] and cid not in comms_with_orgs:
+            rep.add("INFO", sec,
+                    f"grant to community [{cid}] "
+                    f"{st['communities'][cid]['name']!r} which has no organisations")
+
+    # audit_log usernames absent from users (historic deletions — informational)
+    if table_exists(conn, "audit_log"):
+        known = {u["username"] for u in users.values()}
+        ghosts = sorted({r[0] for r in conn.execute(
+            "SELECT DISTINCT username FROM audit_log WHERE username IS NOT NULL")} - known)
+        if ghosts:
+            rep.add("INFO", sec,
+                    f"audit_log references {len(ghosts)} username(s) not in users "
+                    f"(deleted accounts?): {ghosts[:8]}{' …' if len(ghosts) > 8 else ''}")
+
+TS_COLUMNS = [
+    ("scan_runs", "started_at"), ("scan_runs", "finished_at"),
+    ("raw_scans", "scanned_at"), ("assessments", "assessed_at"),
+    ("domain_extra", "recorded_at"), ("ct_queries", "queried_at"),
+    ("organisations", "created_at"), ("communities", "created_at"),
+    ("domain_organisations", "assigned_at"), ("community_organisations", "added_at"),
+    ("domain_lists", "created_at"), ("domain_lists", "updated_at"),
+    ("users", "created_at"), ("users", "last_login"), ("users", "locked_until"),
+    ("audit_log", "timestamp"),
+]
+
+def check_hygiene(conn, st, rep: Report) -> None:
+    sec = "J. Hygiene"
+    # 1. SQLite self-checks
+    row = conn.execute("PRAGMA quick_check").fetchone()
+    if row and row[0] != "ok":
+        rep.add("ERROR", sec, f"PRAGMA quick_check: {row[0]!r} — possible corruption")
+    fk = defaultdict(int)
+    for r in conn.execute("PRAGMA foreign_key_check"):
+        fk[(r[0], r[2])] += 1
+    for (tbl, parent), n in sorted(fk.items()):
+        rep.add("ERROR", sec,
+                f"foreign_key_check: {n} row(s) in {tbl} violate FK to {parent} "
+                f"(SQLite FKs are OFF by default — see prevention roadmap P1)")
+
+    # 2. non-ISO-8601 timestamps break lexicographic comparisons
+    for tbl, col in TS_COLUMNS:
+        if not table_exists(conn, tbl):
+            continue
+        try:
+            (n,) = conn.execute(
+                f"SELECT COUNT(*) FROM {tbl} WHERE {col} IS NOT NULL AND {col}!='' "
+                f"AND {col} NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*'"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            continue
+        if n:
+            rep.add("ERROR", sec,
+                    f"{tbl}.{col}: {n} value(s) are not ISO-8601 "
+                    f"('YYYY-MM-DDT…') — ordering/comparison logic will misbehave")
+
+    # 3. IDN punycode vs unicode duplicates
+    seen_pairs: set[frozenset] = set()
+    for d in sorted(st["universe"]):
+        try:
+            if any(lbl.startswith("xn--") for lbl in d.split(".")):
+                uni = d.encode("ascii").decode("idna")
+                pair = frozenset((d, uni))
+                if uni != d and uni in st["universe"] and pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    rep.add("WARN", sec,
+                            f"{d!r} and {uni!r} are the same IDN stored twice "
+                            f"(punycode + unicode)")
+            elif not d.isascii():
+                puny = d.encode("idna").decode("ascii")
+                pair = frozenset((d, puny))
+                if puny in st["universe"] and pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    rep.add("WARN", sec,
+                            f"{d!r} and {puny!r} are the same IDN stored twice "
+                            f"(unicode + punycode)")
+        except Exception:
+            pass  # undecodable labels are caught by the malformed-domain check
+
+    # 4. www host scanned without its apex
+    orphan_www = sorted(d for d in st["universe"]
+                        if d.startswith("www.") and is_wellformed(d[4:])
+                        and d[4:] not in st["universe"])
+    if orphan_www:
+        rep.add("INFO", sec,
+                f"{len(orphan_www)} 'www.' host(s) present without their apex domain: "
+                f"{orphan_www[:10]}{' …' if len(orphan_www) > 10 else ''}")
+
 # ── Output ────────────────────────────────────────────────────────────────────
 
 def print_report(rep: Report, st: dict, min_sev: str, show_sql: bool) -> None:
@@ -601,6 +969,10 @@ def main(argv=None) -> int:
         check_duplicates(conn, st, rep)
         check_geo(conn, st, rep, load_geo_table())
         check_quality(conn, st, rep)
+        check_scan_lifecycle(conn, st, rep)
+        check_discovery_gaps(conn, st, rep)
+        check_access_and_schedules(conn, st, rep)
+        check_hygiene(conn, st, rep)
     finally:
         conn.close()
 

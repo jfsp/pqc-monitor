@@ -20,6 +20,7 @@
 8. [Known Issues & Technical Debt](#8-known-issues--technical-debt)
 9. [Critical Implementation Notes](#9-critical-implementation-notes)
 10. [Planned Features — Prioritised Backlog](#10-planned-features--prioritised-backlog)
+11. [Consistency Prevention Roadmap](#11-consistency-prevention-roadmap)
 
 ---
 
@@ -860,6 +861,161 @@ synced. New Python modules must be added to `WEB_TRIGGERS` or `SCHEDULER_TRIGGER
 
 ---
 
+## 11. Consistency Prevention Roadmap
+
+**Added 2026-07-12.** `scripts/audit_db_consistency.py` (Appendix D) *detects*
+inconsistencies; this section is the prioritised plan to *prevent* them at the
+source. Ordered by benefit relative to the size of the change to the existing
+code base — P1–P3 are small and eliminate whole bug classes; do them first.
+Status: **proposed, not yet implemented** — run the audit on production first,
+clean the ERRORs it reports (orphans, invariant rows, malformed domains), then
+start here. Each item is sized S/M/L and lists the files to touch.
+
+### P1 — Enable `PRAGMA foreign_keys=ON` (S)
+
+**Why:** SQLite ships with FK enforcement OFF, which is why orphan rows in
+`domain_organisations`, `community_organisations`, `user_*` and scan-keyed
+tables are possible at all. The schema already declares `ON DELETE CASCADE`;
+it just isn't enforced.
+
+**How:** in `data/database.py`, every place a connection is created (the
+`Database` connection helper — search for `sqlite3.connect`) execute
+`PRAGMA foreign_keys=ON` immediately after connect. Same in `auth/store.py`
+if it opens its own connections.
+
+**Gotchas:** enforcement applies to *new* operations only — existing orphans
+don't fail, but a `DELETE FROM organisations` will now cascade for real. Run
+the audit and remove orphans **before** enabling, then re-run
+`PRAGMA foreign_key_check` to confirm clean. Note `scheduled_scans` and the
+scan-keyed tables (`raw_scans.run_id` etc.) only benefit if their FKs are
+declared — check the CREATE statements and add FK clauses via migration where
+missing (table-rebuild pattern, or accept trigger-based checks from P3).
+
+**Test:** insert a `domain_organisations` row with a bogus `org_id` → must
+raise `IntegrityError`.
+
+### P2 — Single `canonical_domain()` choke point (S/M)
+
+**Why:** the MX-priority bug class, case variants (`WWW.bde.es` vs
+`www.bde.es`), trailing dots and punycode/unicode IDN duplicates all exist
+because normalisation happens per-module, inconsistently. One function, called
+at every ingress, removes four audit categories.
+
+**How:** new `data/domains.py` with `canonical_domain(value) -> str`:
+strip → lowercase → rstrip `'.'` → IDN unicode→punycode (`encode('idna')`)
+→ validate against the FQDN regex (lift `_DOMAIN_RE` and `norm_domain()` from
+`scripts/audit_db_consistency.py`) → return `''` on malformed input (callers
+decide reject vs skip). Call it at: domain-list create/update endpoints
+(dashboard API), scan-target expansion (scanner entry point), dns_enum
+ingestion (consolidate with `normalise_mx_host` in
+`scripts/fix_mx_entries.py` — move that logic here), org assignment
+endpoints, and CT query submission.
+
+**Gotchas:** decide the canonical IDN form once (punycode recommended —
+ASCII-safe everywhere) and render unicode only at display time. Historic rows
+stay as-is until cleaned with `fix_mx_entries.py`-style scripts.
+
+**Test:** parametrised unit test with the fix_mx_entries cases plus IDN pairs
+(`españa.es` ↔ `xn--espaa-rta.es`).
+
+### P3 — DB-level invariants (S/M)
+
+**Why:** the 1.9.1 scoring bug (`services_assessed=0` with `level='weak'`)
+sat undetected because nothing at the storage layer forbids it. Make the bad
+row an insert failure instead of a silent inconsistency.
+
+**How:** SQLite can't `ALTER TABLE … ADD CHECK`, so prefer **triggers** in a
+new migration (avoids the table-rebuild pattern): `BEFORE INSERT` and
+`BEFORE UPDATE` on `assessments` with
+`SELECT RAISE(ABORT, '…') WHERE NEW.services_assessed=0 AND NEW.level!='na'`,
+plus score-range and level-set triggers. Add
+`CREATE UNIQUE INDEX idx_assess_run_domain ON assessments(run_id, domain)` —
+**deduplicate first** (the audit's section G suggested-SQL keeps `MAX(id)`).
+
+**Gotchas:** reassessment flows must UPDATE-or-replace rather than blind
+INSERT once the unique index exists — check `reassess_all.py` and the
+assessment writer in the scanner pipeline.
+
+### P4 — Geo: derive, don't triplicate (M)
+
+**Why:** `country_code`, `country`, `region` are three independently editable
+columns on `organisations`; drift is guaranteed (audit section E).
+
+**How:** treat `country_code` as the only stored fact. Resolve `country` and
+`region` at read time through `data/geo_inference._load_table()` (index by
+country_code), or keep the columns but add a `resync_geo()` maintenance
+function (invoked at startup or from a script) that rewrites them from
+`tld_geo.csv`. Restrict the org create/edit API to accept `country_code`
+only.
+
+**Gotchas:** codes absent from `tld_geo.csv` must keep their stored display
+values; region granularity — if you want finer regions than the CSV
+("Southern Europe" vs "Europe"), enrich the CSV rather than hand-editing
+org rows, otherwise the audit will keep flagging them.
+
+### P5 — Auto-inherit org assignment at discovery time (M)
+
+**Why:** this is the workflow gap: scans (list- or TLD-driven) plus dns_enum
+discovery create domains that never get grouped, so dashboards by org/
+community silently under-count. Audit section H finds them after the fact;
+this closes the gap at write time.
+
+**How:** migration adds `source TEXT DEFAULT 'manual'` to
+`domain_organisations`. In the scanner pipeline where discovered hosts
+(dns_enum `tls_candidates`, MX hosts) become scan targets — and where scan
+targets are first persisted — compute the registrable domain (lift
+`registrable()` from the audit script into `data/domains.py`, P2) and look it
+up against existing assignments: exactly one org → insert with
+`source='inherited'`; several orgs → skip and log. Optionally surface a
+"pending assignment" admin view for the skipped/ambiguous ones.
+
+**Gotchas:** respect P2 normalisation before lookup; make the insert
+idempotent (`INSERT OR IGNORE`, the PK is `(domain, org_id)`).
+
+### P6 — Org create/edit guardrails in the UI/API (M)
+
+**Why:** duplicate/similar org names and wrong geo values enter through the
+admin forms.
+
+**How:** on org create/update: (a) fuzzy-match the submitted name against
+existing orgs — normalise (lowercase, strip accents/punctuation/legal
+suffixes; lift `norm_org_name()` from the audit script) then
+`difflib.SequenceMatcher ≥ 0.87` — and require an explicit confirm on match;
+(b) run `infer_from_domains()` (already exists in `data/geo_inference.py`)
+over the org's domains and warn when the submitted `country_code`
+contradicts the inference.
+
+### P7 — Scheduler run watchdog (S)
+
+**Why:** crashed runs stay `status='running'` forever (audit section G).
+
+**How:** in the APScheduler daemon (`scheduler/`), add a periodic job (and a
+startup pass) that sets `status='failed'`, appending a watchdog note, for
+runs `running` longer than a configurable timeout (`config.yaml` key, default
+24h). Mirrors the audit's `STUCK_RUN_HOURS`.
+
+### P8 — Schedule the audit itself (M)
+
+**Why:** inconsistencies should surface days after they appear, not when a
+dashboard number looks odd.
+
+**How:** refactor `scripts/audit_db_consistency.py` so the checks are
+importable (move the check functions + `Report` into `data/consistency.py`;
+the script becomes a thin CLI). Add a weekly APScheduler job that runs the
+checks and stores the ERROR/WARN/INFO counts (new small table
+`consistency_reports` or an `audit_log` action). Dashboard admin card shows
+the latest counts with a drill-down to the text report.
+
+**Suggested order of work for the next session:**
+1. Run the audit on production; apply reviewed fixes for ERRORs
+   (orphans → FK cleanup; invariant rows → `reassess_all.py` /
+   `fix_notls_level.py`; malformed domains → `fix_mx_entries.py`).
+2. Implement P1 + P3 (lock the door), then P2 (normalisation), each as one
+   conventional commit with tests.
+3. P4–P8 in order as time allows; P5 depends on P2's `data/domains.py`.
+
+---
+
 ## Appendix A — Running the Test Suite
 
 ```bash
@@ -938,5 +1094,6 @@ python3 scripts/fix_notls_level.py
 | `scripts/fix_notls_level.py` | One-time retroactive fix for critical→na no-TLS rows |
 | `scripts/bulk_assign.py` | Bulk region/community assignment from org name list |
 | `scripts/bulk_org_assign.py` | Bulk domain→org assignment by TLD |
+| `scripts/audit_db_consistency.py` | Read-only DB consistency audit (sections A–J) with commented fix SQL; see §11 |
 | `scripts/diagnose.py` | Shodan/DNSDumpster connectivity diagnostic |
 | `scripts/wait-for-db.sh` | DB readiness poll (systemd ExecStartPre for scheduler) |

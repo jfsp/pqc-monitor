@@ -13,9 +13,14 @@ schedule covering every assessed domain.
     python3 scripts/schedule_audit.py --create-monthly
     python3 scripts/schedule_audit.py --create-monthly --interval-days 7
 
---create-monthly maintains ONE auto-managed domain list holding every assessed
-domain, driven by ONE monthly schedule. It is idempotent, so it is safe to run
-from cron to keep coverage complete as new domains are assessed.
+--create-monthly maintains ONE auto-managed domain list holding every
+SERVICEABLE assessed domain, driven by ONE monthly schedule. It is idempotent,
+so it is safe to run from cron to keep coverage complete as new domains are
+assessed. Domains whose latest level is "na" (no reachable TLS service, e.g.
+DMARC/DKIM-only DNS) are excluded by default, since scanning them just burns
+connect timeouts to reconfirm there is nothing to grade. Pass --include-na to
+scan them anyway; a domain that later gains a service is picked up
+automatically on the next run.
 
 The audit itself is read-only; only --create-monthly writes (to domain_lists
 and scheduled_scans). PQC-Monitor's scheduler loads schedules once at daemon
@@ -90,10 +95,14 @@ def _print_report(report, action):
 
     cov = report["coverage"]
     pct = "n/a" if cov is None else f"{cov * 100:.0f}%"
+    scope = "known" if report.get("include_na") else "serviceable"
     print("")
     print("Coverage")
-    print(f"  {len(report['covered'])} of {report['known_domains']} assessed "
+    print(f"  {len(report['covered'])} of {report['known_domains']} {scope} "
           f"domain(s) covered ({pct})")
+    if report.get("na_excluded"):
+        print(f"  no-service (na) excluded: {report['na_excluded']} "
+              f"(of {report['known_total']} known)")
     if report["uncovered"]:
         shown = ", ".join(report["uncovered"][:15])
         more = ("" if len(report["uncovered"]) <= 15
@@ -142,6 +151,9 @@ def main() -> int:
                          f"(default {DEFAULT_INTERVAL_DAYS} = monthly)")
     ap.add_argument("--dry-run", action="store_true",
                     help="Report what --create-monthly would change, then exit")
+    ap.add_argument("--include-na", action="store_true",
+                    help="Include no-service (level=na) domains in the target "
+                         "set (default: exclude them)")
     args = ap.parse_args()
 
     db_path = _load_db_path(args)
@@ -158,9 +170,10 @@ def main() -> int:
     action = None
     if args.create_monthly:
         action = create_monthly_all_domains(
-            db, args.interval_days, dry_run=args.dry_run)
+            db, args.interval_days, dry_run=args.dry_run,
+            include_na=args.include_na)
 
-    report = audit_schedules(db)
+    report = audit_schedules(db, include_na=args.include_na)
     if args.json:
         payload = {"audit": report}
         if action:

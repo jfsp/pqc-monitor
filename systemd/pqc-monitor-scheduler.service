@@ -43,7 +43,7 @@ Environment=PQC_DB_PATH=/var/lib/pqc-monitor/pqc_monitor.db
 # PQC_DB_PATH must match database.path in config.yaml.
 # Timeout and poll interval are positional args; no shell variable expansion
 # occurs in this directive so $waited/$limit do not trigger systemd warnings.
-ExecStartPre=/opt/pqc-monitor/scripts/wait-for-db.sh $PQC_DB_PATH 60
+ExecStartPre=/bin/bash /opt/pqc-monitor/scripts/wait-for-db.sh $PQC_DB_PATH 60
 
 ExecStart=/opt/pqc-monitor/.venv/bin/python3 \
     /opt/pqc-monitor/pqc_monitor.py scheduler-daemon

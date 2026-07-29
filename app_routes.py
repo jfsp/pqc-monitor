@@ -190,6 +190,56 @@ def api_organisations():
     return jsonify([o for o in orgs if o])
 
 
+# TCP port -> service label. Direct-TLS ports plus the STARTTLS set; anything
+# not listed is rendered as "port N" by the caller.
+_PORT_SERVICE = {
+    443:  "HTTPS",
+    8443: "HTTPS-alt",
+    465:  "SMTPS",
+    993:  "IMAPS",
+    995:  "POP3S",
+    636:  "LDAPS",
+    5061: "SIP-TLS",
+    25:   "SMTP (STARTTLS)",
+    587:  "Submission (STARTTLS)",
+    2525: "Submission-alt (STARTTLS)",
+    143:  "IMAP (STARTTLS)",
+    110:  "POP3 (STARTTLS)",
+    389:  "LDAP (STARTTLS)",
+}
+
+
+def _tls_ports_for(db, domain):
+    """
+    Ports on which the latest scan of *domain* successfully negotiated TLS.
+
+    Computed from the most recent run only (not the truncated scans list), so
+    a domain with services on many ports is reported completely. Returns a
+    port-sorted list of {port, service, tls_version}. Empty for no-service
+    domains.
+    """
+    run_id = db.get_latest_run_id_for_domain(domain)
+    scans = db.get_domain_scans(domain, run_id) if run_id \
+        else db.get_domain_scans(domain)
+
+    by_port = {}
+    for s in scans:
+        if not s.get("success"):
+            continue
+        port = s.get("port")
+        if port in (None, 0):
+            continue
+        entry = by_port.get(port)
+        # Prefer the record that actually carries a TLS version.
+        if entry is None or (not entry.get("tls_version") and s.get("tls_version")):
+            by_port[port] = {
+                "port":        port,
+                "service":     _PORT_SERVICE.get(port, f"port {port}"),
+                "tls_version": s.get("tls_version", "") or "",
+            }
+    return [by_port[p] for p in sorted(by_port)]
+
+
 @app_bp.route("/api/domain/<domain>")
 @require_auth
 def api_domain_detail(domain):
@@ -204,8 +254,10 @@ def api_domain_detail(domain):
     scans   = db.get_domain_scans(domain)
     extra   = db.get_latest_domain_extra(
         domain, data_types=["cipher_enum", "chain", "cdn", "ssllabs"])
+    tls_ports = _tls_ports_for(db, domain)
     return jsonify({"domain": domain, "history": history,
-                    "scans": scans[:5], "extra": extra})
+                    "scans": scans[:5], "extra": extra,
+                    "tls_ports": tls_ports})
 
 
 def _ssllabs_client():

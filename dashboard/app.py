@@ -1599,6 +1599,13 @@ function sslLabsBadge(sl, domain) {
     ${sl.test_time?`<span style="color:var(--muted);font-size:.7rem;margin-left:.4rem">(${sl.test_time.slice(0,10)})</span>`:''}</div>`;
 }
 
+// Render the list of TCP ports serving TLS (from /api/domain -> tls_ports).
+function renderTlsPorts(ports) {
+  const list = ports || [];
+  if (!list.length) return '<span style="color:var(--muted)">— none detected</span>';
+  return list.map(p => `<span style="font-family:var(--font-mono);font-size:.72rem;padding:.1rem .4rem;margin-right:.3rem;border-radius:3px;background:rgba(255,255,255,.06)">${p.port}<span style="color:var(--muted)"> ${p.service||''}</span>${p.tls_version?` · ${p.tls_version}`:''}</span>`).join('');
+}
+
 let _detailDomain     = null;   // domain currently shown in modal / full view
 let _detailData       = null;   // cached /api/domain response
 let _detailAssessment = null;   // cached latest assessment row
@@ -1645,6 +1652,7 @@ async function showDomainDetail(domain) {
       <div>
         <div style="color:var(--muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">Details</div>
         <div style="font-size:.8rem">TLS: <span style="color:var(--accent)">${(tryJSON(a.tls_versions)||[]).join(', ')||'—'}</span></div>
+        <div style="font-size:.8rem;margin-top:.25rem">TLS ports: ${renderTlsPorts(d.tls_ports)}</div>
         ${cipherSummary}
         <div style="font-size:.8rem;margin-top:.25rem">PQC: <span style="${a.has_pqc?'color:#a78bfa':'color:var(--muted)'}">${a.has_pqc?'Detected':'Not detected'}</span></div>
         ${a.cert_expiry_days!=null?`<div style="font-size:.8rem;margin-top:.25rem">Cert expires: <span style="color:${a.cert_expiry_days<30?'var(--critical)':'var(--text)'}">${a.cert_expiry_days} days</span></div>`:''}
@@ -1777,6 +1785,7 @@ function renderDomainFull() {
 
   body.innerHTML = `
     <div style="font-size:.8rem;margin-bottom:1rem">TLS protocols: <span style="color:var(--accent)">${(tryJSON(a.tls_versions)||[]).join(', ')||'—'}</span></div>
+    <div style="font-size:.8rem;margin-bottom:1rem">TLS-serving ports: ${renderTlsPorts(d.tls_ports)}</div>
     ${geHtml}
     <div style="color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">Accepted cipher suites</div>
     ${cipherHtml}

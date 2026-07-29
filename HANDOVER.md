@@ -1,8 +1,8 @@
 # PQC-Monitor — Developer Handover Document
 
-**Version:** 1.9.1
-**Date:** 2026-07-09
-**Status:** Active development — full cipher detail + SSL Labs integration; MX + SMTP/STARTTLS fixes
+**Version:** 1.10.0
+**Date:** 2026-07-12
+**Status:** Active development — full cipher detail + SSL Labs integration; MX + SMTP/STARTTLS fixes; PQC detection rewritten (offered-group enumeration); DB index fix
 **Purpose:** Context transfer for continuing development in a new session
 **Repository:** https://github.com/jfsp/pqc-monitor
 
@@ -93,6 +93,7 @@ sudo scripts/deploy.sh --from abc1234
 | 1.8.0 | Fix: community report scoping; DNS enum quota detection + passive fallback; --skip-scanned; test scripts |
 | 1.9.0 | Full cipher detail in UI (drill-down view); findings name specific ciphers; CAMELLIA/SEED probes; SSL Labs API v4 integration (T3-3, display-only) |
 | 1.9.1 | Fix: MX priority/non-FQDN normalisation (+ DB repair script); SMTP/STARTTLS reported no-TLS on 465/587/2525 (protocol-based dispatch, added 2525) |
+| 1.10.0 | **PQC detection was broken for every server ever scanned** — rewritten to enumerate the key-exchange groups the server *offers* (raw ClientHello + HelloRetryRequest). New `scanner/group_enum.py`, `scripts/pqc_selftest.py`, GREASE soundness control, `domain_extra` index fix (full table scan → indexed) |
 
 ### 2.8 — v1.8.0 detail
 
@@ -352,6 +353,127 @@ upgrade and report TLS 1.3.
 `tests/test_mx_and_smtp.py` (new).
 
 
+### 2.11 — v1.10.0 detail
+
+**PQC detection rewritten: grade on OFFERED key-exchange groups**
+
+#### The bug (critical — affected every scan ever performed)
+
+`has_pqc` was decided by regex-matching PQC indicators (`mlkem`, `kyber`, …)
+against the **cipher suite name** (`tls_probe._detect_pqc`,
+`crypto_extractor.PQC_KEM_PATTERNS`). In TLS 1.3 the cipher suite encodes only
+AEAD + hash (`TLS_AES_256_GCM_SHA384`). The key-exchange group — where ML-KEM
+actually lives — is carried in the `supported_groups` / `key_share` extensions
+and **never appears in the suite name**. The regex therefore could not fire for
+any real server.
+
+Consequence: **`has_pqc` was `False` for every domain in the database,
+regardless of the truth.** The entire historical PQC column is uninformative —
+not merely stale. Discovered because `www.bportugal.pt` showed "not PQC" while
+testssl/SSL Labs both reported `X25519MLKEM768`.
+
+#### Design decision: offered, not negotiated
+
+The *negotiated* group is a property of the **client-server pair** — different
+browsers negotiate different groups against the same server — so it is not a
+stable measure of server readiness. Grading is therefore based on the groups the
+server **offers**. `pqc_grading_basis` records which basis was used
+(`"offered"` = authoritative; `"negotiated"` = fallback, no group_enum data).
+
+#### Why a raw ClientHello, and not the `ssl` module
+
+There is **no way to enumerate offered groups via Python's `ssl` module** on
+current interpreters. Verified on the production box (Python 3.13.5, OpenSSL
+3.5.6):
+
+| API | Status |
+|-----|--------|
+| `SSLSocket.group()` | **Does NOT exist in 3.13** — part of unmerged CPython proposal gh-136306. `hasattr(...) == False` |
+| `SSLContext.set_ecdh_curve()` w/ group list | Accepts a group list via `SSL_CTX_set1_groups_list` only from **Python 3.14** |
+| `SSLContext.set_groups()` | Unmerged proposal |
+
+So `scanner/group_enum.py` speaks TLS 1.3 directly (RFC 8446 §4.1.4):
+
+> For each candidate group G, send a ClientHello with
+> `supported_groups = [G]` and an **EMPTY `key_share`**.
+> A server that supports G cannot proceed without key material, so it replies
+> with a **HelloRetryRequest naming G**. A server that does not support G sends
+> a fatal alert (`handshake_failure` / `insufficient_security`).
+>
+> `HelloRetryRequest naming G` → **G is OFFERED**  ·  `fatal alert` → not offered
+
+The handshake is **never completed**, so **no local ML-KEM implementation is
+needed**. This is stack-independent — it kept working correctly even while our
+assumptions about the interpreter were wrong, which is precisely why it was
+chosen over any `ssl`-module approach.
+
+Cost: one TCP connection per candidate group (~15/domain), on top of cipher enum.
+
+#### Soundness control (GREASE)
+
+`group_enum.probe_negative_control()` probes RFC 8701 GREASE codepoints
+(`0x0A0A`, `0xDADA`) which **no conformant server may ever select**. If the
+enumerator reports one as "offered", it is producing false positives and every
+result is suspect. This is **host-independent** — unlike a "known-classical
+host" baseline, which is unreliable because any public host can sit behind a
+PQC-enabled CDN (`example.com` resolves to a Cloudflare edge and duly offers
+Cloudflare's PQC groups — this caused a spurious FAIL during development).
+
+The self-test runs this gate before anything else. **If it trips, ignore the
+rest of the output.**
+
+#### Validation
+
+`scripts/pqc_selftest.py` — standalone, not wired into startup. Exercises the
+real scanner path against reference hosts and cross-checks against **testssl.sh**.
+
+- **testssl, not sslscan.** testssl reports `KEMs offered: MLKEM1024
+  X25519MLKEM768` — the offered set, the exact property we grade on. **sslscan
+  (2.1.5) reports only `Server Key Exchange Group(s)` — the NEGOTIATED group** —
+  so it structurally cannot corroborate offered groups and will look like a false
+  negative. Wrong instrument, at any OpenSSL version.
+- testssl must be a **full checkout** (needs its `etc/` data files). Installed at
+  `/opt/testssl/`; honours `$PQC_TESTSSL`.
+- testssl scans **every A record** by default (why `google.com` timed out at
+  130 s). Flags used: `--ip one --nodns min --warnings batch --quiet --color 0`,
+  with a separate `--testssl-timeout` (default 300 s).
+
+Verified: our probe returned `[X25519MLKEM768, MLKEM1024]` for `www.google.com`,
+an **exact match** with testssl's `KEMs offered`.
+
+#### Performance fix (found while backfilling 5 094 domains)
+
+`get_latest_domain_extra()` filters `WHERE domain=?`, but the only index led with
+`run_id` — **wrong leading column, so SQLite did a full table scan on every
+call** (`EXPLAIN QUERY PLAN` → `SCAN domain_extra`). At 5 094 domains × 30 runs
+this was ~31 ms/domain → **~2.6 minutes of silent grinding** before the first log
+line.
+
+- New index `idx_domain_extra_domain ON domain_extra(domain, data_type,
+  recorded_at)` — created automatically via `CREATE INDEX IF NOT EXISTS` at DB
+  init, **no migration step**. Expect a one-off pause while SQLite builds it.
+- New bulk helpers `domains_with_successful_extra()` / `latest_extra_bulk()` —
+  one query instead of one per domain.
+- **This index was pre-existing debt**, not introduced here: the score-only
+  reassess path and the dashboard domain-detail view were also full-scanning.
+  Both should be noticeably faster now.
+
+#### Reading the logs
+
+- `Group enum host:443: 0 offered (none) — PQC: no` — usually means the host
+  **does not support TLS 1.3** (our ClientHello offers TLS 1.3 only, so a
+  TLS 1.2-only server rejects every probe). `has_pqc=False` is correct here;
+  the wording is just terse.
+- `pqc_grading_basis: "negotiated"` on a row means it has **no group_enum data**
+  and its PQC status should not be trusted.
+
+**Files changed:** `scanner/group_enum.py` (new), `scanner/tls_probe.py`,
+`scanner/cipher_enum.py`, `scanner/crypto_assessor.py`, `scanner/orchestrator.py`,
+`dashboard/app.py`, `data/database.py`, `scripts/reassess_all.py`,
+`scripts/pqc_selftest.py` (new).
+
+---
+
 ### 2. Production actions taken this session (on the live DB)
 
 1. Ran `fix_mx_entries.py` — repaired malformed `domain` keys
@@ -368,6 +490,71 @@ upgrade and report TLS 1.3.
 
 The fixed assessor + reassess prevent recurrence: a re-run now writes a
 correct `na` that becomes the newest row.
+
+---
+
+### 3.1 Deployment checklist — v1.10.0 (PQC rewrite)
+
+**IN PROGRESS AT END OF SESSION — the PQC backfill rescan.**
+
+Every domain scanned before v1.10.0 has an untrustworthy `has_pqc` (see 2.11).
+A **full network rescan is required** — score-only reassess **cannot** fix it,
+because `group_enum` blobs do not exist in historical rows and can only be
+produced from the network.
+
+Status at handover: started with `--limit 10`, verified working. **~4 909 of
+5 094 domains still need the backfill.**
+
+```bash
+# 0. Verify the enumerator is sound on this host FIRST.
+#    If the GREASE negative control fails, STOP — results are meaningless.
+python3 scripts/pqc_selftest.py --testssl
+
+# 1. Dry run — should list every domain lacking group_enum data
+python3 scripts/reassess_all.py --rescan --only-missing-groups --dry-run
+
+# 2. Resume the backfill (idempotent: domains drop out as they gain
+#    group_enum blobs, so it is safe to interrupt and re-run)
+python3 scripts/reassess_all.py --rescan --only-missing-groups --workers 2 --sleep 3
+```
+
+- `--only-missing-groups` treats a **failed** `group_enum` blob as missing, so
+  errored domains are retried rather than silently masked.
+- Keep `--workers` low (e2-micro). Group enum adds ~15 TCP connections/domain.
+- If too slow, trim `GROUPS` in `scanner/group_enum.py` to the 8 PQC entries
+  plus a classical sentinel or two — the classical groups are informational and
+  not load-bearing for the score.
+
+**Expect a step change in the PQC trend charts** once the backfill completes:
+PQC-positive domains will jump from ~zero to their true count. This is a
+**measurement artefact, not a migration event** — note it in any report that
+spans the boundary.
+
+### 3.2 Still open / not verified
+
+- **SSL Labs "not configured (ssllabs.email)"** — reported this session, root
+  cause **not confirmed**. The repo code is correct (verified in a sandbox:
+  `load_config()` → `app_factory` → `SSLLabsClient(...).available == True` with
+  the email set). Most likely a **stale gunicorn worker** holding the pre-edit
+  config (`app.config["SSLLABS_EMAIL"]` is computed once at worker boot, so a
+  CLI test passes while the web app does not). Try first:
+  ```bash
+  sudo systemctl restart pqc-monitor-web
+  ```
+  If it persists, check for a diverged deployed tree:
+  ```bash
+  sudo -u pqcmonitor python3 -c "import sys; sys.path.insert(0,'/opt/pqc-monitor'); \
+  from pqc_monitor import load_config; c=load_config(); \
+  print('email=',repr(c.get('ssllabs_email')),'enabled=',c.get('ssllabs_enabled'))"
+  grep -n "SSLLABS_EMAIL" /opt/pqc-monitor/app_factory.py
+  ```
+- **testssl timing** — flags were tuned to stop the 130 s timeouts, but the
+  real-world timings were still being measured at end of session. May need
+  further trimming.
+- **Negotiated group is permanently blank** (`key_group=""`, UI shows `—`)
+  until CPython merges gh-136306. The code is guarded with `hasattr` and will
+  populate automatically when the API lands. This is expected, not a bug, and
+  does **not** affect grading.
 
 ---
 
@@ -440,6 +627,9 @@ pqc-monitor/
 │   ├── crypto_assessor.py  # Scoring engine (guidelines → findings → score/level)
 │   ├── crypto_extractor.py # Certificate field parser
 │   ├── cipher_enum.py      # Cipher suite enumerator
+│   ├── group_enum.py       # OFFERED key-exchange group enumerator — raw TLS 1.3
+│   │                       #   ClientHello + HelloRetryRequest. AUTHORITATIVE
+│   │                       #   source for PQC grading (NEW v1.10.0)
 │   ├── chain_validator.py  # Certificate chain analyser
 │   ├── cdn_detector.py     # CDN fingerprinter
 │   ├── dns_enumerator.py   # DNS deep-dive (CT SANs + wordlist + DNSDumpster + passive)
@@ -454,6 +644,9 @@ pqc-monitor/
 │   ├── bulk_assign.py      # Bulk region/community assignment from org name list
 │   ├── bulk_org_assign.py  # Bulk domain→org assignment by TLD
 │   ├── diagnose.py         # API connectivity diagnostic
+│   ├── pqc_selftest.py     # PQC detection self-test + testssl cross-check
+│   │                       #   (standalone; NOT run at startup) (NEW v1.10.0)
+│   ├── reassess_all.py     # Reassess/rescan every domain (--only-missing-groups)
 │   ├── shodan-test.sh      # Shodan API key + plan capability test (NEW v1.8.0)
 │   ├── dnsdumpster-test.sh # DNSDumpster API key test (NEW v1.8.0)
 │   └── wait-for-db.sh      # DB readiness poll for systemd ExecStartPre
@@ -538,6 +731,13 @@ enumerate_domain(domain)
 **Current schema version:** 17 (managed by `data/migrations.py`)
 
 ### Key tables
+
+> **v1.10.0:** `domain_extra` gained a `group_enum` `data_type` (offered
+> key-exchange groups; authoritative for PQC) and a new index
+> `idx_domain_extra_domain(domain, data_type, recorded_at)`. The pre-existing
+> index led with `run_id`, so the domain-only lookups in
+> `get_latest_domain_extra()` were full table scans. Created automatically at DB
+> init — no migration step.
 
 **`scan_runs`** — one row per scan job
 ```sql
@@ -693,6 +893,22 @@ Fix: move cipher strings to a JSON data file. See §10 T1-1.
 
 ~2300-line file with HTML+CSS+JS as a Python string. New views should use
 `static/` + Jinja2 templates.
+
+### 8.3a Group enumeration adds ~15 TCP connections per domain
+
+`scanner/group_enum.py` opens one connection per candidate group. On a large
+estate this is the dominant new scan cost. If it hurts, trim `GROUPS` to the
+8 PQC entries plus a classical sentinel; the classical groups are informational
+and do not affect the score. The probes are also trivially parallelisable
+(`ThreadPoolExecutor`, as `cipher_enum` already does) — not done yet.
+
+### 8.3b Negotiated key-exchange group is unreadable from Python
+
+`SSLSocket.group()` does not exist in CPython (unmerged proposal gh-136306), so
+`key_group` is always `""` and the UI shows `—`. Guarded with `hasattr`, so it
+will populate automatically once the API lands. **Does not affect PQC grading**,
+which uses offered groups. Do not "fix" this by reintroducing cipher-suite-name
+matching — that is the original v1.10.0 bug.
 
 ### 8.3 Cipher enumeration is slow
 

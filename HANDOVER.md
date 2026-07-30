@@ -95,6 +95,50 @@ sudo scripts/deploy.sh --from abc1234
 | 1.9.1 | Fix: MX priority/non-FQDN normalisation (+ DB repair script); SMTP/STARTTLS reported no-TLS on 465/587/2525 (protocol-based dispatch, added 2525) |
 | 1.10.0 | **PQC detection was broken for every server ever scanned** — rewritten to enumerate the key-exchange groups the server *offers* (raw ClientHello + HelloRetryRequest). New `scanner/group_enum.py`, `scripts/pqc_selftest.py`, GREASE soundness control, `domain_extra` index fix (full table scan → indexed) |
 
+### 2.7b — Unreleased (delivered 2026-07-31 session, pending version tags)
+
+Four independently-deployable changes were delivered this session as
+ready-to-deploy zips + conventional-commit messages. Version numbers below are
+**proposed**; assign on deploy.
+
+- **Schedule coverage audit + monthly auto-schedule** (proposed v1.11.0).
+  New `scheduler/schedule_audit.py` (logic) + `scripts/schedule_audit.py` (CLI).
+  Reports which assessed domains are in no enabled schedule and can create/
+  refresh ONE auto-managed monthly schedule (`--create-monthly`, default 30d,
+  `--interval-days` overrides). Idempotent/cron-safe; decoupled from
+  APScheduler (writes tables directly). **`level=na` (no-service) domains are
+  excluded by default** — scanning them is the worst-case unit of work
+  (~13 timeout-bound connects); `--include-na` opts them back in. Selection is
+  by *current* latest level, so na→service domains reconcile in and vice-versa.
+  No live reload: after a write, restart `pqc-monitor-scheduler`.
+
+- **Dashboard shows TLS-serving ports** (proposed v1.11.0). `app_routes.py`
+  `api_domain_detail` now returns `tls_ports` (from the latest run's successful
+  probes, not the truncated `scans[:5]`); `dashboard/app.py` renders a
+  "TLS ports" line in the summary box and "TLS-serving ports" in the drill-down.
+  `_PORT_SERVICE` labels direct-TLS + STARTTLS ports; unknown → "port N".
+
+- **User management Phase 1 — self-service password reset + auth hardening**
+  (proposed v1.12.0). See `HANDOVER_user_mgmt.md` for the full spec. Summary:
+  optional SMTP mailer (`auth/mailer.py`; local MTA or authenticated relay);
+  public `/forgot` + `/reset/<token>` (single-use, hashed, expiring tokens;
+  generic responses; per-IP rate limit); **session invalidation on password
+  change** via `users.session_epoch`; `users.must_change_password` + forced-
+  change flow; **app-wide CSRF** (`auth/csrf.py` — form synchronizer token +
+  same-origin guard for the JSON API, skipped under TESTING); email-format
+  validation; constant-time auth for unknown users; `secret_key` hard-fails in
+  production instead of a silent random fallback. Follow-up: `scripts/
+  mail_selftest.py` and `relay_password` now supports config-or-env
+  (`PQC_MAIL_PASSWORD` overrides `mail.relay_password`). **Schema migration v18**
+  (see numbering note below). 95/95 existing auth tests pass.
+
+> **Migration numbering:** the auth reset feature consumed **schema v18**
+> (`password_reset_tokens`, `users.must_change_password`, `users.session_epoch`).
+> The §10 backlog previously earmarked v18 for T1-2 (geography on domain lists)
+> — that and any other pending schema change must use the **next free version**.
+> Phase 2 (2FA) is planned for **v19**; the next schema feature after that is
+> v20+.
+
 ### 2.8 — v1.8.0 detail
 
 **Bug fixes: community report scoping, DNS enumeration, scan deduplication + test scripts**
@@ -1049,7 +1093,8 @@ synced. New Python modules must be added to `WEB_TRIGGERS` or `SCHEDULER_TRIGGER
 ### Tier 1 — Config / data changes only
 
 - **[T1-1]** Fix AV false positives — move cipher strings to JSON, replace dynamic imports
-- **[T1-2]** Geography / region on domain lists — schema v18
+- **[T1-2]** Geography / region on domain lists — schema **v20+** (v18 was
+  consumed by the auth reset feature, v19 is reserved for 2FA)
 - **[T1-3]** Expiry warnings in dashboard — `cert_expiry_days` already stored
 - **[T1-4]** Export roadmap as PDF/DOCX
 - **[T1-5]** Asset criticality weighting
@@ -1075,6 +1120,26 @@ synced. New Python modules must be added to `WEB_TRIGGERS` or `SCHEDULER_TRIGGER
 - **[T4-3]** SAML / OIDC authentication
 - **[T4-4]** Dashboard frontend separation (static/ + Jinja2 templates)
 
+### User management (spec: `HANDOVER_user_mgmt.md`)
+
+- **[UM-1]** ~~Self-service password reset by email + auth hardening~~ —
+  **delivered this session (Phase 1)**. Old-password-on-change was already
+  enforced for self-service.
+- **[UM-2]** **2FA (TOTP), optional per user — Phase 2, next session.** Schema
+  **v19**; `pyotp` dependency; QR rendered client-side. Changes the login flow
+  (intermediate pending-2FA state), backup codes, admin disable-path. Full
+  design in `HANDOVER_user_mgmt.md` §Phase 2.
+- **[UM-3]** Self-service **email change** (require current password; optional
+  double-opt-in verification if the mailer is enabled). Parked in Phase 2.
+
+### Scheduling
+
+- **[SCH-1]** ~~Schedule coverage audit + monthly auto-schedule~~ —
+  **delivered this session** (`scripts/schedule_audit.py`). Possible follow-up:
+  a low-frequency discovery sweep for `level=na` domains (separate schedule or a
+  port-open-only mode) so late-appearing services are eventually caught; pairs
+  with P7 (scheduler watchdog).
+
 ---
 
 ## 11. Consistency Prevention Roadmap
@@ -1086,6 +1151,15 @@ code base — P1–P3 are small and eliminate whole bug classes; do them first.
 Status: **proposed, not yet implemented** — run the audit on production first,
 clean the ERRORs it reports (orphans, invariant rows, malformed domains), then
 start here. Each item is sized S/M/L and lists the files to touch.
+
+> **Delivered this session (auth path):** several security-hardening items
+> adjacent to this roadmap shipped with User-Management Phase 1 —
+> **CSRF protection** (`auth/csrf.py`), **`secret_key` hard-fail in production**
+> (was a silent per-process random fallback that breaks multi-worker gunicorn
+> sessions), **constant-time authentication** for unknown usernames, **email
+> validation** in `create_user`/`update_user`, and **session invalidation on
+> password change** (`users.session_epoch`). The new `password_reset_tokens`
+> table declares its FK with `ON DELETE CASCADE` (relevant to P1).
 
 ### P1 — Enable `PRAGMA foreign_keys=ON` (S)
 

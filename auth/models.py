@@ -83,6 +83,8 @@ class User:
     domain_list_ids: list = field(default_factory=list)  # assigned list IDs
     org_ids: list         = field(default_factory=list)  # assigned org IDs
     community_ids: list   = field(default_factory=list)  # assigned community IDs
+    must_change_password: bool = False   # force password change at next login
+    session_epoch: int = 0               # bumped on password change to kill sessions
 
     # Never serialise password_hash outside auth layer
     password_hash: str = field(default="", repr=False)
@@ -115,6 +117,7 @@ class User:
             "domain_list_ids": self.domain_list_ids,
             "org_ids":         self.org_ids,
             "community_ids":   self.community_ids,
+            "must_change_password": self.must_change_password,
         }
         if include_sensitive:
             d["password_hash"] = self.password_hash

@@ -13,9 +13,12 @@ AI-assisted development: portions generated with Claude (Anthropic)
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
+import secrets
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -89,6 +92,20 @@ class AuthStore:
                 ON audit_log(timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_user_domain_lists_user
                 ON user_domain_lists(user_id);
+
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                token_hash  TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                expires_at  TEXT NOT NULL,
+                used_at     TEXT,
+                request_ip  TEXT DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_prt_token
+                ON password_reset_tokens(token_hash);
+            CREATE INDEX IF NOT EXISTS idx_prt_user
+                ON password_reset_tokens(user_id);
             """)
 
     def _ensure_default_admin(self):
@@ -110,12 +127,22 @@ class AuthStore:
 
     # ── User CRUD ─────────────────────────────────────────────────────────────
 
+    # Permissive on purpose: real validation is deliverability, not regex.
+    # Accepts local-domain addresses like admin@localhost.
+    _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+$")
+
+    @classmethod
+    def _valid_email(cls, email: str) -> bool:
+        return bool(cls._EMAIL_RE.match((email or "").strip()))
+
     def create_user(self, username: str, email: str, password: str,
                     role: str = ROLE_ANALYST,
                     full_name: str = "",
                     created_by: int = None) -> User:
         if role not in ALL_ROLES:
             raise ValueError(f"Invalid role: {role!r}")
+        if not self._valid_email(email):
+            raise ValueError("Invalid email address")
         if len(password) < 10:
             raise ValueError("Password must be at least 10 characters")
 
@@ -167,6 +194,10 @@ class AuthStore:
             return self.get_user_by_id(user_id)
         if "role" in updates and updates["role"] not in ALL_ROLES:
             raise ValueError(f"Invalid role: {updates['role']!r}")
+        if "email" in updates and not self._valid_email(updates["email"]):
+            raise ValueError("Invalid email address")
+        if "email" in updates:
+            updates["email"] = updates["email"].strip().lower()
 
         cols = ", ".join(f"{k}=?" for k in updates)
         vals = list(updates.values()) + [user_id]
@@ -175,13 +206,109 @@ class AuthStore:
         return self.get_user_by_id(user_id)
 
     def set_password(self, user_id: int, new_password: str):
+        """
+        Set a new password. Bumps session_epoch (invalidating all existing
+        sessions for this user) and clears the must_change_password flag.
+        Callers that want to force a change (admin temp password) should call
+        set_must_change_password(user_id, True) afterwards.
+        """
         if len(new_password) < 10:
             raise ValueError("Password must be at least 10 characters")
         pw_hash = generate_password_hash(new_password)
         with self._connect() as conn:
             conn.execute(
-                "UPDATE users SET password_hash=?, failed_logins=0, locked_until=NULL "
-                "WHERE id=?", (pw_hash, user_id)
+                "UPDATE users SET password_hash=?, failed_logins=0, "
+                "locked_until=NULL, must_change_password=0, "
+                "session_epoch=session_epoch+1 WHERE id=?",
+                (pw_hash, user_id)
+            )
+
+    def set_must_change_password(self, user_id: int, flag: bool = True):
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE users SET must_change_password=? WHERE id=?",
+                (1 if flag else 0, user_id)
+            )
+
+    def get_user_by_email(self, email: str) -> Optional[User]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE email=? COLLATE NOCASE",
+                ((email or "").strip().lower(),)
+            ).fetchone()
+        return self._row_to_user(row) if row else None
+
+    # ── Password reset tokens ────────────────────────────────────────────────
+
+    @staticmethod
+    def _hash_token(raw: str) -> str:
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def create_reset_token(self, user_id: int, ttl_minutes: int = 45,
+                           request_ip: str = "") -> str:
+        """
+        Create a single-use password-reset token. Returns the RAW token
+        (only the SHA-256 hash is stored). Any outstanding tokens for the
+        user are invalidated first, so only the newest link works.
+        """
+        raw = secrets.token_urlsafe(32)
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(minutes=max(1, ttl_minutes))
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE password_reset_tokens SET used_at=? "
+                "WHERE user_id=? AND used_at IS NULL",
+                (now.isoformat(), user_id)
+            )
+            conn.execute(
+                "INSERT INTO password_reset_tokens "
+                "(user_id, token_hash, created_at, expires_at, request_ip) "
+                "VALUES (?,?,?,?,?)",
+                (user_id, self._hash_token(raw), now.isoformat(),
+                 expires.isoformat(), (request_ip or "")[:128])
+            )
+        return raw
+
+    def peek_reset_token(self, raw_token: str) -> Optional[int]:
+        """Return user_id for a valid, unused, unexpired token WITHOUT consuming it."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM password_reset_tokens "
+                "WHERE token_hash=? AND used_at IS NULL AND expires_at > ?",
+                (self._hash_token(raw_token), now)
+            ).fetchone()
+        return row["user_id"] if row else None
+
+    def consume_reset_token(self, raw_token: str) -> Optional[int]:
+        """
+        Validate and consume a token atomically. Returns the user_id on
+        success, marking the token used and invalidating any other outstanding
+        tokens for that user. Returns None if invalid/expired/used.
+        """
+        token_hash = self._hash_token(raw_token)
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, user_id FROM password_reset_tokens "
+                "WHERE token_hash=? AND used_at IS NULL AND expires_at > ?",
+                (token_hash, now)
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                "UPDATE password_reset_tokens SET used_at=? WHERE user_id=? "
+                "AND used_at IS NULL",
+                (now, row["user_id"])
+            )
+        return row["user_id"]
+
+    def purge_expired_reset_tokens(self):
+        cutoff = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM password_reset_tokens WHERE expires_at < ?",
+                (cutoff,)
             )
 
     def delete_user(self, user_id: int):
@@ -224,6 +351,8 @@ class AuthStore:
             domain_list_ids=dl_ids,
             org_ids=org_ids,
             community_ids=community_ids,
+            must_change_password=bool(d.get("must_change_password", 0)),
+            session_epoch=int(d.get("session_epoch", 0) or 0),
         )
 
     def set_user_orgs(self, user_id: int, org_ids: list,
@@ -332,6 +461,10 @@ class AuthStore:
     MAX_FAILED_ATTEMPTS = 10
     LOCKOUT_MINUTES     = 15
 
+    # A precomputed hash to compare against when the user does not exist, so
+    # response timing does not reveal whether a username is registered.
+    _DUMMY_HASH = generate_password_hash("pqc-monitor-timing-equaliser")
+
     def authenticate(self, username: str, password: str) -> Optional[User]:
         """
         Validate credentials. Returns User on success, None on failure.
@@ -339,6 +472,8 @@ class AuthStore:
         """
         user = self.get_user_by_username(username)
         if not user:
+            # Flatten timing / avoid username enumeration.
+            check_password_hash(self._DUMMY_HASH, password)
             return None
         if not user.is_active:
             return None

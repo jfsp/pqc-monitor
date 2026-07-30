@@ -270,6 +270,24 @@ CREATE TABLE IF NOT EXISTS user_communities (
 CREATE INDEX IF NOT EXISTS idx_community_org  ON community_organisations(org_id);
 CREATE INDEX IF NOT EXISTS idx_user_community ON user_communities(user_id)""",
     ),
+    (
+        18,
+        "Password reset tokens, forced password change, session epoch",
+        """
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash  TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL,
+    used_at     TEXT,
+    request_ip  TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_prt_token ON password_reset_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_prt_user  ON password_reset_tokens(user_id);
+ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0""",
+    ),
 ]
 
 

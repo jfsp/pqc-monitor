@@ -215,14 +215,18 @@ def api_update_user(uid):
 def api_reset_password(uid):
     data = request.get_json() or {}
     new_pw = data.get("password", "")
+    must_change = bool(data.get("must_change", False))
     if len(new_pw) < 10:
         return jsonify({"error": "Password must be at least 10 characters"}), 400
     user = _store().get_user_by_id(uid)
     if not user:
         return jsonify({"error": "not found"}), 404
-    _store().set_password(uid, new_pw)
-    _audit("user.password_reset", resource=user.username)
-    return jsonify({"ok": True})
+    _store().set_password(uid, new_pw)   # bumps session_epoch → logs the user out
+    if must_change:
+        _store().set_must_change_password(uid, True)
+    _audit("user.password_reset", resource=user.username,
+           detail=("force_change" if must_change else ""))
+    return jsonify({"ok": True, "must_change": must_change})
 
 
 @admin_bp.route("/api/users/<int:uid>", methods=["DELETE"])

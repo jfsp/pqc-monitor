@@ -65,13 +65,24 @@ def create_app(config: dict = None) -> Flask:
     # ── Flask setup ───────────────────────────────────────────────────────────
     app = Flask(__name__)
 
+    https_enabled = cfg.get("https_enabled", cfg.get("cookie_secure", False))
+
     secret = cfg.get("secret_key", os.environ.get("PQC_SECRET_KEY", ""))
-    if not secret or secret == "pqcmonitor-dev-key":
+    _weak = {"", "dev", "changeme", "pqcmonitor-dev-key"}
+    if not secret or secret in _weak:
+        if https_enabled:
+            # Production (TLS) with no persistent secret would silently break
+            # sessions across gunicorn workers and every restart. Fail loudly.
+            raise RuntimeError(
+                "No persistent SECRET_KEY configured. Set dashboard.secret_key "
+                "in config.yaml or the PQC_SECRET_KEY environment variable "
+                "before running with https_enabled/production."
+            )
         import secrets as _sec
         secret = _sec.token_hex(32)
         logger.warning(
-            "No SECRET_KEY configured — generated a random one. "
-            "Set PQC_SECRET_KEY environment variable for persistence."
+            "No SECRET_KEY configured — generated a random one (dev only). "
+            "Set PQC_SECRET_KEY for persistence."
         )
     app.secret_key = secret
 
@@ -79,7 +90,6 @@ def create_app(config: dict = None) -> Flask:
     # cookie_secure must be False when running over plain HTTP.
     # Set https_enabled: true in config.yaml (or pass cookie_secure: true)
     # only when a TLS-terminating reverse proxy is in front.
-    https_enabled = cfg.get("https_enabled", cfg.get("cookie_secure", False))
 
     app.config.update(
         SESSION_COOKIE_SECURE   = https_enabled,
@@ -98,6 +108,13 @@ def create_app(config: dict = None) -> Flask:
     provider = LocalAuthProvider(store)
     app.config["AUTH_STORE"]    = store
     app.config["AUTH_PROVIDER"] = provider
+
+    # ── Mailer + password-reset settings ──────────────────────────────────────
+    from auth.mailer import Mailer
+    app.config["MAILER"] = Mailer(cfg.get("mail", {}))
+    _reset = cfg.get("reset", {}) or {}
+    app.config["RESET_TOKEN_TTL_MIN"] = int(_reset.get("token_ttl_minutes", 45))
+    app.config["RESET_BASE_URL"]      = _reset.get("base_url", "")
 
     # ── Scan orchestrator + discovery ─────────────────────────────────────────
     orchestrator = ScanOrchestrator(cfg)
@@ -120,6 +137,36 @@ def create_app(config: dict = None) -> Flask:
     app.register_blueprint(auth_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(app_bp)
+
+    # ── Security before_request hooks ─────────────────────────────────────────
+    from auth.csrf import csrf_protect
+    from auth.middleware import current_user as _current_user
+
+    @app.before_request
+    def _csrf_guard():
+        return csrf_protect()
+
+    # Forced password change: once flagged (admin temp password), the user can
+    # only reach the change-password page (and log out) until they set a new one.
+    _PW_CHANGE_ALLOWED = {
+        "auth_bp.change_password", "auth_bp.logout", "auth_bp.login",
+        "api_version", "root",
+    }
+
+    @app.before_request
+    def _force_password_change():
+        from flask import request as _req
+        if _req.method in ("GET", "HEAD", "OPTIONS") \
+                and _req.endpoint in _PW_CHANGE_ALLOWED:
+            return None
+        user = _current_user()
+        if not user or not getattr(user, "must_change_password", False):
+            return None
+        if _req.endpoint in _PW_CHANGE_ALLOWED:
+            return None
+        if "/api/" in _req.path:
+            return jsonify({"error": "password change required"}), 403
+        return redirect(url_for("auth_bp.change_password"))
 
     # ── Root redirect ─────────────────────────────────────────────────────────
     @app.route("/")

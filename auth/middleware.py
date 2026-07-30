@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 SESSION_USER_ID  = "pqc_uid"
 SESSION_USERNAME = "pqc_uname"
 SESSION_ROLE     = "pqc_role"
+SESSION_EPOCH    = "pqc_epoch"
 
 # How long a browser session is valid (seconds).
 # Flask's permanent_session_lifetime is set on the app.
@@ -75,6 +76,7 @@ def login_user(user: User):
     session[SESSION_USER_ID]  = user.id
     session[SESSION_USERNAME] = user.username
     session[SESSION_ROLE]     = user.role
+    session[SESSION_EPOCH]    = getattr(user, "session_epoch", 0)
 
 
 def logout_user():
@@ -101,6 +103,14 @@ def current_user() -> Optional[User]:
 
     user = provider.get_user(user_id)
     if not user or not user.is_active:
+        session.clear()
+        g._pqc_user = None
+        return None
+
+    # Session invalidation: a password change bumps the user's session_epoch,
+    # so cookies minted before the change no longer match. Legacy cookies
+    # without an epoch default to 0 and remain valid until the next change.
+    if session.get(SESSION_EPOCH, 0) != getattr(user, "session_epoch", 0):
         session.clear()
         g._pqc_user = None
         return None

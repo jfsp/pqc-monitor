@@ -76,3 +76,32 @@ logging:
   # Production: /var/log/pqc-monitor/pqc_monitor.log (set by install.sh)
   # Development: relative to project root
   file: "data/pqc_monitor.log"
+
+# ── Outbound mail (optional) ──────────────────────────────────────────────────
+# Enables the self-service "Forgot password?" flow. When disabled, admins can
+# still reset passwords from the Users panel; the public form just returns a
+# generic message and sends nothing.
+mail:
+  enabled: false
+  mode: "local"            # "local" (local MTA) | "relay" (authenticated relay)
+  from_addr: "pqc-monitor@localhost"
+  # local mode — connect to a local MTA, no auth/TLS:
+  local_host: "127.0.0.1"
+  local_port: 25
+  # relay mode — authenticated submission (Gmail app-password, Proton Bridge, …):
+  #   Gmail:  relay_host smtp.gmail.com, port 587 starttls (or 465 ssl),
+  #           relay_username your@gmail.com, app password in PQC_MAIL_PASSWORD.
+  #   Proton: requires Proton Mail Bridge (paid); point relay_host/port at the
+  #           local Bridge endpoint and use the Bridge username/password.
+  relay_host: "smtp.gmail.com"
+  relay_port: 587
+  relay_security: "starttls"   # "starttls" | "ssl" | "none"
+  relay_username: ""
+  # relay_password is read from the PQC_MAIL_PASSWORD environment variable (.env)
+  timeout_seconds: 10
+
+reset:
+  token_ttl_minutes: 45
+  # Absolute base URL used to build reset links in emails. Falls back to the
+  # request host if left blank; set it explicitly behind a reverse proxy.
+  base_url: "https://pqc-monitor.ddns.net"

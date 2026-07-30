@@ -21,6 +21,7 @@ from auth.middleware import (
     login_user, logout_user, current_user,
     require_auth, _get_client_ip, _audit
 )
+from auth.csrf import issue_token
 
 logger = logging.getLogger(__name__)
 auth_bp = Blueprint("auth_bp", __name__)
@@ -75,6 +76,10 @@ def login():
                 _audit("login", resource="", detail=f"ip={ip}")
                 logger.info(f"Login OK: {username} from {ip}")
 
+                # Forced password change (admin-set temp password / reset policy)
+                if getattr(user, "must_change_password", False):
+                    return redirect(url_for("auth_bp.change_password"))
+
                 # Build a safe redirect target.
                 # next_url may be an absolute URL (e.g. http://host/app/) when
                 # the middleware redirected to /login?next=<absolute>.  Extract
@@ -110,7 +115,8 @@ def login():
                 logger.warning(f"Login failed: {username} from {ip}")
 
     return render_template_string(_LOGIN_HTML, error=error, next_url=next_url,
-                                   version=_get_version())
+                                   version=_get_version(),
+                                   csrf_token=issue_token())
 
 
 # ── Logout ────────────────────────────────────────────────────────────────────
@@ -148,12 +154,121 @@ def change_password():
             error = "New passwords do not match."
         else:
             store.set_password(user.id, new_pw)
+            # set_password bumps session_epoch (killing all sessions). Re-issue
+            # the current device's session so the user stays logged in here,
+            # while any OTHER active sessions are invalidated.
+            refreshed = store.get_user_by_id(user.id)
+            if refreshed:
+                login_user(refreshed)
             _audit("password_changed", detail="self-service")
             success = "Password changed successfully."
 
     return render_template_string(
-        _CHANGE_PW_HTML, user=user, error=error, success=success
+        _CHANGE_PW_HTML, user=user, error=error, success=success,
+        csrf_token=issue_token()
     )
+
+
+# ── Forgot / reset password ───────────────────────────────────────────────────
+
+_GENERIC_FORGOT_MSG = ("If an account matches that identifier, a password "
+                       "reset link has been sent.")
+
+
+@auth_bp.route("/forgot", methods=["GET", "POST"])
+def forgot_password():
+    error = None
+    message = None
+
+    if request.method == "POST":
+        ip = _get_client_ip()
+        if _rate_limited(ip):
+            error = "Too many requests. Please wait a minute."
+        else:
+            identifier = request.form.get("identifier", "").strip()
+            store  = current_app.config.get("AUTH_STORE")
+            mailer = current_app.config.get("MAILER")
+
+            # Look up by username first, then email. Response is generic either
+            # way so the form never reveals whether an account exists.
+            user = None
+            if store and identifier:
+                user = (store.get_user_by_username(identifier)
+                        or store.get_user_by_email(identifier))
+
+            if user and user.is_active and mailer and mailer.enabled:
+                ttl = int(current_app.config.get("RESET_TOKEN_TTL_MIN", 45))
+                raw = store.create_reset_token(user.id, ttl_minutes=ttl,
+                                               request_ip=ip)
+                base = (current_app.config.get("RESET_BASE_URL")
+                        or request.host_url).rstrip("/")
+                link = f"{base}{url_for('auth_bp.reset_password', token=raw)}"
+                subject = "PQC-Monitor password reset"
+                text = (
+                    f"A password reset was requested for your PQC-Monitor "
+                    f"account ({user.username}).\n\n"
+                    f"Reset your password (link valid for {ttl} minutes, "
+                    f"single use):\n{link}\n\n"
+                    f"If you did not request this, ignore this email; your "
+                    f"password will not change.\n"
+                )
+                html = (
+                    f"<p>A password reset was requested for your PQC-Monitor "
+                    f"account (<strong>{user.username}</strong>).</p>"
+                    f"<p><a href=\"{link}\">Reset your password</a> "
+                    f"(valid {ttl} minutes, single use).</p>"
+                    f"<p>If you did not request this, ignore this email.</p>"
+                )
+                mailer.send(user.email, subject, text, html)
+                store.log(user_id=user.id, username=user.username,
+                          action="password_reset_requested",
+                          ip_address=ip, detail="link emailed")
+            elif user and store:
+                # Mailer disabled or off: record the attempt, send nothing.
+                store.log(user_id=user.id, username=user.username,
+                          action="password_reset_requested",
+                          ip_address=ip, detail="mailer disabled")
+
+            message = _GENERIC_FORGOT_MSG
+
+    return render_template_string(_FORGOT_HTML, error=error, message=message,
+                                  version=_get_version(),
+                                  csrf_token=issue_token())
+
+
+@auth_bp.route("/reset/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    store = current_app.config.get("AUTH_STORE")
+    error = None
+
+    if request.method == "POST":
+        new_pw     = request.form.get("new_password", "")
+        confirm_pw = request.form.get("confirm_password", "")
+        if len(new_pw) < 10:
+            error = "New password must be at least 10 characters."
+        elif new_pw != confirm_pw:
+            error = "Passwords do not match."
+        else:
+            uid = store.consume_reset_token(token) if store else None
+            if not uid:
+                error = "This reset link is invalid or has expired."
+            else:
+                # set_password bumps session_epoch, invalidating any existing
+                # sessions for this user. The user is NOT auto-logged-in.
+                store.set_password(uid, new_pw)
+                u = store.get_user_by_id(uid)
+                store.log(user_id=uid,
+                          username=(u.username if u else "unknown"),
+                          action="password_reset_completed",
+                          ip_address=_get_client_ip())
+                return render_template_string(
+                    _RESET_DONE_HTML, version=_get_version())
+
+    # GET (or POST error): only show the form if the token is still valid.
+    valid = bool(store and store.peek_reset_token(token))
+    return render_template_string(_RESET_HTML, token=token, valid=valid,
+                                  error=error, version=_get_version(),
+                                  csrf_token=issue_token())
 
 
 # ── HTML Templates ────────────────────────────────────────────────────────────
@@ -213,6 +328,7 @@ footer { text-align:center; color:var(--muted); font-size:.7rem;
   {% endif %}
   <form method="post">
     <input type="hidden" name="next" value="{{ next_url }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label for="username">Username</label>
     <input type="text" id="username" name="username"
            autocomplete="username" autofocus required>
@@ -221,6 +337,9 @@ footer { text-align:center; color:var(--muted); font-size:.7rem;
            autocomplete="current-password" required>
     <button type="submit">Sign In</button>
   </form>
+  <div style="text-align:center;margin-top:1rem">
+    <a href="/forgot" style="color:var(--accent);font-size:.8rem">Forgot password?</a>
+  </div>
   <footer>PQC-Monitor v{{ version }} &nbsp;·&nbsp; GPL-3.0 &nbsp;·&nbsp; AI-assisted</footer>
 </div>
 </body>
@@ -261,6 +380,7 @@ a { color:var(--accent); font-size:.82rem; display:block; margin-top:1rem; text-
   {% if error %}<div class="msg error">{{ error }}</div>{% endif %}
   {% if success %}<div class="msg ok">{{ success }}</div>{% endif %}
   <form method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>Current password</label>
     <input type="password" name="current_password" required>
     <label>New password (min 10 characters)</label>
@@ -273,3 +393,123 @@ a { color:var(--accent); font-size:.82rem; display:block; margin-top:1rem; text-
 </div>
 </body>
 </html>"""
+
+
+# ── Forgot / reset templates (reuse the login card styling) ───────────────────
+
+_FORGOT_HTML = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PQC-Monitor — Forgot Password</title>
+<style>
+:root { --bg:#0a0e1a; --panel:#0f1629; --border:#1e2d4a; --accent:#00d4ff;
+        --text:#e2e8f0; --muted:#64748b; --error:#ef4444; --ok:#22c55e; }
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:var(--bg); color:var(--text); font-family:system-ui,sans-serif;
+       display:flex; align-items:center; justify-content:center; min-height:100vh; }
+.card { background:var(--panel); border:1px solid var(--border);
+        border-radius:16px; padding:2.5rem; width:100%; max-width:400px; }
+h1 { font-family:'Space Mono',monospace; color:var(--accent); font-size:1.3rem;
+     text-align:center; margin-bottom:.4rem; }
+p.sub { color:var(--muted); font-size:.82rem; text-align:center; margin-bottom:1.5rem; }
+label { display:block; color:var(--muted); font-size:.78rem; text-transform:uppercase;
+        letter-spacing:.05em; margin-bottom:.4rem; }
+input { width:100%; background:rgba(255,255,255,.05); border:1px solid var(--border);
+        color:var(--text); padding:.7rem 1rem; border-radius:8px; font-size:.9rem;
+        margin-bottom:1.25rem; outline:none; }
+input:focus { border-color:var(--accent); }
+button { width:100%; background:var(--accent); color:#0a0e1a; border:none;
+         padding:.75rem; border-radius:8px; font-weight:700; cursor:pointer; }
+.msg { padding:.7rem 1rem; border-radius:8px; font-size:.83rem; margin-bottom:1rem; }
+.error { background:rgba(239,68,68,.1); border:1px solid rgba(239,68,68,.3); color:var(--error); }
+.ok    { background:rgba(34,197,94,.1);  border:1px solid rgba(34,197,94,.3);  color:var(--ok); }
+a { color:var(--accent); font-size:.8rem; display:block; margin-top:1rem; text-align:center; }
+footer { text-align:center; color:var(--muted); font-size:.7rem; margin-top:1.5rem; }
+</style></head><body>
+<div class="card">
+  <h1>PQC-Monitor</h1>
+  <p class="sub">Reset your password</p>
+  {% if error %}<div class="msg error">{{ error }}</div>{% endif %}
+  {% if message %}<div class="msg ok">{{ message }}</div>{% endif %}
+  {% if not message %}
+  <form method="post">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Username or email</label>
+    <input type="text" name="identifier" autocomplete="username" autofocus required>
+    <button type="submit">Send reset link</button>
+  </form>
+  {% endif %}
+  <a href="/login">← Back to sign in</a>
+  <footer>PQC-Monitor v{{ version }}</footer>
+</div></body></html>"""
+
+
+_RESET_HTML = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PQC-Monitor — Set New Password</title>
+<style>
+:root { --bg:#0a0e1a; --panel:#0f1629; --border:#1e2d4a; --accent:#00d4ff;
+        --text:#e2e8f0; --muted:#64748b; --error:#ef4444; }
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:var(--bg); color:var(--text); font-family:system-ui,sans-serif;
+       display:flex; align-items:center; justify-content:center; min-height:100vh; }
+.card { background:var(--panel); border:1px solid var(--border);
+        border-radius:16px; padding:2.5rem; width:100%; max-width:400px; }
+h1 { font-family:'Space Mono',monospace; color:var(--accent); font-size:1.3rem;
+     text-align:center; margin-bottom:1.5rem; }
+label { display:block; color:var(--muted); font-size:.78rem; text-transform:uppercase;
+        letter-spacing:.05em; margin-bottom:.4rem; }
+input { width:100%; background:rgba(255,255,255,.05); border:1px solid var(--border);
+        color:var(--text); padding:.7rem 1rem; border-radius:8px; font-size:.9rem;
+        margin-bottom:1.25rem; outline:none; }
+input:focus { border-color:var(--accent); }
+button { width:100%; background:var(--accent); color:#0a0e1a; border:none;
+         padding:.75rem; border-radius:8px; font-weight:700; cursor:pointer; }
+.msg { padding:.7rem 1rem; border-radius:8px; font-size:.83rem; margin-bottom:1rem; }
+.error { background:rgba(239,68,68,.1); border:1px solid rgba(239,68,68,.3); color:var(--error); }
+a { color:var(--accent); font-size:.8rem; display:block; margin-top:1rem; text-align:center; }
+</style></head><body>
+<div class="card">
+  <h1>Set new password</h1>
+  {% if error %}<div class="msg error">{{ error }}</div>{% endif %}
+  {% if valid %}
+  <form method="post" action="/reset/{{ token }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>New password (min 10 characters)</label>
+    <input type="password" name="new_password" autocomplete="new-password" required>
+    <label>Confirm new password</label>
+    <input type="password" name="confirm_password" autocomplete="new-password" required>
+    <button type="submit">Update password</button>
+  </form>
+  {% else %}
+  <div class="msg error">This reset link is invalid or has expired.</div>
+  <a href="/forgot">Request a new link</a>
+  {% endif %}
+  <a href="/login">← Back to sign in</a>
+</div></body></html>"""
+
+
+_RESET_DONE_HTML = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PQC-Monitor — Password Updated</title>
+<style>
+:root { --bg:#0a0e1a; --panel:#0f1629; --border:#1e2d4a; --accent:#00d4ff;
+        --text:#e2e8f0; --muted:#64748b; --ok:#22c55e; }
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:var(--bg); color:var(--text); font-family:system-ui,sans-serif;
+       display:flex; align-items:center; justify-content:center; min-height:100vh; }
+.card { background:var(--panel); border:1px solid var(--border); border-radius:16px;
+        padding:2.5rem; width:100%; max-width:400px; text-align:center; }
+h1 { color:var(--ok); font-size:1.2rem; margin-bottom:1rem; }
+p { color:var(--muted); font-size:.85rem; margin-bottom:1.5rem; }
+a { color:#0a0e1a; background:var(--accent); text-decoration:none; padding:.7rem 1.2rem;
+    border-radius:8px; font-weight:700; font-size:.9rem; }
+</style></head><body>
+<div class="card">
+  <h1>✓ Password updated</h1>
+  <p>Your password has been changed and all existing sessions were signed out.
+     Please sign in with your new password.</p>
+  <a href="/login">Sign in</a>
+</div></body></html>"""

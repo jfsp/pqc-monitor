@@ -1,0 +1,63 @@
+feat(auth): self-service password reset by email, session hardening, CSRF
+
+Phase 1 of the user-management enhancements. Adds a self-service forgotten-
+password flow with an optional SMTP mailer (local MTA or authenticated relay),
+plus session-invalidation-on-change and app-wide CSRF protection. Does not
+touch the login/2FA flow (that is Phase 2).
+
+Mailer (auth/mailer.py, new):
+- Optional. mode: "local" (local MTA, no auth/TLS) or "relay" (authenticated
+  submission over STARTTLS/SSL — Gmail app-password, Proton Bridge, etc.).
+- Pure stdlib smtplib; send() never raises into the request path (logs +
+  returns False). Relay password read from PQC_MAIL_PASSWORD, never yaml.
+
+Forgotten-password reset (auth/auth_routes.py, auth/store.py):
+- Public /forgot and /reset/<token>. Tokens are single-use, expiring
+  (default 45 min), stored only as SHA-256 hashes; creating a new token
+  invalidates outstanding ones. Generic response regardless of account
+  existence; per-IP rate limiting; all events audited. Reset does NOT
+  auto-login.
+
+Session invalidation (migration v18, store, middleware):
+- users.session_epoch bumped by set_password; login writes the epoch into the
+  session and current_user() rejects stale cookies. A password change/reset
+  therefore signs out all existing sessions. Self-service change re-issues the
+  current device so only OTHER sessions drop. Legacy cookies (epoch absent)
+  default to 0 and stay valid until the next change.
+
+Forced password change (migration v18, admin/routes.py, app_factory.py):
+- users.must_change_password. Admin reset accepts {"must_change": true}; a
+  flagged user is redirected to /change-password (API returns 403) until they
+  set a new password.
+
+CSRF (auth/csrf.py, new; app_factory.py):
+- Synchronizer token on the server-rendered auth forms + strict same-origin
+  (Origin/Referer) check for the JSON API surface, so no per-fetch plumbing.
+  Enforced app-wide via before_request; skipped under TESTING.
+
+Hardening:
+- Email-format validation in create_user/update_user.
+- Constant-time dummy hash in authenticate() to reduce username enumeration.
+- secret_key hard-fails at startup when https_enabled and unset/weak (was a
+  silent random fallback that breaks multi-worker gunicorn sessions).
+
+Schema: migration v18 (password_reset_tokens; users.must_change_password,
+users.session_epoch). Additive; safe and idempotent on the populated prod DB.
+
+Tested: 95/95 existing auth tests pass; new unit + Flask integration tests
+cover tokens, mailer transports, CSRF (block/allow), session-kill, must_change.
+No new runtime dependency.
+
+Files changed:
+  A auth/mailer.py
+  A auth/csrf.py
+  A .env.example
+  M data/migrations.py
+  M auth/store.py
+  M auth/models.py
+  M auth/middleware.py
+  M auth/auth_routes.py
+  M app_factory.py
+  M admin/routes.py
+  M pqc_monitor.py
+  M config/config.yaml.example

@@ -1,20 +1,67 @@
 # PQC-Monitor — User Management Enhancements: Implementation Handover
 
-Status: **design locked, not yet built.** This document is self-sufficient to
-implement from in a later session together with the `pqc-monitor` source tree.
+Status: **Phase 1 DELIVERED (2026-07-31), verified on the live server.**
+Phase 2 (2FA) + self-service email change remain for a later session. This
+document is self-sufficient to implement Phase 2 from, together with the
+`pqc-monitor` source tree.
 
-## Decisions locked (from Javier)
-- Forgotten-password reset **by email**, mailer **optional**, supporting either a
-  **local MTA** or an **authenticated SMTP relay** (Gmail / Proton-Bridge-style).
-- **2FA optional for all users**, TOTP (authenticator apps).
-- Recommended split into two independently deployable phases along a risk
-  boundary. Phase 1 does **not** touch the login flow; Phase 2 does.
+## Phase 1 — delivered & verified (proposed v1.12.0)
+Shipped as ready-to-deploy files; 95/95 existing auth tests pass; password
+reset and session-invalidation confirmed working against a Gmail relay on the
+live server.
+
+What shipped:
+- **Mailer** `auth/mailer.py` — optional; `mode: local` (local MTA) or `relay`
+  (STARTTLS/SSL, Gmail app-password / Proton Bridge). Failures never raise into
+  the request path.
+- **Reset flow** — public `/forgot` + `/reset/<token>`; single-use SHA-256-
+  hashed tokens, default 45-min TTL, newest-token-wins; generic responses;
+  per-IP rate limit; audited; no auto-login.
+- **Session invalidation on change** — `users.session_epoch` bumped by
+  `set_password`, written into the session at login, checked in
+  `current_user()`. Reset/admin-reset sign out ALL sessions; self-service change
+  re-issues the current device so only OTHER sessions drop. (Confirmed working.)
+- **Forced change** — `users.must_change_password`; admin reset accepts
+  `{"must_change": true}`; flagged users are pinned to `/change-password`.
+- **CSRF** `auth/csrf.py` — form synchronizer token + strict same-origin guard
+  for the JSON API (no per-fetch plumbing); app-wide `before_request`; skipped
+  under `TESTING`.
+- **Hardening** — email-format validation; constant-time dummy hash in
+  `authenticate()`; `secret_key` hard-fails in production instead of a silent
+  random fallback.
+- **Follow-up** — `scripts/mail_selftest.py` (verify relay creds from the
+  shell); `relay_password` supports config-or-env (`PQC_MAIL_PASSWORD` overrides
+  `mail.relay_password`), matching the other API keys.
+- **Schema** — migration **v18** (`password_reset_tokens`,
+  `users.must_change_password`, `users.session_epoch`).
+
+Resolved design decisions (locked during Phase 1): config key names as drafted;
+reset TTL 45 min; reset kills existing sessions — **yes**; CSRF in Phase 1 —
+**yes**; relay_password is config-or-env.
+
+Ops note learned on deploy: the web unit loads
+`EnvironmentFile=/etc/pqc-monitor/pqc-monitor.env` (NOT `/etc/systemd/system/...`).
+Gmail app passwords must be entered **without** the display spaces (16 chars);
+`mail_selftest.py` flags both.
+
+---
+
+## Phase 2 — remaining work (2FA + email change)
+
+Decisions locked (from Javier): 2FA **optional for all users**, **TOTP**.
+Forgotten-password reset (Phase 1) is done. Migration numbering: Phase 1 took
+v18, so **2FA is schema v19** and the next feature after that is v20+.
+
+## Decisions locked (historical, from the original spec)
+- Forgotten-password reset **by email**, mailer **optional** — DONE in Phase 1.
+- **2FA optional for all users**, TOTP (authenticator apps) — Phase 2.
+- Two-phase split along a risk boundary: Phase 1 did not touch the login flow;
+  Phase 2 does.
 
 ## Why two phases
 The auth path is security-critical and Javier validates on the live server
-between sessions. Phase 1 (mailer + reset) can be deployed and its mail delivery
-verified against real relay credentials before the riskier Phase 2 (2FA login
-flow) lands on top of a validated base.
+between sessions. Phase 1 (mailer + reset) is deployed and verified; Phase 2
+(2FA login flow) now lands on a validated base.
 
 ---
 
@@ -55,6 +102,10 @@ Key facts that constrain the design:
 ---
 
 # PHASE 1 — Mailer + forgotten-password reset
+
+> **DELIVERED 2026-07-31.** The section below is the original design and is
+> retained for reference. See the Phase 1 summary at the top of this document
+> for what actually shipped. Skip to `# PHASE 2` for remaining work.
 
 ## 1. Config (config.yaml + .env)
 New optional `mail` section. Absent/`enabled: false` ⇒ self-service reset routes
@@ -178,6 +229,8 @@ Extend `POST /admin/api/users/<uid>/password` to optionally set
 redirect to `/change-password` before granting normal access.
 
 ## 8. Cross-cutting hardening to fold into Phase 1 (low risk, high value)
+> **DELIVERED in Phase 1** — email validation, `secret_key` production
+> hard-fail, and constant-time auth all shipped. CSRF also shipped (see below).
 - Email-format validation (above).
 - `secret_key`: hard-fail at startup in production if unset, instead of a random
   per-process fallback (breaks multi-worker sessions).
@@ -310,11 +363,13 @@ purely reset-focused.
 - Suggested HANDOVER.md updates: add these two phases under §10 backlog and the
   hardening items (secret_key, CSRF, constant-time auth) under §11 prevention.
 
-# Open decisions to confirm before building
-1. Phase 1 config **key names / structure** above — accept or adjust.
-2. **Reset token TTL** (default 45 min) and whether reset should also invalidate
-   the user's existing sessions.
-3. Whether to include the **CSRF** hardening in Phase 1 or defer.
-4. Phase 2: **encrypt `totp_secret`** (add Fernet) vs store plaintext with a
-   documented trade-off.
-5. Where **email change** lands (Phase 1 vs 2).
+# Open decisions
+Phase 1 decisions are resolved (config names accepted; TTL 45 min; reset kills
+sessions; CSRF included; relay_password config-or-env). Remaining for Phase 2:
+
+1. **Encrypt `totp_secret`** at rest (add Fernet, keyed off the app secret) vs
+   store the base32 plaintext with a documented trade-off. Recommend encrypt.
+2. Where **email change** lands — recommend Phase 2, with double-opt-in
+   verification now that the mailer exists and is verified working.
+3. 2FA enrolment UX: dedicated security/profile page vs a section in the admin
+   user view for self-service (all users, not just admins).

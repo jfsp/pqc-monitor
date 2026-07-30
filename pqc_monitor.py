@@ -86,9 +86,12 @@ def load_config(config_path: str = None) -> dict:
         ),
         "ssllabs_enabled": raw.get("ssllabs", {}).get("enabled", True),
         # Outbound mail (optional) — for password-reset links.
-        # Relay password comes from the environment, never from config.yaml.
+        # relay_password follows the same env-overrides-config pattern as the
+        # other credentials: PQC_MAIL_PASSWORD wins; else mail.relay_password
+        # from config.yaml. Both config.yaml and .env are PROTECTED by deploy.sh.
         "mail": {**raw.get("mail", {}),
-                 "relay_password": os.environ.get("PQC_MAIL_PASSWORD", "")},
+                 "relay_password": (os.environ.get("PQC_MAIL_PASSWORD")
+                                    or raw.get("mail", {}).get("relay_password", ""))},
         "reset": raw.get("reset", {}),
     }
 

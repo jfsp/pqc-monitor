@@ -97,7 +97,10 @@ mail:
   relay_port: 587
   relay_security: "starttls"   # "starttls" | "ssl" | "none"
   relay_username: ""
-  # relay_password is read from the PQC_MAIL_PASSWORD environment variable (.env)
+  # relay_password: set it here OR (preferred) via the PQC_MAIL_PASSWORD
+  # environment variable, which overrides this value. For Gmail, paste the
+  # 16-character app password WITHOUT the display spaces.
+  relay_password: ""
   timeout_seconds: 10
 
 reset:

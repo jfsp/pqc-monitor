@@ -1,4 +1,4 @@
-# PQC-Monitor v1.9.1
+# PQC-Monitor v1.11.0
 
 **Post-Quantum Cryptography Readiness Monitor**
 

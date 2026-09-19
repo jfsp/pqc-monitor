@@ -77,6 +77,7 @@ WEB_TRIGGERS=(
     "reports/"
     "roadmap/"
     "scanner/"
+    "scheduler/"    # app_routes imports schedule_audit / ScanScheduler
 )
 
 SCHEDULER_TRIGGERS=(

@@ -22,6 +22,12 @@ This project uses [Semantic Versioning](https://semver.org/).
 ### Fixed
 - A bookmarked `#…` deep link now survives the login redirect.
 - Findings and action-plan text in the domain view are HTML-escaped.
+- The dashboard table said "No scan data yet. Run a scan first." while it was
+  still loading, because that message was the table's initial HTML. It now shows
+  a loading row, and an error row with a Retry link if the request fails. If
+  two loads overlap, a slower older response can no longer overwrite a newer one.
+- The domain box on the domain screen now lists only domains with a TLS
+  service; no-TLS (`level=na`) domains are excluded.
 
 ---
 

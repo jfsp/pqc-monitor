@@ -667,7 +667,7 @@ footer {
             </tr>
           </thead>
           <tbody id="domain-tbody">
-            <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:2rem">No scan data yet. Run a scan first.</td></tr>
+            <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:2rem"><span class="loader"></span> Loading assessments…</td></tr>
           </tbody>
         </table>
       </div>
@@ -1339,14 +1339,34 @@ function renderDistChart(s) {
 
 // ─── Assessments table ───────────────────────────────────────────────────────
 
+let _assessLoadToken = 0;
+function _assessTableMsg(html) {
+  const tbody = document.getElementById('domain-tbody');
+  if (tbody) tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:2rem">${html}</td></tr>`;
+}
+
 async function loadAssessments(runId) {
-  const url = runId ? `/api/assessments?run_id=${runId}` : '/api/assessments';
-  const [r, orgsR] = await Promise.all([
-    fetch(url),
-    fetch('/api/organisations').catch(() => ({ json: () => [] }))
-  ]);
-  const data = await r.json();
-  _orgsCache = await orgsR.json().catch(() => []);
+  const token = ++_assessLoadToken;
+  const url = runId ? `/api/assessments?run_id=${encodeURIComponent(runId)}` : '/api/assessments';
+  _assessTableMsg('<span class="loader"></span> Loading assessments…');
+  let data, orgs;
+  try {
+    const [r, orgsR] = await Promise.all([
+      fetch(url),
+      fetch('/api/organisations').catch(() => null)
+    ]);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    data = await r.json();
+    if (!Array.isArray(data)) throw new Error((data && data.error) || 'unexpected response');
+    orgs = orgsR && orgsR.ok ? await orgsR.json().catch(() => []) : [];
+  } catch (e) {
+    if (token !== _assessLoadToken) return;
+    _assessTableMsg(`<span style="color:var(--critical)">Could not load assessments (${esc(e.message)}).</span>
+      <a href="#" onclick="loadAssessments(${runId ? `'${esc(runId)}'` : ''});return false" style="color:var(--accent);margin-left:.4rem">Retry</a>`);
+    return;
+  }
+  if (token !== _assessLoadToken) return;   // a newer load superseded this one
+  _orgsCache = Array.isArray(orgs) ? orgs : [];
   _allAssessments = data;
   _activeFilter   = null;
   _activeOrg      = '';
@@ -1747,14 +1767,14 @@ function dvJump() {
   const q = (inp.value || '').trim().toLowerCase().replace(/\.$/, '');
   msg.style.display = 'none';
   if (!q) return;
-  const rows = _dvAssessCache.rows || [];
+  const rows = (_dvAssessCache.rows || []).filter(r => r.level !== 'na');
   const hit = rows.find(r => (r.domain || '').toLowerCase() === q)
            || (() => { const m = rows.filter(r => (r.domain || '').toLowerCase().includes(q));
                        return m.length === 1 ? m[0] : null; })();
   if (!hit) {
     msg.textContent = rows.some(r => (r.domain || '').toLowerCase().includes(q))
       ? 'Several domains match — pick one from the list.'
-      : 'No monitored domain matches “' + inp.value + '”.';
+      : 'No monitored TLS domain matches “' + inp.value + '”.';
     msg.style.display = 'block';
     return;
   }
@@ -1776,7 +1796,7 @@ async function _dvAssessments(force) {
 function _dvFillDatalist(rows) {
   const dl = document.getElementById('dv-domain-list');
   if (!dl) return;
-  dl.innerHTML = [...rows]
+  dl.innerHTML = rows.filter(r => r.level !== 'na')
     .sort((a, b) => (a.domain || '').localeCompare(b.domain || ''))
     .map(r => {
       const lbl = r.level === 'na' ? 'No TLS' : `${ucfirst(r.level || '')} · ${r.score ?? '?'}`;

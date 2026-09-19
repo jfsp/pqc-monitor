@@ -64,6 +64,14 @@ ssllabs:
   # Leave email blank to disable the integration.
   enabled: true
   email: ""
+  # Throttled SSL Labs sweep (scheduled weekly by
+  # `scripts/schedule_audit.py --create-monthly`; manual: `pqc_monitor.py ssllabs-sweep`).
+  # sweep_concurrency is a ceiling: the sweep also honours the maxAssessments
+  # SSL Labs reports for your email in /info, keeping one slot free for the UI.
+  # ~6 concurrent assessments ≈ 200-250 hosts/hour.
+  sweep_concurrency: 6
+  # Hosts with an SSL Labs record newer than this are skipped (resume-safe).
+  sweep_max_age_days: 6
 
 guidelines:
   active:

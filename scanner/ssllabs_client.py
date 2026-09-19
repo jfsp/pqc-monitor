@@ -6,12 +6,10 @@ Retrieves SSL Labs assessment reports for scanned domains.
 
 Design decisions (v1.9.0)
 ─────────────────────────
-- During scan runs only CACHED results are fetched (`fromCache=on`) —
-  triggering a fresh SSL Labs assessment takes 60+ seconds per host and
-  the API enforces strict concurrency limits, which makes it unusable
-  inline for multi-domain runs.
-- Fresh assessments are requested ON DEMAND from the domain detail view
-  (`startNew=on`, `publish=off`), then polled by the UI.
+- Scan runs do NOT call SSL Labs (removed 2026-09). Bulk collection is done
+  by the throttled sweep in scanner/ssllabs_sweep.py, scheduled separately.
+- Fresh assessments can also be requested ON DEMAND from the domain detail
+  view (`startNew=on`, `publish=off`), then polled by the UI.
 - The SSL Labs grade is DISPLAY ONLY — it does not feed the PQC score.
 
 API notes
@@ -20,7 +18,12 @@ API notes
   registered email is sent as an `email` HTTP header on every call.
   Register once with:  register_email(first, last, org, email)
 - v3 was deprecated on 2023-12-31.
-- Rate limiting: 429 = client cool-off, 529 = service overloaded.
+- Rate limiting: 429 = too many concurrent/new assessments for this client,
+  529 = service overloaded, 503 = maintenance. /info reports the client's
+  maxAssessments, currentAssessments and newAssessmentCoolOff (ms).
+- IMPORTANT (verified 2026-09-19): `fromCache=on` returns a cached report if
+  one exists within maxAge, but on a cache MISS it STARTS a new assessment
+  (status DNS/IN_PROGRESS). It is not a read-only lookup.
 - Results are computed by Qualys servers, not locally.
 
 SPDX-License-Identifier: GPL-3.0-or-later
@@ -96,6 +99,13 @@ class SSLLabsClient:
 
     # ── Public API ────────────────────────────────────────────────
 
+    def analyze(self, params: dict) -> tuple[int, Optional[dict]]:
+        """Raw /analyze call: (http_status, json_or_None). 0 = network error.
+        Used by the sweep, which needs the HTTP status to drive back-off."""
+        if not self.available:
+            return 0, None
+        return self._get("analyze", params)
+
     def info(self) -> Optional[dict]:
         """GET /info — engine version, rate-limit state. None on failure."""
         code, body = self._get("info", {})
@@ -103,9 +113,9 @@ class SSLLabsClient:
 
     def get_cached(self, host: str, max_age_hours: int = 168) -> Optional[dict]:
         """
-        Retrieve a cached report only — never triggers a new assessment.
-        Used inline during scan runs. Returns a summary dict, or None if
-        no cached report exists / the API is unavailable.
+        Return a cached report if SSL Labs has one within max_age_hours.
+        NOTE: on a cache miss SSL Labs STARTS a new assessment and this
+        returns None (status DNS/IN_PROGRESS) — do not call it in bulk.
         """
         if not self.available:
             return None
@@ -191,6 +201,7 @@ class SSLLabsClient:
         return {
             "host": host,
             "status": report.get("status", ""),
+            "status_message": report.get("statusMessage", "") or "",
             "grade": worst_grade(grades),
             "grades": grades,
             "endpoints": ep_out,

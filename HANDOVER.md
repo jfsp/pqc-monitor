@@ -560,6 +560,84 @@ Frontend-only change (`dashboard/app.py`) plus a small login-page script
 - Known, not caused by this change: the header nav bar overflows horizontally
   below ~600 px width.
 
+### 2.12b — Unreleased: scheduler, no-TLS rescan, SSL Labs sweep (2026-09-19)
+
+**Diagnosis (from production data, 2026-09-19)**
+- Schedule #1 (created 07-29, `next_run` 08-28) fired on **09-04 06:38:17**,
+  30 days after a scheduler process start. APScheduler's `IntervalTrigger`
+  counted from process start and ignored `next_run`, which was never updated.
+  The unit's `Requires=pqc-monitor-web` restarted the scheduler on every web
+  deploy, so with deploys less than 30 days apart the monthly job would never
+  fire. Two restarts on 09-19 pushed it to 10-19.
+- The auto list covered 3,168 of 5,248 assessed domains: 2,046 no-TLS
+  (excluded by design) and 34 serviceable domains added or changed after the
+  list was built on 07-29.
+- SSL Labs: `analyze?fromCache=on` **starts** an assessment on a cache miss
+  (verified: `IN_PROGRESS`). The inline lookup asked Qualys for one per domain
+  and got HTTP 429 for 2,915 of 3,168. Only 141 domains ever had a report.
+- Certificates with IP-address SANs failed with
+  `IPv4Address is not JSON serializable` (2 occurrences since July).
+
+**Design**
+- `scheduler/scan_scheduler.py`: no APScheduler. A ticker thread (60 s) reads
+  `scheduled_scans` and starts enabled rows with `next_run <= now`. On finish:
+  `last_run = now`, `next_run = start + interval`. A shutdown mid-run leaves
+  `next_run` unchanged, so the job re-runs on start. Scan jobs are serialised
+  by a lock; the SSL Labs sweep runs alongside. On start: runs left `running`
+  with notes `scheduled:%` are marked `interrupted`, and stale `next_run`
+  (`last_run >= next_run`) is repaired to `last_run + interval`
+  (`schedule_audit.repair_stale_next_run`, also called by `--create-monthly`).
+- Job kind is in `config_json.kind`: `scan` (default) or `ssllabs_sweep`.
+  Auto scans carry `config_json.auto` = `serviceable` or `na_resolvable`;
+  row #1 predates the key and is recognised by name, then tagged by
+  `--create-monthly`. `reconcile_auto_list()` rebuilds the list before each
+  auto run.
+- **DNS status** (`scanner/dns_status.py`): status is `resolvable`,
+  `nxdomain`, `no_address` or `dns_error` (A, then AAAA, one retry on
+  errors), stored as `domain_extra.data_type='dns_status'` under the domain's
+  latest run with `since`, `checked_at`, `addresses` and `previous_status`.
+  Unresolvable = `nxdomain` or `no_address`. Only `resolvable` domains are
+  rescanned. `dns_error` domains are neither scanned nor marked. **No
+  migration: v19 stays reserved for TOTP.** A new index
+  `idx_domain_extra_type(data_type, recorded_at)` is created in
+  `_init_schema` (same pattern as `idx_domain_extra_domain`).
+- **SSL Labs sweep** (`scanner/ssllabs_sweep.py`). Targets: latest level is
+  not `na` and the latest run had a successful handshake on 443, minus
+  domains with an `ssllabs` record newer than `sweep_max_age_days` (default
+  6). Concurrency is `min(sweep_concurrency (6), maxAssessments -
+  currentAssessments - 1)`; starts are spaced by `newAssessmentCoolOff`.
+  - 429: global pause of 60 s, doubling up to 10 min; concurrency drops by 1;
+    the domain is re-queued.
+  - 529/503: 15 min pause.
+  - 401/403/441: abort.
+  - Polls every 15 s, with a 20 min cap per host.
+  - READY and ERROR results are stored under the latest run, the same place
+    the UI refresh uses.
+  - The inline lookup is removed from `orchestrator._scan_domain`.
+- Auto schedules (`ensure_auto_schedules`, run by
+  `scripts/schedule_audit.py --create-monthly`):
+  - `All Domains — monthly (auto)`, 30 d
+  - `No-TLS Domains — monthly rescan (auto)`, 30 d, first run now + 1 d
+  - `SSL Labs sweep — weekly (auto)`, 7 d, first run now + 10 min, no list
+- UI: "No DNS" label and tooltip for unresolvable no-TLS domains; "N not in
+  DNS" on the No TLS card; DNS line in the domain view; SSL Labs error
+  state; Scan History Source and Domains columns.
+- `/api/domain` (`app_routes.py`) now also returns `group_enum` (it was
+  missing, so production never showed offered groups) and `dns_status`.
+
+**Deploy steps**
+1. Deploy the code (web and scheduler both restart).
+2. Install the updated unit: `sudo cp systemd/pqc-monitor-scheduler.service
+   /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl
+   restart pqc-monitor-scheduler`. `deploy.sh` does not sync units.
+3. `sudo -u pqcmonitor .venv/bin/python3 scripts/schedule_audit.py
+   --create-monthly --refresh-dns`. This checks DNS for all ~2,000 no-TLS
+   names (a few minutes), creates the no-TLS and SSL Labs schedules, and
+   repairs #1's `next_run` to 2026-10-04.
+4. Confirm: `journalctl -u pqc-monitor-scheduler` lists 3 schedules with
+   `next run`. The sweep starts about 10 min later; watch for
+   `SSL Labs sweep progress` lines.
+
 ### 2.13 — Production actions taken on the live DB (v1.10.0 session)
 
 1. Ran `fix_mx_entries.py` — repaired malformed `domain` keys

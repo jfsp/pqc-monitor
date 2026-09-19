@@ -18,8 +18,48 @@ This project uses [Semantic Versioning](https://semver.org/).
   work, and returning keeps the dashboard's filters, sort order and scroll
   position.
 - A searchable box on the domain screen switches to any other monitored domain.
+- **Scheduler rewritten around the database.** `next_run` in `scheduled_scans`
+  is now the source of truth. A 60 s tick starts due jobs, jobs that fell due
+  while the daemon was down run on start, and schedule changes apply without a
+  restart. After each run `last_run` is set and
+  `next_run = run start + interval`. Scheduled runs are marked
+  `notes=scheduled:#<id> <name>`; runs left `running` by a killed daemon are
+  marked `interrupted`. A stale `next_run` left by the old scheduler is
+  repaired to `last_run + interval`.
+- The auto domain lists are rebuilt right before each scheduled run, so
+  domains added since the last run are included.
+- **No-TLS monthly rescan.** A new auto schedule rescans `level=na` domains
+  that still resolve (A/AAAA), so services that come online are detected.
+  Names with no DNS entry (`nxdomain`) or no address (`no_address`) are
+  recorded as `dns_status` in `domain_extra` with the date first seen, are not
+  scanned, and are re-checked in DNS every cycle. The dashboard shows them as
+  "No DNS" and counts them on the No TLS card. No schema change.
+- **SSL Labs moved out of the scan.** A new throttled sweep
+  (`scanner/ssllabs_sweep.py`, weekly auto schedule, manual
+  `pqc_monitor.py ssllabs-sweep`) collects reports for serviceable HTTPS
+  domains. It follows the `/info` limits and newAssessmentCoolOff, backs off
+  on 429/529/503, stops on credential errors, skips fresh records (so an
+  interrupted sweep resumes) and stores error results too.
+- `scripts/schedule_audit.py --create-monthly` now creates or refreshes all
+  three auto schedules (`--no-ssllabs`, `--sweep-interval-days`,
+  `--refresh-dns`). Scan History shows a Source and a Domains column.
+- systemd: the scheduler now `Wants=` instead of `Requires=` the web service,
+  so web restarts no longer restart it.
 
 ### Fixed
+- **The monthly schedule depended on how long the scheduler had been up.**
+  APScheduler's `IntervalTrigger` counted 30 days from process start and
+  ignored `next_run`, and every web restart restarted the scheduler through
+  `Requires=`. The 2026-09-04 run fired 30 days after a restart, a week after
+  its `next_run`.
+- **Scans set off SSL Labs rate limits.** `analyze?fromCache=on` starts a
+  new assessment on a cache miss, so the scan asked for one per domain: HTTP
+  429 for 2,915 of 3,168 domains on 2026-09-04.
+- **Certificates with IP-address SANs dropped the whole domain's result**
+  ("Object of type IPv4Address is not JSON serializable"). SAN values are now
+  stored as strings, and `raw_json` is written with `default=str`.
+- Production `/api/domain` did not return `group_enum`, so the TLS details
+  view never showed the key-exchange groups offered by the server.
 - A bookmarked `#…` deep link now survives the login redirect.
 - Findings and action-plan text in the domain view are HTML-escaped.
 - The dashboard table said "No scan data yet. Run a scan first." while it was

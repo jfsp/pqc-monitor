@@ -396,6 +396,49 @@ def _trend_scope(user, db, scope: str):
     raise ValueError("bad scope")
 
 
+# ── Trends result cache ───────────────────────────────────────────────────────
+# Per-process LRU. Keyed on the assessments data version (count / max id /
+# latest assessed_at), the exact domain set of the scope and every request
+# parameter, so a new scan, a deleted row or an org re-assignment all miss.
+# The TTL keeps the in-progress "now" bucket from going stale.
+import hashlib as _hashlib
+import threading as _threading
+import time as _time
+from collections import OrderedDict as _OrderedDict
+
+_TRENDS_CACHE: "_OrderedDict[tuple, tuple[float, dict]]" = _OrderedDict()
+_TRENDS_CACHE_LOCK = _threading.Lock()
+_TRENDS_CACHE_TTL = 300      # seconds
+_TRENDS_CACHE_MAX = 64       # entries (each ~25-60 KB)
+
+
+def _trends_cache_get(key):
+    with _TRENDS_CACHE_LOCK:
+        hit = _TRENDS_CACHE.get(key)
+        if not hit:
+            return None
+        if _time.monotonic() - hit[0] > _TRENDS_CACHE_TTL:
+            _TRENDS_CACHE.pop(key, None)
+            return None
+        _TRENDS_CACHE.move_to_end(key)
+        return hit[1]
+
+
+def _trends_cache_put(key, value):
+    with _TRENDS_CACHE_LOCK:
+        _TRENDS_CACHE[key] = (_time.monotonic(), value)
+        _TRENDS_CACHE.move_to_end(key)
+        while len(_TRENDS_CACHE) > _TRENDS_CACHE_MAX:
+            _TRENDS_CACHE.popitem(last=False)
+
+
+def _domains_key(domains) -> str:
+    if domains is None:
+        return "ALL"
+    norm = sorted({d.lower().strip() for d in domains if d})
+    return _hashlib.sha1("\n".join(norm).encode()).hexdigest()
+
+
 @app_bp.route("/api/trends")
 @require_auth
 def api_trends():
@@ -405,12 +448,16 @@ def api_trends():
     Query: scope=all|org:<id>|community:<id>  range=30d|90d|180d|365d|730d|all
            granularity=auto|day|week|month|quarter  mode=snapshot|activity
            stale_days=<int> (optional override)
+    Results are cached per process (see _TRENDS_CACHE); meta.cached and
+    meta.compute_ms report what happened.
     """
-    from data.trends import compute_trends, GRANULARITIES
+    from data.trends import compute_trends, GRANULARITIES, MODES, RANGE_DAYS
+    t0   = _time.perf_counter()
     db   = _db()
     user = current_user()
+    scope = request.args.get("scope", "all")
     try:
-        domains, label = _trend_scope(user, db, request.args.get("scope", "all"))
+        domains, label = _trend_scope(user, db, scope)
     except PermissionError:
         return jsonify({"error": "forbidden"}), 403
     except ValueError as e:
@@ -418,23 +465,50 @@ def api_trends():
 
     gran = request.args.get("granularity", "auto")
     gran = gran if gran in GRANULARITIES else None
+    mode = request.args.get("mode", "snapshot")
+    mode = mode if mode in MODES else "snapshot"
+    rng  = request.args.get("range", "all")
+    rng  = rng if rng in RANGE_DAYS else "all"
     stale_raw = request.args.get("stale_days", "")
     stale = int(stale_raw) if stale_raw.isdigit() and int(stale_raw) > 0 else None
 
     intervals = db.get_scan_schedule_intervals(domains)
-    result = compute_trends(
-        db.get_trend_rows(domains),
-        granularity=gran,
-        mode=request.args.get("mode", "snapshot"),
-        range_key=request.args.get("range", "all"),
-        stale_days=stale,
-        min_interval_days=min(intervals) if intervals else None,
-        max_interval_days=max(intervals) if intervals else None,
+    key = (db.get_assessments_version(), _domains_key(domains),
+           gran, mode, rng, stale, tuple(sorted(intervals)))
+    result = _trends_cache_get(key)
+    cached = result is not None
+    if not cached:
+        result = compute_trends(
+            db.get_trend_rows(domains),
+            granularity=gran, mode=mode, range_key=rng, stale_days=stale,
+            min_interval_days=min(intervals) if intervals else None,
+            max_interval_days=max(intervals) if intervals else None,
+        )
+        _trends_cache_put(key, result)
+    # Shallow-copy meta so per-request fields never leak into the cache.
+    out = {"meta": dict(result["meta"]), "buckets": result["buckets"]}
+    out["meta"].update(
+        scope=scope, scope_label=label,
+        scope_domains=None if domains is None else len(set(domains)),
+        cached=cached,
+        compute_ms=round((_time.perf_counter() - t0) * 1000),
     )
-    result["meta"]["scope"] = request.args.get("scope", "all")
-    result["meta"]["scope_label"] = label
-    result["meta"]["scope_domains"] = None if domains is None else len(set(domains))
-    return jsonify(result)
+    return jsonify(out)
+
+
+@app_bp.route("/api/trends/domains")
+@require_auth
+def api_trend_domains():
+    """Assessed domains in a trends scope (for the per-domain history picker)."""
+    db   = _db()
+    user = current_user()
+    try:
+        domains, _ = _trend_scope(user, db, request.args.get("scope", "all"))
+    except PermissionError:
+        return jsonify({"error": "forbidden"}), 403
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(db.get_trend_domains(domains))
 
 
 @app_bp.route("/api/trends/scopes")

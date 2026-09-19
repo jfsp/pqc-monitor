@@ -343,6 +343,82 @@ class TestTrendsAPI(unittest.TestCase):
         self.assertEqual(d["meta"]["min_interval_days"], 1)
         self.assertEqual(d["meta"]["granularity"], "day")
 
+    def test_cache_hit_and_invalidation(self):
+        import app_routes
+        app_routes._TRENDS_CACHE.clear()
+        self._login("admin", "changeme123")
+        d1 = self.client.get("/app/api/trends?granularity=month").get_json()
+        d2 = self.client.get("/app/api/trends?granularity=month").get_json()
+        self.assertFalse(d1["meta"]["cached"])
+        self.assertTrue(d2["meta"]["cached"])
+        self.assertEqual(d1["buckets"], d2["buckets"])
+        # Different scope must not reuse the "all" entry
+        d3 = self.client.get(f"/app/api/trends?granularity=month&scope=org:{self.org_b}").get_json()
+        self.assertFalse(d3["meta"]["cached"])
+        self.assertEqual(d3["meta"]["total_domains"], 1)
+        # A new assessment changes the data version -> miss
+        run = self.db.create_run(["new.com"])
+        self.db.save_assessment(run, {"domain": "new.com",
+            "assessment_timestamp": "2026-09-01T00:00:00+00:00", "score": 50,
+            "level": "moderate", "findings": [], "has_pqc": False})
+        d4 = self.client.get("/app/api/trends?granularity=month").get_json()
+        self.assertFalse(d4["meta"]["cached"])
+        self.assertEqual(d4["meta"]["total_domains"], 5)
+
+    def test_cache_does_not_leak_scope_label(self):
+        import app_routes
+        app_routes._TRENDS_CACHE.clear()
+        self._login("admin", "changeme123")
+        self.client.get("/app/api/trends")
+        d = self.client.get("/app/api/trends").get_json()
+        self.assertEqual(d["meta"]["scope_label"], "All domains")
+
+    def test_domains_endpoint_scoped(self):
+        self._login("admin", "changeme123")
+        self.assertEqual(self.client.get("/app/api/trends/domains").get_json(),
+                         ["a1.com", "a2.com", "b1.com", "x.com"])
+        self.assertEqual(self.client.get(
+            f"/app/api/trends/domains?scope=org:{self.org_b}").get_json(), ["b1.com"])
+        self.client.get("/logout")
+        self._login("ana", "password1234")
+        self.assertEqual(self.client.get("/app/api/trends/domains").get_json(),
+                         ["a1.com", "a2.com"])
+        r = self.client.get(f"/app/api/trends/domains?scope=org:{self.org_b}")
+        self.assertEqual(r.status_code, 403)
+
+
+class TestTrendRows(unittest.TestCase):
+
+    def setUp(self):
+        from data.database import Database
+        self.tmpdir = tempfile.mkdtemp()
+        self.db = Database(os.path.join(self.tmpdir, "r.db"))
+        for dom in ("a.com", "B.com", "c.com"):
+            run = self.db.create_run([dom])
+            self.db.save_assessment(run, {"domain": dom,
+                "assessment_timestamp": "2026-07-01T00:00:00+00:00", "score": 1,
+                "level": "weak", "findings": [], "has_pqc": False})
+
+    def test_small_scope_sql_path_case_insensitive(self):
+        got = {r["domain"] for r in self.db.get_trend_rows(["A.com", "b.com"])}
+        self.assertEqual(got, {"a.com", "B.com"})
+
+    def test_large_scope_python_path(self):
+        scope = ["a.com", "c.com"] + [f"x{i}.com" for i in range(2000)]
+        got = {r["domain"] for r in self.db.get_trend_rows(scope)}
+        self.assertEqual(got, {"a.com", "c.com"})
+
+    def test_empty_scope(self):
+        self.assertEqual(self.db.get_trend_rows([]), [])
+
+    def test_version_changes_on_insert(self):
+        v1 = self.db.get_assessments_version()
+        run = self.db.create_run(["d.com"])
+        self.db.save_assessment(run, {"domain": "d.com",
+            "assessment_timestamp": "2026-07-02T00:00:00+00:00", "score": 1,
+            "level": "weak", "findings": [], "has_pqc": False})
+        self.assertNotEqual(v1, self.db.get_assessments_version())
+
 
 if __name__ == "__main__":
     unittest.main()

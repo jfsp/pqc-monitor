@@ -25,6 +25,17 @@ This project uses [Semantic Versioning](https://semver.org/).
 - Scope selector on the Trends tab: all visible domains, a community, or an
   organisation (limited to what the user may see).
 - Per-domain score history uses the same time axis.
+- **Trends load faster and show progress.** Results are cached per process
+  (5 min TTL, keyed on the assessments data version, the scope's domain set
+  and every parameter, so new scans invalidate it). The browser also keeps
+  each result for 2 minutes, so switching back to a view is instant. Scopes
+  of up to 900 domains are filtered in SQL. While loading, the caption shows
+  "Loading…" and the charts dim; failures (HTTP error, non-JSON response,
+  network error) are shown in the caption instead of leaving stale charts.
+- The per-domain history picker loads from the new scoped
+  `/api/trends/domains` and follows the selected scope. It no longer fetches
+  the full `/api/assessments` payload, which queued trend requests behind it
+  on the two sync Gunicorn workers (4–5 s in production).
 - **Domain detail is now its own screen.** Clicking a domain on the Dashboard
   or Roadmap tab opens one page with the summary, all findings and their
   recommendations, the full TLS details and the migration action plan. It

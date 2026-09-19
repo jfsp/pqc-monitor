@@ -409,22 +409,57 @@ class Database:
             """).fetchall()
         return [dict(r) for r in rows]
 
+    # Scopes up to this size are filtered in SQL (IN list); larger ones are
+    # filtered in Python so they never hit SQLite's bound-parameter limit.
+    _TREND_SQL_FILTER_MAX = 900
+
     def get_trend_rows(self, domains=None) -> list:
         """
-        Minimal assessment rows for time-bucketed trends (data/trends.py),
-        oldest first. ``domains`` (iterable) restricts the result; None means
-        all domains. Filtering is done in Python so large analyst scopes do
-        not hit SQLite's bound-parameter limit.
+        Minimal assessment rows for time-bucketed trends (data/trends.py).
+        Unordered: compute_trends() sorts after parsing timestamps.
+        ``domains`` (iterable) restricts the result; None means all domains.
+        """
+        cols = "SELECT domain, assessed_at, score, level, has_pqc FROM assessments"
+        if domains is None:
+            with self._connect() as conn:
+                return [dict(r) for r in conn.execute(cols).fetchall()]
+        aset = {d.lower().strip() for d in domains if d}
+        if not aset:
+            return []
+        # lower(domain) cannot use idx_assessments_domain, but domains are not
+        # normalised on write, and a scan inside SQLite that returns only the
+        # matching rows is far cheaper than building dicts for every row.
+        vals = sorted(aset)
+        with self._connect() as conn:
+            if len(vals) <= self._TREND_SQL_FILTER_MAX:
+                ph = ",".join("?" * len(vals))
+                rows = conn.execute(
+                    f"{cols} WHERE lower(domain) IN ({ph})", vals).fetchall()
+            else:
+                rows = conn.execute(cols).fetchall()
+        return [dict(r) for r in rows if (r["domain"] or "").lower() in aset]
+
+    def get_trend_domains(self, domains=None) -> list:
+        """Sorted distinct assessed domains, optionally restricted to ``domains``."""
+        with self._connect() as conn:
+            names = [r[0] for r in conn.execute(
+                "SELECT DISTINCT domain FROM assessments").fetchall()]
+        if domains is not None:
+            aset = {d.lower().strip() for d in domains if d}
+            names = [n for n in names if (n or "").lower() in aset]
+        return sorted(n for n in names if n)
+
+    def get_assessments_version(self) -> tuple:
+        """
+        Cheap change marker for the assessments table (row count, max id,
+        latest assessed_at). Any insert, delete or re-assessment changes it;
+        used to invalidate cached trend results.
         """
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT domain, assessed_at, score, level, has_pqc "
-                "FROM assessments ORDER BY assessed_at ASC"
-            ).fetchall()
-        if domains is None:
-            return [dict(r) for r in rows]
-        allowed = {d.lower().strip() for d in domains if d}
-        return [dict(r) for r in rows if (r["domain"] or "").lower() in allowed]
+            r = conn.execute(
+                "SELECT COUNT(*), MAX(id), MAX(assessed_at) FROM assessments"
+            ).fetchone()
+        return (r[0], r[1], r[2])
 
     def get_scan_schedule_intervals(self, domains=None) -> list:
         """

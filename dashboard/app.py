@@ -92,6 +92,10 @@ def create_app(config: dict = None) -> Flask:
     def api_trend_scopes():
         return jsonify([{"value": "all", "label": "All domains", "group": ""}])
 
+    @app.route("/api/trends/domains")
+    def api_trend_domains():
+        return jsonify(db.get_trend_domains())
+
     @app.route("/api/runs")
     def api_runs():
         runs = db.list_runs(20)
@@ -487,6 +491,14 @@ body { background: var(--bg); color: var(--text); font-family: var(--font-sans);
 .seg-sm button { padding:.2rem .55rem; font-size:.72rem; }
 .trend-meta { padding:0 1.25rem 1rem; font-size:.78rem; color:var(--muted); line-height:1.5; }
 .trend-meta b { color:var(--text); font-weight:500; }
+.trend-status:empty { display:none; }
+.trend-status { margin-right:.6rem; font-weight:600; }
+.trend-status.busy { color:var(--accent); }
+.trend-status.busy::before { content:''; display:inline-block; width:.7em; height:.7em; margin-right:.4em; border:2px solid var(--accent); border-right-color:transparent; border-radius:50%; animation:trendspin .8s linear infinite; vertical-align:-1px; }
+.trend-status.err { color:var(--critical); }
+@keyframes trendspin { to { transform:rotate(360deg); } }
+#view-trends .chart-wrap { transition:opacity .15s; }
+#view-trends.trend-loading .chart-wrap { opacity:.35; pointer-events:none; }
 .form-row { display: flex; gap: 0.75rem; margin-bottom: 1rem; align-items: flex-start; flex-wrap: wrap; }
 input[type=text], textarea, select {
   background: rgba(255,255,255,0.05); border: 1px solid var(--border);
@@ -893,7 +905,7 @@ footer {
           </div>
         </div>
       </div>
-      <div id="trend-meta" class="trend-meta"></div>
+      <div class="trend-meta"><span id="trend-status" class="trend-status"></span><span id="trend-meta"></span></div>
     </div>
 
     <div class="panel" style="margin-bottom:1.5rem">
@@ -1352,7 +1364,7 @@ function showView(name, btn) {
   const navTarget = btn || (typeof event !== 'undefined' ? event.target : null);
   if (navTarget && navTarget.classList) navTarget.classList.add('active');
   if (name === 'dashboard') { loadSummary(); loadAssessments(); }
-  if (name === 'trends')    { loadTrends(); populateDomainSelector(); loadSchedules(); }
+  if (name === 'trends')    { loadTrends(); loadSchedules(); }
   if (name === 'scan')      { loadRuns(); }
   if (name === 'domains')   { loadDomainLists(); }
   if (name === 'ct')        { loadCTStats(); loadCTSummaries(); loadCTPQCCerts(); loadCTTimeline(); }
@@ -2326,6 +2338,7 @@ const trendState = { scope: 'all', range: 'all', gran: 'auto', mode: 'snapshot',
 let trendScopesLoaded = false;
 let trendData = null;
 let trendSeq = 0;
+let trendDomainsScope = null;
 const TREND_GRID = 'rgba(30,45,74,.5)', TREND_TICK = '#64748b', TREND_TEXT = '#e2e8f0';
 const DAY_MS = 86400000;
 
@@ -2376,22 +2389,56 @@ async function loadTrendScopes() {
   } catch (e) { /* selector stays on "all" */ }
 }
 
-async function loadTrends() {
+// Client-side cache: revisiting a combination of controls is instant. The
+// server keeps its own cache keyed on the data version; this one only needs
+// a short TTL.
+const trendClientCache = new Map();
+const TREND_CLIENT_TTL = 120000;
+
+function setTrendLoading(on, msg) {
+  const view = document.getElementById('view-trends');
+  if (view) view.classList.toggle('trend-loading', on);
+  const st = document.getElementById('trend-status');
+  if (!st) return;
+  st.className = 'trend-status' + (on ? ' busy' : '') + (msg && !on ? ' err' : '');
+  st.textContent = on ? 'Loading…' : (msg || '');
+}
+
+async function loadTrends(force) {
   initTrendSegs();
   loadTrendScopes();
   const q = new URLSearchParams({
     scope: trendState.scope, range: trendState.range,
     granularity: trendState.gran, mode: trendState.mode,
-  });
+  }).toString();
   const seq = ++trendSeq;
-  const r = await fetch('/api/trends?' + q.toString());
-  if (seq !== trendSeq) return;          // a newer request superseded this one
-  if (!r.ok) {
-    document.getElementById('trend-meta').textContent = 'Could not load trends (' + r.status + ').';
+  if (trendDomainsScope !== trendState.scope) populateDomainSelector();
+  const hit = trendClientCache.get(q);
+  if (!force && hit && Date.now() - hit.t < TREND_CLIENT_TTL) {
+    trendData = hit.data;
+    setTrendLoading(false);
+    renderTrends();
     return;
   }
-  trendData = await r.json();
-  renderTrends();
+  setTrendLoading(true);
+  try {
+    const r = await fetch('/api/trends?' + q);
+    if (seq !== trendSeq) return;        // a newer request superseded this one
+    const ct = r.headers.get('content-type') || '';
+    if (!r.ok || !ct.includes('json')) {
+      setTrendLoading(false, `Could not load trends (HTTP ${r.status}${ct.includes('json') ? '' : ', not JSON: session expired?'}).`);
+      return;
+    }
+    const data = await r.json();
+    if (seq !== trendSeq) return;
+    trendClientCache.set(q, { t: Date.now(), data });
+    trendData = data;
+    setTrendLoading(false);
+    renderTrends();
+  } catch (e) {
+    if (seq !== trendSeq) return;
+    setTrendLoading(false, 'Could not load trends: ' + (e && e.message ? e.message : e));
+  }
 }
 
 // ── Time axis helpers ───────────────────────────────────────────────────────
@@ -3082,14 +3129,22 @@ async function loadDomainHistory(domain) {
 }
 
 async function populateDomainSelector() {
-  const r = await fetch('/api/assessments');
-  const assessments = await r.json();
+  // Lightweight scoped list (was the full /api/assessments payload, which
+  // queued the trends request behind it on the 2 sync Gunicorn workers).
+  const scope = (typeof trendState !== 'undefined') ? trendState.scope : 'all';
+  trendDomainsScope = scope;
+  let names = [];
+  try {
+    const r = await fetch('/api/trends/domains?scope=' + encodeURIComponent(scope));
+    if (!r.ok) return;
+    names = await r.json();
+  } catch (e) { return; }
+  if (trendDomainsScope !== scope) return;
   const sel = document.getElementById('history-domain-sel');
   if (!sel) return;
-  // Rebuilt on every visit to the tab (previously appended duplicates).
   const keep = sel.value;
   sel.length = 1;
-  [...new Set(assessments.map(a => a.domain))].sort().forEach(d => {
+  names.forEach(d => {
     const opt = document.createElement('option');
     opt.value = d;
     opt.textContent = d;

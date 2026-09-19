@@ -1010,6 +1010,7 @@ additionally check `require_admin` or `user.can("permission")`.
 | GET | `/api/domain/<domain>` | user | Domain detail + history |
 | GET | `/api/trends` | user | Time-bucketed trends. `scope=all\|org:<id>\|community:<id>`, `range=30d\|90d\|180d\|365d\|730d\|all`, `granularity=auto\|day\|week\|month\|quarter`, `mode=snapshot\|activity`, `stale_days=N`. Returns `{meta, buckets[]}` |
 | GET | `/api/trends/scopes` | user | Scopes selectable on the Trends tab for the current user |
+| GET | `/api/trends/domains` | user | Assessed domains in a trends scope (`scope=` as above) |
 
 ### Group Report (community_manager or admin)
 
@@ -1306,6 +1307,14 @@ synced. New Python modules must be added to `WEB_TRIGGERS` or `SCHEDULER_TRIGGER
 - Buckets are UTC calendar periods (ISO weeks start Monday). The frontend x
   axis is linear epoch-ms with ticks placed by `trendTimeAxis()`, so no
   Chart.js date adapter or extra CDN is needed.
+- `/api/trends` results are cached per Gunicorn worker (`_TRENDS_CACHE` in
+  `app_routes.py`, LRU 64, TTL 300 s). Key: `db.get_assessments_version()`
+  (count, max id, max assessed_at), SHA-1 of the scope's domain set, all
+  params and the schedule intervals. `meta.cached` / `meta.compute_ms` report
+  it. The browser keeps its own 120 s cache per query string.
+- Production runs behind a Cloudflare Tunnel (cloudflared → nginx on
+  localhost). Measured: full read + daily compute ≈ 0.4 s; the 4–5 s seen
+  were requests queued behind `/api/assessments` on 2 sync workers.
 - `get_sector_trends()` (per-run aggregation) is kept only for the text
   report in `reports/report_generator.py`.
 - Cost is O(rows + buckets × domains); ~36k rows × 53 weekly buckets × 3k

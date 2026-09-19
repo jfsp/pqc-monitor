@@ -511,6 +511,21 @@ textarea { resize: vertical; min-height: 80px; width: 100%; font-family: var(--f
 .finding-low, .finding-info { background: rgba(0,212,255,0.05); border-color: var(--muted); }
 .finding-rec { color: var(--muted); font-size: 0.75rem; margin-top: 0.25rem; }
 
+/* ─── Domain detail view ─── */
+.dv-toolbar { display:flex; align-items:center; justify-content:space-between; gap:.75rem; flex-wrap:wrap; }
+.dv-toolbar-left { display:flex; align-items:center; gap:.75rem; flex-wrap:wrap; min-width:0; }
+.dv-title { font-family: var(--font-mono); font-size: 1rem; color: var(--accent); word-break: break-all; }
+.dv-jump { display:flex; gap:.4rem; align-items:center; }
+.dv-jump input { width: 280px; max-width: 60vw; }
+.dv-secnav { display:flex; gap:.4rem; flex-wrap:wrap; margin-top:.75rem; }
+.dv-secnav a { color: var(--muted); font-size:.75rem; text-decoration:none; border:1px solid var(--border);
+  border-radius: 999px; padding:.15rem .65rem; }
+.dv-secnav a:hover { color: var(--accent); border-color: var(--accent); }
+.dv-section { margin-top: 1rem; scroll-margin-top: 1rem; }
+.dv-label { color: var(--muted); font-size:.75rem; text-transform:uppercase; letter-spacing:.05em; margin-bottom:.5rem; }
+.dv-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:1.5rem; }
+.dv-sevcount { font-size:.72rem; margin-left:.5rem; text-transform:none; letter-spacing:0; }
+
 /* ─── Chart containers ─── */
 .chart-wrap { position: relative; height: 220px; }
 
@@ -657,27 +672,48 @@ footer {
         </table>
       </div>
     </div>
-
-    <!-- Domain detail modal -->
-    <div id="domain-detail" style="display:none;margin-top:1.5rem">
-      <div class="panel">
-        <div class="panel-header">
-          <div class="panel-title" id="detail-title">Domain Detail</div>
-          <button class="btn-outline" onclick="document.getElementById('domain-detail').style.display='none'">✕ Close</button>
-        </div>
-        <div class="panel-body" id="detail-body"></div>
-      </div>
-    </div>
   </div>
 
-  <!-- ═══ DOMAIN FULL TLS DETAIL VIEW (drill-down, no nav tab) ═══ -->
-  <div id="view-domain-full" class="view">
+  <!-- ═══ DOMAIN DETAIL VIEW (no nav tab; routed via #domain/<name>) ═══ -->
+  <div id="view-domain" class="view">
     <div class="panel">
-      <div class="panel-header">
-        <div class="panel-title" id="df-title">TLS Details</div>
-        <button class="btn-outline" onclick="closeDomainFull()">← Back</button>
+      <div class="panel-body">
+        <div class="dv-toolbar">
+          <div class="dv-toolbar-left">
+            <button class="btn-outline" id="dv-back" onclick="closeDomainView()">← Back to Dashboard</button>
+            <div class="dv-title" id="dv-title">—</div>
+          </div>
+          <form class="dv-jump" onsubmit="dvJump();return false" autocomplete="off">
+            <input type="text" id="dv-search" list="dv-domain-list" placeholder="Show another domain…" aria-label="Show another domain">
+            <datalist id="dv-domain-list"></datalist>
+            <button class="btn-outline" type="submit">Go</button>
+          </form>
+        </div>
+        <div id="dv-jump-msg" style="color:var(--critical);font-size:.75rem;margin-top:.4rem;display:none"></div>
+        <nav class="dv-secnav">
+          <a href="#" onclick="dvScrollTo('summary');return false">Summary</a>
+          <a href="#" onclick="dvScrollTo('findings');return false">Findings &amp; recommendations</a>
+          <a href="#" onclick="dvScrollTo('tls');return false">TLS details</a>
+          <a href="#" onclick="dvScrollTo('plan');return false">Action plan</a>
+        </nav>
       </div>
+    </div>
+
+    <div class="panel dv-section" id="dv-sec-summary">
+      <div class="panel-header"><div class="panel-title">Summary</div></div>
+      <div class="panel-body" id="dv-summary-body"></div>
+    </div>
+    <div class="panel dv-section" id="dv-sec-findings">
+      <div class="panel-header"><div class="panel-title" id="dv-findings-title">Findings &amp; Recommendations</div></div>
+      <div class="panel-body" id="dv-findings-body"></div>
+    </div>
+    <div class="panel dv-section" id="dv-sec-tls">
+      <div class="panel-header"><div class="panel-title">TLS Details</div></div>
       <div class="panel-body" id="df-body"></div>
+    </div>
+    <div class="panel dv-section" id="dv-sec-plan">
+      <div class="panel-header"><div class="panel-title">Migration Action Plan</div></div>
+      <div class="panel-body" id="dv-plan-body"></div>
     </div>
   </div>
 
@@ -1072,17 +1108,6 @@ footer {
       </div>
     </div>
 
-    <!-- Domain detail drawer -->
-    <div id="rm-domain-detail" style="display:none">
-      <div class="panel">
-        <div class="panel-header">
-          <div class="panel-title" id="rm-detail-title">Action Plan</div>
-          <button class="btn-outline" onclick="document.getElementById('rm-domain-detail').style.display='none'">✕ Close</button>
-        </div>
-        <div class="panel-body" id="rm-detail-body"></div>
-      </div>
-    </div>
-
     <!-- Phase reference -->
     <div class="panel">
       <div class="panel-header"><div class="panel-title">Phase Reference</div></div>
@@ -1252,6 +1277,7 @@ let _sortDir         = 'asc'; // 'asc'|'desc'
 
 // ─── Navigation ──────────────────────────────────────────────────────────────
 function showView(name, btn) {
+  if (name !== 'domain') _dvLeave();
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
   const viewEl = document.getElementById('view-' + name);
@@ -1527,7 +1553,7 @@ function renderAssessments(items) {
     const critCount = findings.filter(f=>f.severity==='critical').length;
     const highCount = findings.filter(f=>f.severity==='high').length;
     return `<tr>
-      <td><a class="domain-link" href="#" onclick="showDomainDetail('${a.domain}');return false">${a.domain}</a></td>
+      <td><a class="domain-link" href="#domain/${encodeURIComponent(a.domain)}" data-domain="${esc(a.domain)}" onclick="openDomain(this.dataset.domain,'dashboard');return false">${esc(a.domain)}</a></td>
       <td>${isNA ? '<span class="score-badge score-na">N/A</span>' : `<span class="score-badge score-${lc}">${a.score??'?'}</span>`}</td>
       <td><span class="level-dot dot-${lc}"></span>${isNA ? '<span style="color:var(--muted)">No TLS</span>' : ucfirst(lc)}</td>
       <td>${tlsArr.map(t=>`<span class="tls-pill">${t}</span>`).join(' ')}</td>
@@ -1606,29 +1632,229 @@ function renderTlsPorts(ports) {
   return list.map(p => `<span style="font-family:var(--font-mono);font-size:.72rem;padding:.1rem .4rem;margin-right:.3rem;border-radius:3px;background:rgba(255,255,255,.06)">${p.port}<span style="color:var(--muted)"> ${p.service||''}</span>${p.tls_version?` · ${p.tls_version}`:''}</span>`).join('');
 }
 
-let _detailDomain     = null;   // domain currently shown in modal / full view
-let _detailData       = null;   // cached /api/domain response
-let _detailAssessment = null;   // cached latest assessment row
+// ─── Domain detail view ─────────────────────────────────────────────────────
+// Single screen per domain: summary, findings + recommendations, full TLS
+// drill-down and the migration action plan. Routed via location.hash
+// (#domain/<name>[/<section>]) so the browser Back button and bookmarks work.
+const CAN_SCAN = {{ 'true' if is_admin else 'false' }};
+const _CIPHER_LEVEL_ORDER = { recommended:0, acceptable:1, deprecated:2, disallowed:3 };
+const _PQC_GROUP_RE = /mlkem|kyber|ml-kem|frodo|ntru|sntrup/i;
+function _isPqcGroup(g){ return !!g && _PQC_GROUP_RE.test(g); }
+const _SEV_ORDER = { critical:0, high:1, medium:2, low:3, info:4 };
+const _DV_SECTIONS = ['summary','findings','tls','plan'];
+const _DV_VIEW_LABEL = { dashboard:'Dashboard', roadmap:'Roadmap' };
 
-async function showDomainDetail(domain) {
-  const r = await fetch(`/api/domain/${encodeURIComponent(domain)}`);
-  const d = await r.json();
+let _sslLabsPollTimer = null;
+let _detailDomain     = null;   // domain currently shown
+let _detailData       = null;   // cached /api/domain response
+let _detailAssessment = null;   // latest assessment row for the domain
+let _dvReturnView     = 'dashboard'; // view to return to on Back
+let _dvReturnScroll   = 0;      // scroll position of that view
+let _dvPushedEntry    = false;  // true when we pushed a history entry to enter
+let _dvRenderToken    = 0;      // discards stale async renders
+let _dvAssessCache    = { at: 0, rows: [] };
+const _DV_BASE_TITLE  = document.title;
+
+function _dvHash(domain, section) {
+  return '#domain/' + encodeURIComponent(domain) + (section ? '/' + section : '');
+}
+function _dvParseHash() {
+  const m = /^#domain\/([^/]+)(?:\/([a-z]+))?$/.exec(location.hash || '');
+  if (!m) return null;
+  let domain;
+  try { domain = decodeURIComponent(m[1]); } catch { return null; }
+  const section = _DV_SECTIONS.includes(m[2]) ? m[2] : null;
+  return { domain, section };
+}
+function _activeViewName() {
+  const v = document.querySelector('.view.active');
+  return v ? v.id.replace(/^view-/, '') : 'dashboard';
+}
+function _setActiveView(name) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  const el = document.getElementById('view-' + name);
+  if (el) el.classList.add('active');
+  const btn = [...document.querySelectorAll('.nav-btn')]
+    .find(b => (b.getAttribute('onclick') || '').includes("showView('" + name + "'"));
+  if (btn) {
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+  }
+}
+
+// Entry point from tables (dashboard, roadmap) and anywhere else.
+function openDomain(domain, fromView, section) {
+  if (!domain) return;
+  const cur = _activeViewName();
+  if (cur !== 'domain') {
+    _dvReturnView   = fromView || cur || 'dashboard';
+    _dvReturnScroll = window.scrollY;
+    _dvPushedEntry  = true;
+    history.pushState({ pqcDomain: domain }, '', _dvHash(domain, section));
+  } else {
+    // Switching domain inside the view: replace, so Back still returns
+    // to the originating tab rather than stepping through each domain.
+    history.replaceState({ pqcDomain: domain }, '', _dvHash(domain, section));
+  }
+  _dvShow(domain, section);
+}
+
+// Back button in the view.
+function closeDomainView() {
+  if (_dvPushedEntry) { history.back(); return; }   // popstate → _dvRoute()
+  history.replaceState(null, '', location.pathname + location.search);
+  _dvReturn();
+}
+
+// Called by showView() when a nav tab is clicked while the view is open.
+function _dvLeave() {
+  if (_sslLabsPollTimer) { clearTimeout(_sslLabsPollTimer); _sslLabsPollTimer = null; }
+  document.title = _DV_BASE_TITLE;
+  if (_dvParseHash()) {
+    history.replaceState(null, '', location.pathname + location.search);
+    _dvPushedEntry = false;
+  }
+}
+
+function _dvReturn() {
+  if (_sslLabsPollTimer) { clearTimeout(_sslLabsPollTimer); _sslLabsPollTimer = null; }
+  _dvPushedEntry = false;
+  document.title = _DV_BASE_TITLE;
+  const target = _dvReturnView || 'dashboard';
+  // Restore without reloading so table filters, sort and scroll survive.
+  _setActiveView(target);
+  if (!document.getElementById('view-' + target)) _setActiveView('dashboard');
+  window.scrollTo({ top: _dvReturnScroll || 0 });
+}
+
+// Router: handles browser Back/Forward and direct deep links.
+function _dvRoute() {
+  const h = _dvParseHash();
+  if (h) { _dvShow(h.domain, h.section); return; }
+  if (_activeViewName() === 'domain') _dvReturn();
+}
+window.addEventListener('popstate', _dvRoute);
+window.addEventListener('hashchange', _dvRoute);
+
+function dvScrollTo(section) {
+  const el = document.getElementById('dv-sec-' + section);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function dvJump() {
+  const inp = document.getElementById('dv-search');
+  const msg = document.getElementById('dv-jump-msg');
+  const q = (inp.value || '').trim().toLowerCase().replace(/\.$/, '');
+  msg.style.display = 'none';
+  if (!q) return;
+  const rows = _dvAssessCache.rows || [];
+  const hit = rows.find(r => (r.domain || '').toLowerCase() === q)
+           || (() => { const m = rows.filter(r => (r.domain || '').toLowerCase().includes(q));
+                       return m.length === 1 ? m[0] : null; })();
+  if (!hit) {
+    msg.textContent = rows.some(r => (r.domain || '').toLowerCase().includes(q))
+      ? 'Several domains match — pick one from the list.'
+      : 'No monitored domain matches “' + inp.value + '”.';
+    msg.style.display = 'block';
+    return;
+  }
+  inp.value = '';
+  openDomain(hit.domain);
+}
+
+async function _dvAssessments(force) {
+  if (!force && _dvAssessCache.rows.length && (Date.now() - _dvAssessCache.at) < 60000)
+    return _dvAssessCache.rows;
+  try {
+    const r = await fetch('/api/assessments');
+    const rows = await r.json();
+    if (Array.isArray(rows)) _dvAssessCache = { at: Date.now(), rows };
+  } catch (e) { /* keep previous cache */ }
+  return _dvAssessCache.rows;
+}
+
+function _dvFillDatalist(rows) {
+  const dl = document.getElementById('dv-domain-list');
+  if (!dl) return;
+  dl.innerHTML = [...rows]
+    .sort((a, b) => (a.domain || '').localeCompare(b.domain || ''))
+    .map(r => {
+      const lbl = r.level === 'na' ? 'No TLS' : `${ucfirst(r.level || '')} · ${r.score ?? '?'}`;
+      return `<option value="${esc(r.domain)}" label="${esc(lbl)}"></option>`;
+    }).join('');
+}
+
+async function _dvShow(domain, section) {
+  const token = ++_dvRenderToken;
+  if (_sslLabsPollTimer) { clearTimeout(_sslLabsPollTimer); _sslLabsPollTimer = null; }
   _detailDomain = domain;
-  _detailData   = d;
-  const history = d.history || [];
-  const latest = history[history.length - 1] || {};
+
+  _setActiveView('domain');
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('dv-title').textContent = domain;
+  document.getElementById('dv-back').textContent =
+    '← Back to ' + (_DV_VIEW_LABEL[_dvReturnView] || 'Dashboard');
+  document.getElementById('dv-jump-msg').style.display = 'none';
+  document.title = `${domain} — PQC-Monitor`;
+  const loading = '<div style="color:var(--muted);font-size:.8rem"><span class="loader"></span> Loading…</div>';
+  ['dv-summary-body','dv-findings-body','df-body','dv-plan-body']
+    .forEach(id => { document.getElementById(id).innerHTML = loading; });
+  document.getElementById('dv-findings-title').textContent = 'Findings & Recommendations';
+  if (!section) window.scrollTo({ top: 0 });
+
+  const [dRes, rows, planRes] = await Promise.all([
+    fetch(`/api/domain/${encodeURIComponent(domain)}`)
+      .then(async r => ({ ok: r.ok, status: r.status, body: await r.json().catch(() => ({})) }))
+      .catch(() => ({ ok: false, status: 0, body: {} })),
+    _dvAssessments(false),
+    fetch(`/api/roadmap/domain/${encodeURIComponent(domain)}`)
+      .then(async r => ({ ok: r.ok, status: r.status, body: await r.json().catch(() => ({})) }))
+      .catch(() => ({ ok: false, status: 0, body: {} })),
+  ]);
+  if (token !== _dvRenderToken) return;   // user already moved on
+  _dvFillDatalist(rows);
+
+  if (!dRes.ok) {
+    const why = dRes.status === 403 ? 'You do not have access to this domain.'
+              : dRes.status === 0   ? 'Request failed — check your connection.'
+              : `Could not load domain (HTTP ${dRes.status}).`;
+    document.getElementById('dv-summary-body').innerHTML =
+      `<div style="color:var(--critical);font-size:.85rem">${why}</div>`;
+    ['dv-findings-body','df-body','dv-plan-body']
+      .forEach(id => { document.getElementById(id).innerHTML = '<div style="color:var(--muted);font-size:.8rem">—</div>'; });
+    return;
+  }
+
+  _detailData = dRes.body || {};
+  let a = rows.find(x => x.domain === domain);
+  if (!a) {   // cache may predate a new scan — refresh once
+    const fresh = await _dvAssessments(true);
+    if (token !== _dvRenderToken) return;
+    _dvFillDatalist(fresh);
+    a = fresh.find(x => x.domain === domain);
+  }
+  _detailAssessment = a || {};
+
+  _dvRenderSummary();
+  _dvRenderFindings();
+  renderDomainFull();
+  document.getElementById('dv-plan-body').innerHTML = _dvPlanHtml(planRes, _detailAssessment);
+
+  if (section) dvScrollTo(section);
+}
+
+function _dvRenderSummary() {
+  const d = _detailData || {};
+  const a = _detailAssessment || {};
+  const domain   = _detailDomain;
   const enumData = (d.extra||{}).cipher_enum || null;
   const ssllabs  = (d.extra||{}).ssllabs || null;
+  const body = document.getElementById('dv-summary-body');
 
-  document.getElementById('detail-title').textContent = `Domain: ${domain}`;
-  const body = document.getElementById('detail-body');
-
-  // Get latest findings
-  const assessments = await (await fetch(`/api/assessments`)).json();
-  const a = assessments.find(x => x.domain === domain) || {};
-  _detailAssessment = a;
-  const findings = tryJSON(a.findings_json) || [];
-
+  if (!a.domain) {
+    body.innerHTML = '<div style="color:var(--muted);font-size:.85rem">No assessment stored for this domain yet — run a scan first.</div>';
+    return;
+  }
   const allCiphers = tryJSON(a.cipher_suites) || [];
   const enumCount  = enumData ? (enumData.supported_ciphers||[]).length : 0;
   const cipherSummary = enumData ? `
@@ -1640,60 +1866,56 @@ async function showDomainDetail(domain) {
         ${enumData.disallowed_count?` · <span style="color:${cipherLevelColor('disallowed')}">${enumData.disallowed_count} disallowed</span>`:''}
       </span>
     </div>` : `
-    <div style="font-size:.8rem;margin-top:.25rem">Ciphers: <span style="color:var(--text)">${allCiphers.slice(0,3).join(', ')||'—'}${allCiphers.length>3?` (+${allCiphers.length-3} more)`:''}</span></div>`;
+    <div style="font-size:.8rem;margin-top:.25rem">Ciphers: <span style="color:var(--text)">${esc(allCiphers.slice(0,3).join(', '))||'—'}${allCiphers.length>3?` (+${allCiphers.length-3} more)`:''}</span></div>`;
+
+  const history = d.history || [];
+  const assessedAt = (a.assessed_at || (history[history.length-1]||{}).assessed_at || '').slice(0,19).replace('T',' ');
+  const isNA = a.level === 'na';
 
   body.innerHTML = `
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-bottom:1.5rem">
+    <div class="dv-grid">
       <div>
-        <div style="color:var(--muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">Score</div>
-        <div style="font-family:var(--font-mono);font-size:2.5rem;color:${levelColor(a.level)}">${a.level === 'na' ? 'N/A' : (a.score??'—')}</div>
-        <div style="color:${levelColor(a.level)};font-size:.85rem;margin-top:.25rem">${a.level === 'na' ? 'No TLS Service' : ucfirst(a.level||'')}</div>
+        <div class="dv-label">Score</div>
+        <div style="font-family:var(--font-mono);font-size:2.5rem;color:${levelColor(a.level)}">${isNA ? 'N/A' : (a.score??'—')}</div>
+        <div style="color:${levelColor(a.level)};font-size:.85rem;margin-top:.25rem">${isNA ? 'No TLS Service' : ucfirst(a.level||'')}</div>
+        ${assessedAt?`<div style="color:var(--muted);font-size:.72rem;margin-top:.5rem">Last assessed ${esc(assessedAt)} UTC</div>`:''}
+        ${history.length>1?`<div style="color:var(--muted);font-size:.72rem;margin-top:.2rem">${history.length} assessments on record</div>`:''}
       </div>
       <div>
-        <div style="color:var(--muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.5rem">Details</div>
-        <div style="font-size:.8rem">TLS: <span style="color:var(--accent)">${(tryJSON(a.tls_versions)||[]).join(', ')||'—'}</span></div>
+        <div class="dv-label">Details</div>
+        <div style="font-size:.8rem">TLS: <span style="color:var(--accent)">${esc((tryJSON(a.tls_versions)||[]).join(', '))||'—'}</span></div>
         <div style="font-size:.8rem;margin-top:.25rem">TLS ports: ${renderTlsPorts(d.tls_ports)}</div>
         ${cipherSummary}
+        <div style="font-size:.8rem;margin-top:.25rem">Key: <span style="font-family:var(--font-mono);font-size:.75rem">${esc(a.key_type)||'—'}</span></div>
         <div style="font-size:.8rem;margin-top:.25rem">PQC: <span style="${a.has_pqc?'color:#a78bfa':'color:var(--muted)'}">${a.has_pqc?'Detected':'Not detected'}</span></div>
         ${a.cert_expiry_days!=null?`<div style="font-size:.8rem;margin-top:.25rem">Cert expires: <span style="color:${a.cert_expiry_days<30?'var(--critical)':'var(--text)'}">${a.cert_expiry_days} days</span></div>`:''}
         ${sslLabsBadge(ssllabs, domain)}
-        <button class="btn-outline" style="margin-top:.7rem;font-size:.75rem" onclick="showDomainFull()">Full TLS Details →</button>
       </div>
-    </div>
-    <div style="color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.75rem">Findings (${findings.length})</div>
-    ${findings.length ? findings.map(f => `
-      <div class="finding finding-${f.severity}">
-        <strong style="font-size:.8rem">[${f.severity?.toUpperCase()}] ${f.category?.toUpperCase()}</strong>
-        — ${f.message}
-        ${f.recommendation?`<div class="finding-rec">→ ${f.recommendation}</div>`:''}
-        ${f.guideline?`<div style="color:var(--muted);font-size:.7rem;margin-top:.2rem">${f.guideline}</div>`:''}
-      </div>
-    `).join('') : '<div style="color:var(--ready)">✓ No significant findings</div>'}
-  `;
-  document.getElementById('domain-detail').style.display = 'block';
-  document.getElementById('domain-detail').scrollIntoView({ behavior: 'smooth' });
+    </div>`;
 }
 
-// ─── Full TLS detail view (drill-down) ──────────────────────────────────────
-const CAN_SCAN = {{ 'true' if is_admin else 'false' }};
-const _CIPHER_LEVEL_ORDER = { recommended:0, acceptable:1, deprecated:2, disallowed:3 };
-const _PQC_GROUP_RE = /mlkem|kyber|ml-kem|frodo|ntru|sntrup/i;
-function _isPqcGroup(g){ return !!g && _PQC_GROUP_RE.test(g); }
-let _sslLabsPollTimer = null;
+function _dvRenderFindings() {
+  const a = _detailAssessment || {};
+  const body  = document.getElementById('dv-findings-body');
+  const title = document.getElementById('dv-findings-title');
+  const findings = [...(tryJSON(a.findings_json) || [])]
+    .sort((x, y) => (_SEV_ORDER[x.severity] ?? 9) - (_SEV_ORDER[y.severity] ?? 9));
+  const counts = {};
+  findings.forEach(f => { counts[f.severity] = (counts[f.severity] || 0) + 1; });
+  const sevColor = { critical:'var(--critical)', high:'var(--weak)', medium:'var(--moderate)', low:'var(--muted)', info:'var(--muted)' };
+  title.innerHTML = `Findings &amp; Recommendations (${findings.length})` +
+    Object.keys(_SEV_ORDER).filter(k => counts[k])
+      .map(k => `<span class="dv-sevcount" style="color:${sevColor[k]}">${counts[k]} ${k}</span>`).join('');
 
-function closeDomainFull() {
-  if (_sslLabsPollTimer) { clearTimeout(_sslLabsPollTimer); _sslLabsPollTimer = null; }
-  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-  document.getElementById('view-dashboard').classList.add('active');
-}
-
-function showDomainFull() {
-  if (!_detailDomain) return;
-  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-  document.getElementById('view-domain-full').classList.add('active');
-  document.getElementById('df-title').textContent = `TLS Details: ${_detailDomain}`;
-  renderDomainFull();
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  if (!a.domain) { body.innerHTML = '<div style="color:var(--muted);font-size:.8rem">—</div>'; return; }
+  body.innerHTML = findings.length ? findings.map(f => `
+      <div class="finding finding-${esc(f.severity)}">
+        <strong style="font-size:.8rem">[${esc((f.severity||'').toUpperCase())}] ${esc((f.category||'').toUpperCase())}</strong>
+        — ${esc(f.message)}
+        ${f.recommendation?`<div class="finding-rec">→ ${esc(f.recommendation)}</div>`:''}
+        ${f.guideline?`<div style="color:var(--muted);font-size:.7rem;margin-top:.2rem">${esc(f.guideline)}</div>`:''}
+      </div>`).join('')
+    : '<div style="color:var(--ready)">✓ No significant findings</div>';
 }
 
 function renderDomainFull() {
@@ -2308,7 +2530,7 @@ function renderRoadmapTable(domains) {
     const p3 = d.phase3_items || 0;
     const completion = (d.estimated_completion || d.est_completion || '').slice(0,10);
     return `<tr>
-      <td><a class="domain-link" href="#" onclick="showRoadmapDetail('${d.domain}');return false">${d.domain}</a></td>
+      <td><a class="domain-link" href="#domain/${encodeURIComponent(d.domain)}/plan" data-domain="${esc(d.domain)}" onclick="openDomain(this.dataset.domain,'roadmap','plan');return false">${esc(d.domain)}</a></td>
       <td><span class="score-badge score-${lc}">${d.current_score??'?'}</span></td>
       <td><span class="score-badge score-${s1c}">${d.score_after_phase1||d.score_p1||'?'}</span></td>
       <td><span class="score-badge score-${s2c}">${d.score_after_phase2||d.score_p2||'?'}</span></td>
@@ -2380,15 +2602,24 @@ function renderRoadmapCharts(domains) {
   }
 }
 
-async function showRoadmapDetail(domain) {
-  const r = await fetch(`/api/roadmap/domain/${encodeURIComponent(domain)}`);
-  const d = await r.json();
-  if (d.error) return;
+// Kept for backwards compatibility with any external caller.
+function showRoadmapDetail(domain) { openDomain(domain, 'roadmap', 'plan'); }
 
-  document.getElementById('rm-detail-title').textContent = `Action Plan: ${domain}`;
-  const body = document.getElementById('rm-detail-body');
+// Build the action-plan HTML for the domain view from /api/roadmap/domain.
+function _dvPlanHtml(res, a) {
+  if (a && a.level === 'na')
+    return '<div style="color:var(--muted);font-size:.82rem">No action plan — no reachable TLS service was found for this domain.</div>';
+  if (!res || !res.ok || (res.body && res.body.error)) {
+    const msg = res && res.status === 404 ? 'No assessment available to build an action plan from.'
+              : res && res.status === 403 ? 'You do not have access to this domain’s action plan.'
+              : 'Action plan unavailable.';
+    return `<div style="color:var(--muted);font-size:.82rem">${msg}</div>`;
+  }
+  const d = res.body || {};
+  const items = tryJSON(d.items_json) || d.items || [];
+  if (!items.length)
+    return '<div style="color:var(--ready);font-size:.85rem">✓ No migration actions required.</div>';
 
-  const items = d.items_json || d.items || [];
   const phases = ['phase1_immediate','phase2_classical_hardening','phase3_pqc_transition'];
   const phaseLabels = {
     'phase1_immediate':           '🔴 Phase 1 — Immediate Remediation',
@@ -2397,14 +2628,13 @@ async function showRoadmapDetail(domain) {
   };
   const effortColor = {low:'var(--ready)', medium:'var(--moderate)', high:'var(--weak)'};
 
-  let html = `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:1.5rem">`;
+  let html = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin-bottom:1.5rem">`;
   for (const ph of phases) {
     const phItems = items.filter(i=>(i.phase||'')==ph);
-    const label = phaseLabels[ph]||ph;
     const emin = phItems.reduce((s,i)=>s+(i.effort_days_min||0),0);
     const emax = phItems.reduce((s,i)=>s+(i.effort_days_max||0),0);
     html += `<div style="background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;padding:1rem">
-      <div style="font-size:.78rem;color:var(--muted);margin-bottom:.5rem">${label}</div>
+      <div style="font-size:.78rem;color:var(--muted);margin-bottom:.5rem">${phaseLabels[ph]||esc(ph)}</div>
       <div style="font-family:var(--font-mono);font-size:1.5rem;color:var(--text)">${phItems.length}</div>
       <div style="font-size:.72rem;color:var(--muted);margin-top:.25rem">${emin}–${emax} person-days</div>
     </div>`;
@@ -2412,7 +2642,7 @@ async function showRoadmapDetail(domain) {
   html += `</div>`;
 
   if (d.cdn_note) {
-    html += `<div style="background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.3);border-radius:8px;padding:.75rem;margin-bottom:1rem;font-size:.82rem;color:var(--moderate)">${d.cdn_note}</div>`;
+    html += `<div style="background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.3);border-radius:8px;padding:.75rem;margin-bottom:1rem;font-size:.82rem;color:var(--moderate)">${esc(d.cdn_note)}</div>`;
   }
 
   let currentPhase = null;
@@ -2420,29 +2650,28 @@ async function showRoadmapDetail(domain) {
     const ph = item.phase || '';
     if (ph !== currentPhase) {
       currentPhase = ph;
-      html += `<div style="margin:1.5rem 0 .5rem;font-size:.78rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)">${phaseLabels[ph]||ph}</div>`;
+      html += `<div style="margin:1.5rem 0 .5rem;font-size:.78rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)">${phaseLabels[ph]||esc(ph)}</div>`;
     }
     const ec = effortColor[item.effort] || 'var(--text)';
     const refs = (item.guideline_refs||[]).join(', ');
     html += `<div style="background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-bottom:.75rem">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:.5rem">
-        <div style="font-weight:600;font-size:.85rem">${item.action||''}</div>
-        <span style="background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:4px;padding:.1rem .5rem;font-size:.7rem;color:${ec};font-family:var(--font-mono);white-space:nowrap">${(item.effort||'').toUpperCase()} ${item.effort_days_min||0}–${item.effort_days_max||0}d</span>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.75rem;margin-bottom:.5rem">
+        <div style="font-weight:600;font-size:.85rem">${esc(item.action)}</div>
+        <span style="background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:4px;padding:.1rem .5rem;font-size:.7rem;color:${ec};font-family:var(--font-mono);white-space:nowrap">${esc((item.effort||'').toUpperCase())} ${item.effort_days_min||0}–${item.effort_days_max||0}d</span>
       </div>
-      <div style="font-size:.78rem;color:var(--muted);margin-bottom:.5rem">Target: <span style="color:var(--text)">${item.target_date||'—'}</span>${refs?` &nbsp;·&nbsp; ${refs}`:''}</div>
+      <div style="font-size:.78rem;color:var(--muted);margin-bottom:.5rem">Target: <span style="color:var(--text)">${esc(item.target_date)||'—'}</span>${refs?` &nbsp;·&nbsp; ${esc(refs)}`:''}</div>
       <div style="font-size:.78rem;margin-bottom:.35rem">
-        <span style="color:var(--muted)">Now: </span>${item.current_state||'—'}
+        <span style="color:var(--muted)">Now: </span>${esc(item.current_state)||'—'}
       </div>
       <div style="font-size:.78rem;margin-bottom:.5rem">
-        <span style="color:var(--ready)">→ </span>${item.target_state||'—'}
+        <span style="color:var(--ready)">→ </span>${esc(item.target_state)||'—'}
       </div>
-      <div style="font-size:.76rem;color:var(--muted);line-height:1.5">${item.detail||''}</div>
+      <div style="font-size:.76rem;color:var(--muted);line-height:1.5">${esc(item.detail)}</div>
     </div>`;
   }
-
-  body.innerHTML = html;
-  document.getElementById('rm-domain-detail').style.display = 'block';
-  document.getElementById('rm-domain-detail').scrollIntoView({behavior:'smooth'});
+  const gen = (d.generated_at || d.created_at || '').slice(0,19).replace('T',' ');
+  if (gen) html += `<div style="color:var(--muted);font-size:.7rem;margin-top:.5rem">Plan generated ${esc(gen)} UTC</div>`;
+  return html;
 }
 
 async function generateRoadmap() {
@@ -2567,6 +2796,7 @@ function renderSettingsVersion() {
 loadSummary();
 loadAssessments();
 loadRoadmapStats();
+if (_dvParseHash()) { _dvReturnView = 'dashboard'; _dvPushedEntry = false; _dvRoute(); }
 
 
 // ── Group Report ──────────────────────────────────────────────────────────────

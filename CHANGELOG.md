@@ -8,6 +8,21 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Domain detail is now its own screen.** Clicking a domain on the Dashboard
+  or Roadmap tab opens one page with the summary, all findings and their
+  recommendations, the full TLS details and the migration action plan. It
+  replaces the panel that opened at the bottom of the dashboard, the separate
+  "Full TLS Details" view and the Roadmap drawer.
+- The domain screen has its own URL (`#domain/<name>`). Browser Back/Forward
+  work, and returning keeps the dashboard's filters, sort order and scroll
+  position.
+- A searchable box on the domain screen switches to any other monitored domain.
+
+### Fixed
+- A bookmarked `#…` deep link now survives the login redirect.
+- Findings and action-plan text in the domain view are HTML-escaped.
+
 ---
 
 ## [1.11.0] — 2026-07-31

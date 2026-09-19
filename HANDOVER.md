@@ -529,6 +529,37 @@ split was not used).
 > Phase 2 (2FA) is planned for **v19**; the next schema feature after that is
 > v20+.
 
+### 2.12a — Unreleased: domain detail screen (2026-09-19)
+
+Frontend-only change (`dashboard/app.py`) plus a small login-page script
+(`auth/auth_routes.py`). No schema change and no new API routes.
+
+- **New `view-domain`** replaces three older pieces: the inline `#domain-detail`
+  panel under the dashboard table, the `view-domain-full` drill-down ("Full TLS
+  Details →") and the Roadmap tab's `#rm-domain-detail` drawer. One screen per
+  domain with four sections: Summary, Findings & Recommendations (sorted by
+  severity, with a count per severity), TLS Details (`renderDomainFull()`, now
+  rendered inline) and Migration Action Plan (`/api/roadmap/domain/<d>`).
+- **Routing:** the view is driven by `location.hash` = `#domain/<name>[/<section>]`,
+  where section is one of `summary|findings|tls|plan`. Opening a domain pushes a
+  history entry. Choosing another domain inside the view uses replaceState, so
+  browser Back always returns to the tab it came from (Dashboard or Roadmap).
+  That tab is restored without reloading, so filters, sort and scroll position
+  are kept. Clicking a nav tab while in the view clears the hash (`_dvLeave()`
+  in `showView`).
+- **Domain switcher:** an `<input list>` backed by a `<datalist>` built from
+  `/api/assessments` (already scoped to the user, cached for 60 s). The user can
+  enter an exact name or any unique substring.
+- **Deep links:** `/app/#domain/example.com` can be bookmarked. The login page
+  copies `location.hash` onto the form action so the fragment survives the
+  post-login 302. The server never sees the fragment.
+- Stale async renders are dropped through `_dvRenderToken`. The SSL Labs poll
+  timer is cleared on every domain change or exit. Content from the findings
+  and the action plan now goes through `esc()`, and table links pass the
+  domain through `data-domain` instead of string-building it into `onclick`.
+- Known, not caused by this change: the header nav bar overflows horizontally
+  below ~600 px width.
+
 ### 2.13 — Production actions taken on the live DB (v1.10.0 session)
 
 1. Ran `fix_mx_entries.py` — repaired malformed `domain` keys

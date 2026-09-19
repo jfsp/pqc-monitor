@@ -342,6 +342,15 @@ footer { text-align:center; color:var(--muted); font-size:.7rem;
   </div>
   <footer>PQC-Monitor v{{ version }} &nbsp;·&nbsp; GPL-3.0 &nbsp;·&nbsp; AI-assisted</footer>
 </div>
+<script>
+// Preserve a client-side deep link (e.g. #domain/example.com) across login.
+// The fragment is never sent to the server; putting it on the form action
+// makes the browser carry it through the post-login 302 (RFC 9110 §10.2.2).
+if (location.hash) {
+  var f = document.querySelector('form[method=post]');
+  if (f) f.action = location.pathname + location.search + location.hash;
+}
+</script>
 </body>
 </html>"""
 

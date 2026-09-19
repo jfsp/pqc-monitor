@@ -14,7 +14,7 @@ takes the database write lock for its duration (seconds to a minute on
 ~200k rows), so stop the services first:
 
     sudo systemctl stop pqc-monitor.target
-    sudo -u pqc-monitor /opt/pqc-monitor/.venv/bin/python \\
+    sudo -u pqcmonitor /opt/pqc-monitor/.venv/bin/python \\
         /opt/pqc-monitor/scripts/add_trend_index.py --db /var/lib/pqc-monitor/pqc_monitor.db
     sudo systemctl start pqc-monitor.target
 

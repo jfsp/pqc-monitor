@@ -8,6 +8,10 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+---
+
+## [1.12.0] — 2026-09-19
+
 ### Changed
 - **Trends tab plots time, not scan runs.** The x axis is now proportional to
   time and data is grouped into day / week / month / quarter periods

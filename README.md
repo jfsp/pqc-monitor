@@ -1,4 +1,4 @@
-# PQC-Monitor v1.11.0
+# PQC-Monitor v1.12.0
 
 **Post-Quantum Cryptography Readiness Monitor**
 
@@ -151,11 +151,11 @@ The version is stored in the `VERSION` file at the project root. It is the
 single source of truth — all other components read from it:
 
 ```
-cat VERSION         # 1.11.0
+cat VERSION         # 1.12.0
 ```
 
 ```python
-from version import VERSION   # "1.11.0"
+from version import VERSION   # "1.12.0"
 ```
 
 The version appears in:
@@ -380,7 +380,7 @@ depending on role:
 | Group Report | By Community / Region / Country aggregates, charts, CSV+PDF export (admin + community manager) |
 | Domain Discovery | Natural-language domain list generation |
 | Scan | Manual scan, re-assessment, scan history |
-| Trends | Score over time, level changes, PQC adoption, per-domain history |
+| Trends | Time-based trends (day/week/month/quarter, auto from schedule cadence): average score + domains monitored, readiness level share, PQC adoption; snapshot or scan-activity view; scope by organisation/community; per-domain history |
 | CT Monitor | Certificate Transparency log monitoring |
 | Roadmap | PQC migration plan generator |
 | Settings | Guidelines, scoring guide, version information |

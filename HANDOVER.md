@@ -1,8 +1,8 @@
 # PQC-Monitor — Developer Handover Document
 
-**Version:** 1.11.0 (released, tag `v1.11.0`)
-**Date:** 2026-08-05
-**Status:** Active development — user management Phase 1 (self-service password reset, session invalidation, CSRF, auth hardening; schema v18); schedule coverage audit + monthly auto-schedule; dashboard TLS-serving ports. Previous release 1.10.0 rewrote PQC detection (offered-group enumeration) — the full network backfill of historical rows may still be in progress
+**Version:** 1.12.0 (released, tag `v1.12.0`)
+**Date:** 2026-09-19
+**Status:** Active development — v1.12.0: time-based Trends tab (snapshot/activity views, org/community scope, RBAC-scoped API, cached); DB-driven scheduler with no-TLS rescan and throttled SSL Labs sweep; domain detail screen. No schema change since v18. Production is a small VM (2 vCPU, ~1 GB RAM) behind a Cloudflare Tunnel — keep per-request work index-only and bounded (see §2.12c)
 **Purpose:** Context transfer for continuing development in a new session
 **Repository:** https://github.com/jfsp/pqc-monitor
 
@@ -95,6 +95,7 @@ sudo scripts/deploy.sh --from abc1234
 | 1.9.1 | Fix: MX priority/non-FQDN normalisation (+ DB repair script); SMTP/STARTTLS reported no-TLS on 465/587/2525 (protocol-based dispatch, added 2525) |
 | 1.11.0 | User management Phase 1 (mailer, `/forgot` + `/reset`, `session_epoch`, `must_change_password`, CSRF, auth hardening; **schema v18**); schedule coverage audit + monthly auto-schedule; dashboard shows TLS-serving ports |
 | 1.10.0 | **PQC detection was broken for every server ever scanned** — rewritten to enumerate the key-exchange groups the server *offers* (raw ClientHello + HelloRetryRequest). New `scanner/group_enum.py`, `scripts/pqc_selftest.py`, GREASE soundness control, `domain_extra` index fix (full table scan → indexed) |
+| 1.12.0 | Time-based **Trends** (`data/trends.py`: calendar buckets, auto granularity, snapshot/activity, org/community scope, RBAC fix, result cache, covering index `idx_assessments_trend`); DB-driven scheduler (`next_run` source of truth); no-TLS monthly rescan + `dns_status`; throttled SSL Labs sweep; domain detail screen (`#domain/<name>`) |
 
 ### 2.8 — v1.8.0 detail
 
@@ -529,7 +530,7 @@ split was not used).
 > Phase 2 (2FA) is planned for **v19**; the next schema feature after that is
 > v20+.
 
-### 2.12a — Unreleased: domain detail screen (2026-09-19)
+### 2.12a — v1.12.0: domain detail screen (2026-09-19)
 
 Frontend-only change (`dashboard/app.py`) plus a small login-page script
 (`auth/auth_routes.py`). No schema change and no new API routes.
@@ -560,7 +561,7 @@ Frontend-only change (`dashboard/app.py`) plus a small login-page script
 - Known, not caused by this change: the header nav bar overflows horizontally
   below ~600 px width.
 
-### 2.12b — Unreleased: scheduler, no-TLS rescan, SSL Labs sweep (2026-09-19)
+### 2.12b — v1.12.0: scheduler, no-TLS rescan, SSL Labs sweep (2026-09-19)
 
 **Diagnosis (from production data, 2026-09-19)**
 - Schedule #1 (created 07-29, `next_run` 08-28) fired on **09-04 06:38:17**,
@@ -637,6 +638,70 @@ Frontend-only change (`dashboard/app.py`) plus a small login-page script
 4. Confirm: `journalctl -u pqc-monitor-scheduler` lists 3 schedules with
    `next run`. The sweep starts about 10 min later; watch for
    `SSL Labs sweep progress` lines.
+
+### 2.12c — v1.12.0: time-based Trends (2026-09-19)
+
+**Problem.** The Trends tab plotted one point per `scan_run` on a category
+axis: runs minutes apart and months apart were spaced equally, and partial
+runs (one-domain rescans, ad-hoc batches) were averaged as if they were the
+whole portfolio (average swinging 0–78, PQC count dropping to 0 between
+monthly sweeps). `/app/api/trends` was also not RBAC-scoped.
+
+**Design** (`data/trends.py`, pure functions, unit-tested)
+- Calendar buckets in UTC: day / week (ISO, Monday) / month / quarter.
+- Auto granularity: start from the fastest enabled *scan* schedule (SSL Labs
+  sweeps excluded), then go finer/coarser to get 8–90 points over the range.
+  Manual override capped at 1000 points. Range presets 30d…730d / all.
+- **Snapshot** (default): each domain's latest assessment carried forward to
+  the end of the bucket; stale after 3 × the longest scan interval (clamped
+  7–400 d; 90 d for monthly). **Activity**: only assessments made in the
+  bucket (latest per domain).
+- Per bucket: monitored, scored, na, level counts, avg_score (na excluded),
+  pqc, pqc_pct (of TLS-serving domains), assessed, new_domains, stale.
+- Frontend: linear epoch-ms x axis with calendar ticks (no Chart.js date
+  adapter, no extra CDN); score + domains on a second axis; readiness levels
+  as % share (toggle counts) incl. No-TLS; PQC adoption % + count.
+- Scope selector: all visible / community / organisation, validated
+  server-side (`_trend_scope()`; 403 outside the user's assignments).
+
+**Endpoints:** `/api/trends`, `/api/trends/scopes`, `/api/trends/domains`
+(see §6).
+
+**Performance on the production VM — lessons**
+- A free worker answers a trends request in ~0.4 s; the 4–5 s first seen
+  were requests queued behind `/api/assessments` on the 2 sync workers. The
+  Trends tab no longer calls `/api/assessments`, and the domain picker
+  request is sent only after the trends response.
+- Result cache per worker (LRU 64, TTL 300 s) keyed on
+  `get_assessments_version()` = `COUNT(*), MAX(id)`. **Never** add an
+  unindexed aggregate there: `MAX(assessed_at)` full-scanned the table
+  (with `findings_json`) on every request and caused nginx 504s. A test
+  checks the query plan.
+- Covering index `idx_assessments_trend(domain, assessed_at, score, level,
+  has_pqc)` keeps trend reads off the table rows. Created once by
+  `scripts/add_trend_index.py`; not in `_init_schema()` on purpose (building
+  it takes the write lock, and 2 workers + scheduler starting together would
+  hit "database is locked").
+
+**Deploy steps**
+1. Deploy the code (web restarts).
+2. Once per database, with services stopped:
+   ```bash
+   sudo systemctl stop pqc-monitor.target
+   sudo -u pqcmonitor /opt/pqc-monitor/.venv/bin/python \
+        /opt/pqc-monitor/scripts/add_trend_index.py --db /var/lib/pqc-monitor/pqc_monitor.db
+   sudo systemctl start pqc-monitor.target
+   ```
+   Output must show `USING COVERING INDEX idx_assessments_trend`.
+3. Check nginx timings (`apm_cf` log format): trends requests well under 1 s,
+   repeats `cached=true` in the JSON `meta`.
+
+**Production front end (recorded 2026-09-19).** Published through a
+Cloudflare Tunnel (`cloudflared` → nginx on localhost, plain HTTP). nginx
+therefore sees `::1`; real client IP needs `set_real_ip_from 127.0.0.1;
+set_real_ip_from ::1; real_ip_header CF-Connecting-IP;` and `$ssl_*`
+variables are empty. Access log uses the `apm_cf` format (request_time,
+upstream timings, cf_ray, request id).
 
 ### 2.13 — Production actions taken on the live DB (v1.10.0 session)
 
@@ -779,6 +844,7 @@ pqc-monitor/
 ├── data/
 │   ├── database.py         # Database class: all SQLite queries
 │   ├── migrations.py       # Schema migration runner (current: v18)
+│   ├── trends.py           # Time-bucketed trend aggregation, pure functions (NEW v1.12.0)
 │   ├── geo_inference.py    # TLD-based country/region inference
 │   └── tld_geo.csv         # ccTLD → country_code/country/region mapping
 ├── domain_discovery/
@@ -800,17 +866,20 @@ pqc-monitor/
 │   │                       #   source for PQC grading (NEW v1.10.0)
 │   ├── chain_validator.py  # Certificate chain analyser
 │   ├── cdn_detector.py     # CDN fingerprinter
+│   ├── dns_status.py       # DNS resolvability status for no-TLS names (NEW v1.12.0)
 │   ├── dns_enumerator.py   # DNS deep-dive (CT SANs + wordlist + DNSDumpster + passive)
 │   ├── service_discovery.py# Port scanner
 │   ├── shodan_client.py    # Shodan integration
 │   ├── ssllabs_client.py   # Qualys SSL Labs API v4 client (display-only grade)
+│   ├── ssllabs_sweep.py    # Throttled SSL Labs collection job (NEW v1.12.0)
 │   └── starttls_probe.py   # STARTTLS prober (SMTP/IMAP/POP3; LDAP explicitly unsupported)
 ├── scheduler/
-│   ├── scan_scheduler.py   # APScheduler wrapper
+│   ├── scan_scheduler.py   # DB-driven scheduler: next_run is the source of truth, 60 s tick (rewritten v1.12.0)
 │   └── schedule_audit.py   # Schedule coverage audit + monthly auto-schedule (NEW v1.11.0)
 ├── scripts/                # See scripts/README.md for full usage
 │   ├── deploy.sh           # Incremental git→deployment sync
 │   ├── sync-tree.sh        # Full-tree repo→/opt audit/sync
+│   ├── add_trend_index.py  # One-time covering index for Trends; run with services stopped (NEW v1.12.0)
 │   ├── audit_db_consistency.py # Read-only DB consistency audit (sections A–J)
 │   ├── backfill_services_assessed.py # Backfill services_assessed / key_types
 │   ├── fix_mx_entries.py   # Repair malformed MX host keys + dns_enum blobs
@@ -837,7 +906,7 @@ pqc-monitor/
 ├── Dockerfile              # Container image (development convenience)
 ├── docker-compose.yml      # Compose stack for local runs
 ├── requirements.txt
-├── tests/                  # 523 tests (all passing on main)
+├── tests/                  # 597 tests (all passing on main; test_trends.py NEW v1.12.0)
 └── config/
     └── config.yaml.example
 ```

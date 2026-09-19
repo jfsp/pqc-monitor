@@ -192,6 +192,10 @@ class Database:
             -- column), causing a full table scan per domain.
             CREATE INDEX IF NOT EXISTS idx_domain_extra_domain
                 ON domain_extra(domain, data_type, recorded_at);
+            -- latest_extra_bulk() / domains_with_successful_extra() filter on
+            -- data_type alone (dns_status, ssllabs sweeps); lead with it.
+            CREATE INDEX IF NOT EXISTS idx_domain_extra_type
+                ON domain_extra(data_type, recorded_at);
             """)
 
     # ─── Scan Runs ───────────────────────────────────────────────
@@ -256,7 +260,9 @@ class Database:
                 1 if (result.get("has_pqc_kem") or result.get("has_pqc_sig")
                       or result.get("has_pqc")) else 0,
                 result.get("error", ""),
-                json.dumps(result)
+                # default=str: certificate SANs of type IPAddress (and any other
+                # non-JSON value) must never abort persisting a scan result.
+                json.dumps(result, default=str)
             ))
 
     def get_domain_scans(self, domain: str, run_id: str = None) -> list:
@@ -1025,20 +1031,64 @@ class Database:
 
     def latest_extra_bulk(self, data_type: str) -> dict:
         """Most recent blob of `data_type` for EVERY domain, in one query.
-        Bulk counterpart to get_latest_domain_extra() (which full-scans per call)."""
+        Bulk counterpart to get_latest_domain_extra() (which full-scans per call).
+        Each dict blob gains '_recorded_at' for freshness checks."""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT domain, json_data FROM domain_extra "
+                "SELECT domain, json_data, recorded_at FROM domain_extra "
                 "WHERE data_type=? ORDER BY recorded_at ASC",
                 (data_type,)
             ).fetchall()
         out: dict = {}
         for row in rows:            # ascending — later rows overwrite earlier
             try:
-                out[row["domain"]] = json.loads(row["json_data"])
+                blob = json.loads(row["json_data"])
             except Exception:
-                out[row["domain"]] = {}
+                blob = {}
+            if isinstance(blob, dict):
+                blob["_recorded_at"] = row["recorded_at"]
+            out[row["domain"]] = blob
         return out
+
+    def latest_run_ids_bulk(self) -> dict:
+        """{domain: run_id of its most recent assessment} for every domain."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT a.domain, a.run_id FROM assessments a "
+                "INNER JOIN (SELECT domain, MAX(assessed_at) AS m "
+                "            FROM assessments GROUP BY domain) l "
+                "ON a.domain = l.domain AND a.assessed_at = l.m"
+            ).fetchall()
+        return {r["domain"]: r["run_id"] for r in rows}
+
+    def domains_with_tls_on_port(self, port: int) -> set:
+        """
+        Domains whose LATEST assessed run recorded a successful TLS handshake
+        on `port`. Used to target SSL Labs (which only tests HTTPS/443).
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT r.domain FROM raw_scans r "
+                "INNER JOIN (SELECT a.domain, a.run_id FROM assessments a "
+                "            INNER JOIN (SELECT domain, MAX(assessed_at) AS m "
+                "                        FROM assessments GROUP BY domain) l "
+                "            ON a.domain = l.domain AND a.assessed_at = l.m) la "
+                "ON r.domain = la.domain AND r.run_id = la.run_id "
+                "WHERE r.port = ? AND r.success = 1",
+                (port,)
+            ).fetchall()
+        return {r["domain"] for r in rows}
+
+    def mark_interrupted_runs(self, notes_prefix: str) -> int:
+        """Mark still-'running' runs whose notes start with `notes_prefix`
+        as 'interrupted' (their process died). Returns rows changed."""
+        ts = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE scan_runs SET status='interrupted', finished_at=? "
+                "WHERE status='running' AND notes LIKE ?",
+                (ts, notes_prefix + "%"))
+        return cur.rowcount
 
     def get_latest_run_id_for_domain(self, domain: str) -> Optional[str]:
         """run_id of the most recent assessment of a domain, or None."""

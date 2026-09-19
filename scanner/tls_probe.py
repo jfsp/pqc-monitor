@@ -194,8 +194,10 @@ def _parse_certificate(cert_der: bytes) -> Optional[CertificateInfo]:
         # SANs
         try:
             san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+            # str(): an IPAddress SAN's value is an ipaddress.IPv4Address /
+            # IPv6Address object, which is not JSON-serialisable.
             info.san_domains = [
-                n.value for n in san_ext.value
+                str(n.value) for n in san_ext.value
                 if isinstance(n, (x509.DNSName, x509.IPAddress))
             ]
         except x509.ExtensionNotFound:

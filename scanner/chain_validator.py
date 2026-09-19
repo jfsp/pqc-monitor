@@ -211,7 +211,9 @@ def _parse_cert_node(cert_der: bytes, position: int) -> Optional[CertNode]:
         sans: list[str] = []
         try:
             san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-            sans = [n.value for n in san_ext.value
+            # str(): an IPAddress SAN's value is an ipaddress.IPv4Address /
+            # IPv6Address object, which is not JSON-serialisable.
+            sans = [str(n.value) for n in san_ext.value
                     if isinstance(n, (x509.DNSName, x509.IPAddress))]
         except x509.ExtensionNotFound:
             pass

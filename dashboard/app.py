@@ -70,8 +70,27 @@ def create_app(config: dict = None) -> Flask:
 
     @app.route("/api/trends")
     def api_trends():
-        trends = db.get_sector_trends()
-        return jsonify(trends)
+        # Unauthenticated standalone dashboard: global scope only.
+        from data.trends import compute_trends, GRANULARITIES
+        gran = request.args.get("granularity", "auto")
+        stale_raw = request.args.get("stale_days", "")
+        intervals = db.get_scan_schedule_intervals()
+        result = compute_trends(
+            db.get_trend_rows(),
+            granularity=gran if gran in GRANULARITIES else None,
+            mode=request.args.get("mode", "snapshot"),
+            range_key=request.args.get("range", "all"),
+            stale_days=int(stale_raw) if stale_raw.isdigit() and int(stale_raw) > 0 else None,
+            min_interval_days=min(intervals) if intervals else None,
+            max_interval_days=max(intervals) if intervals else None,
+        )
+        result["meta"].update(scope="all", scope_label="All domains",
+                              scope_domains=None)
+        return jsonify(result)
+
+    @app.route("/api/trends/scopes")
+    def api_trend_scopes():
+        return jsonify([{"value": "all", "label": "All domains", "group": ""}])
 
     @app.route("/api/runs")
     def api_runs():
@@ -456,6 +475,18 @@ body { background: var(--bg); color: var(--text); font-family: var(--font-sans);
 .dot-na       { background: var(--muted); box-shadow: none; }
 
 /* ─── Forms & Controls ─── */
+/* ─── Trends toolbar ─── */
+.trend-toolbar { display:flex; flex-wrap:wrap; gap:1rem 1.5rem; align-items:flex-end; }
+.trend-ctl { display:flex; flex-direction:column; gap:.35rem; font-size:.7rem; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-family:var(--font-mono); }
+.trend-ctl select { min-width:180px; text-transform:none; letter-spacing:0; }
+.seg { display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+.seg button { background:transparent; color:var(--muted); border:0; border-right:1px solid var(--border); padding:.4rem .75rem; font-size:.78rem; cursor:pointer; font-family:var(--font-sans); }
+.seg button:last-child { border-right:0; }
+.seg button:hover { color:var(--text); }
+.seg button.on { background:rgba(0,212,255,.12); color:var(--accent); }
+.seg-sm button { padding:.2rem .55rem; font-size:.72rem; }
+.trend-meta { padding:0 1.25rem 1rem; font-size:.78rem; color:var(--muted); line-height:1.5; }
+.trend-meta b { color:var(--text); font-weight:500; }
 .form-row { display: flex; gap: 0.75rem; margin-bottom: 1rem; align-items: flex-start; flex-wrap: wrap; }
 input[type=text], textarea, select {
   background: rgba(255,255,255,0.05); border: 1px solid var(--border);
@@ -835,23 +866,59 @@ footer {
   <!-- ═══ TRENDS VIEW ═══ -->
   <div id="view-trends" class="view">
     <div class="panel" style="margin-bottom:1.5rem">
-      <div class="panel-header"><div class="panel-title">Score Trend Over Time</div></div>
+      <div class="panel-body trend-toolbar">
+        <label class="trend-ctl">Scope
+          <select id="trend-scope" onchange="setTrend('scope', this.value)">
+            <option value="all">All visible domains</option>
+          </select>
+        </label>
+        <div class="trend-ctl">Range
+          <div class="seg" id="trend-range">
+            <button data-v="90d">3M</button><button data-v="180d">6M</button>
+            <button data-v="365d">1Y</button><button data-v="730d">2Y</button>
+            <button data-v="all" class="on">All</button>
+          </div>
+        </div>
+        <label class="trend-ctl">Granularity
+          <select id="trend-gran" onchange="setTrend('gran', this.value)">
+            <option value="auto">Auto</option><option value="day">Day</option>
+            <option value="week">Week</option><option value="month">Month</option>
+            <option value="quarter">Quarter</option>
+          </select>
+        </label>
+        <div class="trend-ctl">View
+          <div class="seg" id="trend-mode">
+            <button data-v="snapshot" class="on" title="Portfolio state at the end of each period: every domain's latest assessment up to that moment">Snapshot</button>
+            <button data-v="activity" title="Only assessments made during each period">Scan activity</button>
+          </div>
+        </div>
+      </div>
+      <div id="trend-meta" class="trend-meta"></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:1.5rem">
+      <div class="panel-header"><div class="panel-title" id="trend-score-title">Average PQC Score &amp; Domains Monitored</div></div>
       <div class="panel-body">
-        <div class="chart-wrap" style="height:280px"><canvas id="chartTrend"></canvas></div>
+        <div class="chart-wrap" style="height:300px"><canvas id="chartTrend"></canvas></div>
         <p id="trend-empty" style="color:var(--muted);text-align:center;font-size:0.85rem;margin-top:1rem;display:none">
-          Run at least 2 scans to see trends. Schedule periodic scans every 90 days.
+          No assessments in this scope and range yet.
         </p>
       </div>
     </div>
     <div class="panels">
       <div class="panel">
-        <div class="panel-header"><div class="panel-title">Readiness Level Changes</div></div>
+        <div class="panel-header">
+          <div class="panel-title">Readiness Levels</div>
+          <div class="seg seg-sm" id="trend-levels-unit">
+            <button data-v="pct" class="on">%</button><button data-v="count">Count</button>
+          </div>
+        </div>
         <div class="panel-body">
           <div class="chart-wrap"><canvas id="chartLevels"></canvas></div>
         </div>
       </div>
       <div class="panel">
-        <div class="panel-header"><div class="panel-title">PQC Adoption Rate</div></div>
+        <div class="panel-header"><div class="panel-title">PQC Adoption</div></div>
         <div class="panel-body">
           <div class="chart-wrap"><canvas id="chartPQC"></canvas></div>
         </div>
@@ -2252,84 +2319,287 @@ async function startReassess() {
 }
 
 // ─── Trends ──────────────────────────────────────────────────────────────────
+// Time-bucketed trends (/api/trends, data/trends.py). The x axis is linear
+// epoch-ms, so spacing is proportional to time; ticks are placed on calendar
+// boundaries by trendTimeAxis() (no Chart.js date adapter needed).
+const trendState = { scope: 'all', range: 'all', gran: 'auto', mode: 'snapshot', levels: 'pct' };
+let trendScopesLoaded = false;
+let trendData = null;
+let trendSeq = 0;
+const TREND_GRID = 'rgba(30,45,74,.5)', TREND_TICK = '#64748b', TREND_TEXT = '#e2e8f0';
+const DAY_MS = 86400000;
+
+function setTrend(key, value) {
+  trendState[key] = value;
+  if (key === 'levels') { renderTrends(); return; }
+  loadTrends();
+}
+
+function initTrendSegs() {
+  const bind = (id, key) => {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.bound) return;
+    el.dataset.bound = '1';
+    el.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+      el.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+      setTrend(key, b.dataset.v);
+    }));
+  };
+  bind('trend-range', 'range');
+  bind('trend-mode', 'mode');
+  bind('trend-levels-unit', 'levels');
+}
+
+async function loadTrendScopes() {
+  if (trendScopesLoaded) return;
+  try {
+    const r = await fetch('/api/trends/scopes');
+    if (!r.ok) return;
+    const scopes = await r.json();
+    const sel = document.getElementById('trend-scope');
+    sel.innerHTML = '';
+    const groups = {};
+    scopes.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s.value;
+      opt.textContent = s.label + (s.count != null ? ` (${s.count})` : '');
+      if (!s.group) { sel.appendChild(opt); return; }
+      if (!groups[s.group]) {
+        groups[s.group] = document.createElement('optgroup');
+        groups[s.group].label = s.group;
+        sel.appendChild(groups[s.group]);
+      }
+      groups[s.group].appendChild(opt);
+    });
+    sel.value = trendState.scope;
+    trendScopesLoaded = true;
+  } catch (e) { /* selector stays on "all" */ }
+}
+
 async function loadTrends() {
-  const r = await fetch('/api/trends');
-  const trends = await r.json();
-
-  if (trends.length < 2) {
-    document.getElementById('trend-empty').style.display = 'block';
+  initTrendSegs();
+  loadTrendScopes();
+  const q = new URLSearchParams({
+    scope: trendState.scope, range: trendState.range,
+    granularity: trendState.gran, mode: trendState.mode,
+  });
+  const seq = ++trendSeq;
+  const r = await fetch('/api/trends?' + q.toString());
+  if (seq !== trendSeq) return;          // a newer request superseded this one
+  if (!r.ok) {
+    document.getElementById('trend-meta').textContent = 'Could not load trends (' + r.status + ').';
+    return;
   }
+  trendData = await r.json();
+  renderTrends();
+}
 
-  const labels = trends.map(t => t.started_at?.slice(0,10) || '');
-  const avgScores = trends.map(t => Math.round(t.avg_score || 0));
+// ── Time axis helpers ───────────────────────────────────────────────────────
+function utcFloor(ms, unit) {
+  const d = new Date(ms);
+  let y = d.getUTCFullYear(), m = d.getUTCMonth(), day = d.getUTCDate();
+  if (unit === 'day') return Date.UTC(y, m, day);
+  if (unit === 'week') { const t = Date.UTC(y, m, day); return t - ((d.getUTCDay() + 6) % 7) * DAY_MS; }
+  if (unit === 'month') return Date.UTC(y, m, 1);
+  return Date.UTC(y, m - (m % 3), 1);   // quarter
+}
+function utcNext(ms, unit) {
+  const d = new Date(ms);
+  if (unit === 'day') return ms + DAY_MS;
+  if (unit === 'week') return ms + 7 * DAY_MS;
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + (unit === 'month' ? 1 : 3), 1);
+}
+function tickUnitFor(spanMs) {
+  const days = spanMs / DAY_MS;
+  if (days <= 16) return 'day';
+  if (days <= 120) return 'week';
+  if (days <= 3 * 366) return 'month';
+  return 'quarter';
+}
+function fmtDate(ms, unit) {
+  const d = new Date(ms);
+  const o = { timeZone: 'UTC' };
+  if (unit === 'day' || unit === 'week') return d.toLocaleDateString(undefined, { ...o, day: '2-digit', month: 'short' });
+  if (unit === 'month') return d.toLocaleDateString(undefined, { ...o, month: 'short', year: '2-digit' });
+  return 'Q' + (Math.floor(d.getUTCMonth() / 3) + 1) + ' ' + d.getUTCFullYear();
+}
+function fmtBucket(b, gran) {
+  const s = Date.parse(b.start);
+  const full = { timeZone: 'UTC', day: '2-digit', month: 'short', year: 'numeric' };
+  let label;
+  if (gran === 'day') label = new Date(s).toLocaleDateString(undefined, full);
+  else if (gran === 'week') label = 'Week of ' + new Date(s).toLocaleDateString(undefined, full);
+  else if (gran === 'month') label = new Date(s).toLocaleDateString(undefined, { timeZone: 'UTC', month: 'long', year: 'numeric' });
+  else label = fmtDate(s, 'quarter');
+  return label + (b.partial ? ' (in progress)' : '');
+}
+function trendTimeAxis(minMs, maxMs) {
+  if (maxMs <= minMs) { minMs -= DAY_MS; maxMs += DAY_MS; }
+  const unit = tickUnitFor(maxMs - minMs);
+  let ticks = [];
+  for (let t = utcFloor(minMs, unit); t <= maxMs; t = utcNext(t, unit)) {
+    if (t >= minMs) ticks.push(t);
+    if (ticks.length > 400) break;
+  }
+  const stride = Math.max(1, Math.ceil(ticks.length / 10));
+  ticks = ticks.filter((_, i) => i % stride === 0);
+  return {
+    type: 'linear', min: minMs, max: maxMs, offset: false,
+    afterBuildTicks: axis => { axis.ticks = ticks.map(v => ({ value: v })); },
+    ticks: { color: TREND_TICK, maxRotation: 0, autoSkip: false, callback: v => fmtDate(v, unit) },
+    grid: { color: TREND_GRID },
+  };
+}
 
-  // Score trend
-  const ctx1 = document.getElementById('chartTrend').getContext('2d');
-  if (charts.trend) charts.trend.destroy();
-  charts.trend = new Chart(ctx1, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        label: 'Avg PQC Score', data: avgScores,
-        borderColor: '#00d4ff', backgroundColor: 'rgba(0,212,255,0.1)',
-        tension: 0.3, fill: true, pointRadius: 5
-      }]
+// ── Rendering ───────────────────────────────────────────────────────────────
+function trendMeta(meta, buckets) {
+  const el = document.getElementById('trend-meta');
+  const last = [...buckets].reverse().find(b => b.monitored > 0) || buckets[buckets.length - 1];
+  const gname = { day: 'Daily', week: 'Weekly', month: 'Monthly', quarter: 'Quarterly' }[meta.granularity] || meta.granularity;
+  const parts = [`<b>${esc(meta.scope_label || 'All domains')}</b>`];
+  parts.push(`${gname} periods` + (meta.granularity_auto ? ` (auto: ${esc(meta.granularity_reason)})` : (meta.granularity_reason && meta.granularity_reason !== 'manual' ? ` (${esc(meta.granularity_reason)})` : '')));
+  if (meta.mode === 'snapshot') {
+    parts.push(`each point = latest assessment per domain up to that date; domains unscanned for more than <b>${meta.stale_days} d</b> drop out`);
+    if (last) parts.push(`now: <b>${last.monitored}</b> domains monitored` + (last.stale ? `, ${last.stale} stale` : ''));
+  } else {
+    parts.push('each point = assessments made during that period only');
+  }
+  el.innerHTML = parts.join(' · ');
+}
+
+function trendTooltip(buckets, gran, extra) {
+  return {
+    mode: 'index', intersect: false,
+    callbacks: {
+      title: items => items.length ? fmtBucket(buckets[items[0].dataIndex], gran) : '',
+      footer: items => {
+        if (!items.length) return '';
+        const b = buckets[items[0].dataIndex];
+        const lines = [`Assessed this period: ${b.assessed}`, `First-time domains: ${b.new_domains}`];
+        if (b.stale) lines.push(`Stale (excluded): ${b.stale}`);
+        return extra ? lines.concat(extra(b)) : lines;
+      },
     },
+  };
+}
+
+function renderTrends() {
+  if (!trendData) return;
+  const { meta, buckets } = trendData;
+  const empty = document.getElementById('trend-empty');
+  ['trend', 'levels', 'pqc'].forEach(k => { if (charts[k]) { charts[k].destroy(); charts[k] = null; } });
+  trendMeta(meta, buckets);
+  const gs = document.getElementById('trend-gran');
+  if (gs) gs.value = trendState.gran;
+  if (!buckets.length) { empty.style.display = 'block'; return; }
+  empty.style.display = 'none';
+
+  const snap = meta.mode === 'snapshot';
+  const gran = meta.granularity;
+  const minX = Date.parse(buckets[0].start);
+  const maxX = snap ? Date.parse(buckets[buckets.length - 1].t)
+                    : Math.min(Date.parse(buckets[buckets.length - 1].end), Date.parse(meta.end));
+  const xs = buckets.map(b => Date.parse(b.t));
+  const pts = f => buckets.map((b, i) => ({ x: xs[i], y: f(b) }));
+  const legend = { labels: { color: TREND_TEXT, font: { size: 11 }, boxWidth: 14 } };
+  const wrapW = document.getElementById('chartTrend').parentElement.clientWidth || 800;
+  const barPx = Math.max(2, Math.min(40, Math.floor(wrapW * 0.85 / buckets.length * 0.7)));
+  const pointR = buckets.length > 60 ? 0 : 3;
+
+  document.getElementById('trend-score-title').textContent =
+    snap ? 'Average PQC Score & Domains Monitored' : 'Average PQC Score & Domains Assessed';
+
+  // 1. Score + domains (secondary axis)
+  const countDs = snap
+    ? { type: 'line', label: 'Domains monitored', data: pts(b => b.monitored), yAxisID: 'y2',
+        borderColor: '#94a3b8', backgroundColor: 'rgba(148,163,184,.08)', borderDash: [5, 4],
+        borderWidth: 1.5, pointRadius: 0, stepped: 'after', fill: false, order: 2 }
+    : { type: 'bar', label: 'Domains assessed', data: pts(b => b.assessed || null), yAxisID: 'y2',
+        backgroundColor: 'rgba(148,163,184,.28)', borderColor: 'rgba(148,163,184,.5)', borderWidth: 1,
+        barThickness: barPx, order: 2 };
+  charts.trend = new Chart(document.getElementById('chartTrend').getContext('2d'), {
+    data: { datasets: [
+      { type: 'line', label: 'Avg PQC score', data: pts(b => b.avg_score), yAxisID: 'y',
+        borderColor: '#00d4ff', backgroundColor: 'rgba(0,212,255,0.08)', fill: true,
+        cubicInterpolationMode: 'monotone', pointRadius: snap ? pointR : 3, spanGaps: false, order: 1 },
+      countDs,
+    ]},
+    options: {
+      responsive: true, maintainAspectRatio: false, parsing: true,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: trendTimeAxis(minX, maxX),
+        y: { position: 'left', min: 0, max: 100, title: { display: true, text: 'Avg score', color: TREND_TICK },
+             ticks: { color: TREND_TICK }, grid: { color: TREND_GRID } },
+        y2: { position: 'right', beginAtZero: true, title: { display: true, text: snap ? 'Domains monitored' : 'Domains assessed', color: TREND_TICK },
+              ticks: { color: TREND_TICK, precision: 0 }, grid: { drawOnChartArea: false } },
+      },
+      plugins: { legend, tooltip: trendTooltip(buckets, gran) },
+    },
+  });
+
+  // 2. Readiness levels — stacked area, % share or counts
+  const pct = trendState.levels === 'pct';
+  const denom = b => (b.critical + b.weak + b.moderate + b.ready + b.na);
+  const lv = key => pts(b => {
+    const d = denom(b);
+    if (!d) return null;
+    return pct ? Math.round(1000 * b[key] / d) / 10 : b[key];
+  });
+  // Snapshot: stacked areas (continuous state). Activity: stacked bars
+  // (discrete batches of assessments, empty periods stay empty).
+  const levelsW = document.getElementById('chartLevels').parentElement.clientWidth || 500;
+  const levelsBar = Math.max(2, Math.min(28, Math.floor(levelsW * 0.85 / buckets.length * 0.7)));
+  const area = (label, key, color) => snap
+    ? { type: 'line', label, data: lv(key), borderColor: color, backgroundColor: color + 'b3',
+        fill: true, pointRadius: 0, borderWidth: 1, cubicInterpolationMode: 'monotone', spanGaps: false }
+    : { type: 'bar', label, data: lv(key), backgroundColor: color + 'cc', borderColor: color,
+        borderWidth: 0, barThickness: levelsBar };
+  charts.levels = new Chart(document.getElementById('chartLevels').getContext('2d'), {
+    data: { datasets: [
+      area('Critical', 'critical', '#ef4444'), area('Weak', 'weak', '#f97316'),
+      area('Moderate', 'moderate', '#eab308'), area('Ready', 'ready', '#22c55e'),
+      area('No TLS', 'na', '#475569'),
+    ]},
     options: {
       responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
       scales: {
-        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(30,45,74,0.5)' } },
-        y: { min: 0, max: 100, ticks: { color: '#64748b' }, grid: { color: 'rgba(30,45,74,0.5)' } }
+        x: { ...trendTimeAxis(minX, maxX), stacked: true },
+        y: { stacked: true, min: 0, max: pct ? 100 : undefined,
+             ticks: { color: TREND_TICK, callback: v => pct ? v + '%' : v }, grid: { color: TREND_GRID } },
       },
-      plugins: { legend: { labels: { color: '#e2e8f0' } } }
-    }
-  });
-
-  // Levels stacked
-  const ctx2 = document.getElementById('chartLevels').getContext('2d');
-  if (charts.levels) charts.levels.destroy();
-  charts.levels = new Chart(ctx2, {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [
-        { label:'Critical', data:trends.map(t=>t.critical_count||0), backgroundColor:'#ef4444' },
-        { label:'Weak',     data:trends.map(t=>t.weak_count||0),     backgroundColor:'#f97316' },
-        { label:'Moderate', data:trends.map(t=>t.moderate_count||0), backgroundColor:'#eab308' },
-        { label:'Ready',    data:trends.map(t=>t.ready_count||0),    backgroundColor:'#22c55e' },
-      ]
+      plugins: { legend, tooltip: trendTooltip(buckets, gran, b => [`Total: ${denom(b)}`]) },
     },
-    options: {
-      responsive: true, maintainAspectRatio: false, scales: {
-        x: { stacked: true, ticks:{color:'#64748b'}, grid:{color:'rgba(30,45,74,.5)'} },
-        y: { stacked: true, ticks:{color:'#64748b'}, grid:{color:'rgba(30,45,74,.5)'} }
-      },
-      plugins: { legend: { labels: { color: '#e2e8f0', font:{size:10} } } }
-    }
   });
+  if (pct) charts.levels.options.plugins.tooltip.callbacks.label =
+    c => `${c.dataset.label}: ${c.parsed.y}% (${buckets[c.dataIndex][['critical','weak','moderate','ready','na'][c.datasetIndex]]})`;
+  charts.levels.update();
 
-  // PQC adoption
-  const ctx3 = document.getElementById('chartPQC').getContext('2d');
-  if (charts.pqc) charts.pqc.destroy();
-  charts.pqc = new Chart(ctx3, {
+  // 3. PQC adoption — % of TLS-serving domains + absolute count
+  charts.pqc = new Chart(document.getElementById('chartPQC').getContext('2d'), {
     type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        label:'Domains with PQC', data:trends.map(t=>t.pqc_count||0),
-        borderColor:'#a78bfa', backgroundColor:'rgba(124,58,237,0.1)',
-        tension:0.3, fill:true, pointRadius:5
-      }]
-    },
+    data: { datasets: [
+      { label: '% of TLS domains with PQC', data: pts(b => b.pqc_pct), yAxisID: 'y',
+        borderColor: '#a78bfa', backgroundColor: 'rgba(124,58,237,0.12)', fill: snap,
+        cubicInterpolationMode: 'monotone', pointRadius: snap ? pointR : 3, spanGaps: false },
+      { label: 'Domains with PQC', data: pts(b => (snap || b.assessed) ? b.pqc : null), yAxisID: 'y2',
+        borderColor: '#94a3b8', borderDash: [5, 4], borderWidth: 1.5, pointRadius: snap ? 0 : 3,
+        stepped: snap ? 'after' : false, fill: false, spanGaps: false },
+    ]},
     options: {
-      responsive:true, maintainAspectRatio:false,
-      scales:{
-        x:{ticks:{color:'#64748b'},grid:{color:'rgba(30,45,74,.5)'}},
-        y:{ticks:{color:'#64748b'},grid:{color:'rgba(30,45,74,.5)'}}
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: trendTimeAxis(minX, maxX),
+        y: { position: 'left', beginAtZero: true, suggestedMax: 10,
+             afterDataLimits: a => { if (a.max > 100) a.max = 100; },
+             ticks: { color: TREND_TICK, callback: v => v + '%' }, grid: { color: TREND_GRID } },
+        y2: { position: 'right', beginAtZero: true, ticks: { color: TREND_TICK, precision: 0 },
+              grid: { drawOnChartArea: false } },
       },
-      plugins:{legend:{labels:{color:'#e2e8f0'}}}
-    }
+      plugins: { legend, tooltip: trendTooltip(buckets, gran) },
+    },
   });
 }
 
@@ -2779,29 +3049,34 @@ async function loadDomainHistory(domain) {
     return;
   }
   empty.style.display = 'none';
-  const labels = history.map(h => (h.assessed_at || '').slice(0, 10));
-  const scores = history.map(h => h.score || 0);
+  const pts = history.map(h => ({ x: Date.parse(h.assessed_at), y: h.score || 0, lvl: h.level }))
+                   .filter(p => !isNaN(p.x));
   const ctx = document.getElementById('chartDomainHistory').getContext('2d');
   if (charts.domainHistory) charts.domainHistory.destroy();
+  const minX = pts[0].x, maxX = pts[pts.length - 1].x;
+  const pad = Math.max(DAY_MS, (maxX - minX) * 0.03);
   charts.domainHistory = new Chart(ctx, {
     type: 'line',
     data: {
-      labels,
       datasets: [{
-        label: domain,
-        data: scores,
-        borderColor: '#00d4ff',
-        backgroundColor: 'rgba(0,212,255,0.1)',
-        tension: 0.3, fill: true, pointRadius: 5
+        label: domain, data: pts,
+        borderColor: '#00d4ff', backgroundColor: 'rgba(0,212,255,0.1)',
+        tension: 0.2, fill: true, pointRadius: 4,
       }]
     },
     options: {
       responsive: true, maintainAspectRatio: false,
       scales: {
-        x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(30,45,74,.5)' } },
+        x: trendTimeAxis(minX - pad, maxX + pad),
         y: { min: 0, max: 100, ticks: { color: '#64748b' }, grid: { color: 'rgba(30,45,74,.5)' } }
       },
-      plugins: { legend: { labels: { color: '#e2e8f0' } } }
+      plugins: {
+        legend: { labels: { color: '#e2e8f0' } },
+        tooltip: { callbacks: {
+          title: items => items.length ? new Date(items[0].parsed.x).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : '',
+          label: c => `Score ${c.parsed.y}` + (c.raw.lvl ? ` (${c.raw.lvl})` : ''),
+        } },
+      }
     }
   });
 }
@@ -2811,12 +3086,16 @@ async function populateDomainSelector() {
   const assessments = await r.json();
   const sel = document.getElementById('history-domain-sel');
   if (!sel) return;
-  assessments.forEach(a => {
+  // Rebuilt on every visit to the tab (previously appended duplicates).
+  const keep = sel.value;
+  sel.length = 1;
+  [...new Set(assessments.map(a => a.domain))].sort().forEach(d => {
     const opt = document.createElement('option');
-    opt.value = a.domain;
-    opt.textContent = a.domain;
+    opt.value = d;
+    opt.textContent = d;
     sel.appendChild(opt);
   });
+  if (keep) sel.value = keep;
 }
 
 // ─── Schedules ────────────────────────────────────────────────────────────────

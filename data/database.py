@@ -409,6 +409,64 @@ class Database:
             """).fetchall()
         return [dict(r) for r in rows]
 
+    def get_trend_rows(self, domains=None) -> list:
+        """
+        Minimal assessment rows for time-bucketed trends (data/trends.py),
+        oldest first. ``domains`` (iterable) restricts the result; None means
+        all domains. Filtering is done in Python so large analyst scopes do
+        not hit SQLite's bound-parameter limit.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT domain, assessed_at, score, level, has_pqc "
+                "FROM assessments ORDER BY assessed_at ASC"
+            ).fetchall()
+        if domains is None:
+            return [dict(r) for r in rows]
+        allowed = {d.lower().strip() for d in domains if d}
+        return [dict(r) for r in rows if (r["domain"] or "").lower() in allowed]
+
+    def get_scan_schedule_intervals(self, domains=None) -> list:
+        """
+        interval_days of enabled *scan* schedules (SSL Labs sweeps excluded,
+        they do not produce assessments). With ``domains``, only schedules
+        whose domain list overlaps that set are returned; auto-managed lists
+        and unreadable lists are kept, since their content changes per run.
+        """
+        from scheduler.schedule_audit import schedule_kind, auto_kind, KIND_SSLLABS
+        allowed = ({d.lower().strip() for d in domains if d}
+                   if domains is not None else None)
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT s.*, dl.domains_json
+                FROM scheduled_scans s
+                LEFT JOIN domain_lists dl ON dl.id = s.domain_list_id
+                WHERE s.enabled = 1
+            """).fetchall()
+        out = []
+        for r in rows:
+            row = dict(r)
+            try:
+                if schedule_kind(row) == KIND_SSLLABS:
+                    continue
+            except Exception:
+                pass
+            if allowed is not None:
+                try:
+                    is_auto = bool(auto_kind(row))
+                except Exception:
+                    is_auto = False
+                if not is_auto:
+                    try:
+                        listed = {d.lower().strip()
+                                  for d in json.loads(row.get("domains_json") or "[]")}
+                    except Exception:
+                        listed = None
+                    if listed is not None and not (listed & allowed):
+                        continue
+            out.append(int(row.get("interval_days") or 30))
+        return out
+
     def get_summary_stats(self) -> dict:
         """Summary statistics for the dashboard."""
         with self._connect() as conn:

@@ -9,6 +9,22 @@ This project uses [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- **Trends tab plots time, not scan runs.** The x axis is now proportional to
+  time and data is grouped into day / week / month / quarter periods
+  (`data/trends.py`). Granularity is picked automatically from the fastest
+  enabled scan schedule and the length of the range (8–90 points), and can be
+  set manually; range presets 3M / 6M / 1Y / 2Y / All.
+- Two views. **Snapshot** (default): each point is the portfolio at the end of
+  the period, using every domain's latest assessment up to then. Domains not
+  rescanned within 3× the longest schedule interval (90 d for monthly) drop
+  out. **Scan activity**: only assessments made in the period, shown as bars.
+- The score chart has a second y-axis: domains monitored (snapshot) or
+  assessed (activity). Readiness levels are a stacked area chart that shows
+  % share by default (toggle to counts) and include No-TLS. PQC adoption shows
+  % of TLS-serving domains plus the absolute count on a second axis.
+- Scope selector on the Trends tab: all visible domains, a community, or an
+  organisation (limited to what the user may see).
+- Per-domain score history uses the same time axis.
 - **Domain detail is now its own screen.** Clicking a domain on the Dashboard
   or Roadmap tab opens one page with the summary, all findings and their
   recommendations, the full TLS details and the migration action plan. It
@@ -47,6 +63,16 @@ This project uses [Semantic Versioning](https://semver.org/).
   so web restarts no longer restart it.
 
 ### Fixed
+- **Trend charts were averaging partial runs.** `get_sector_trends()` grouped
+  by scan run, so one-domain rescans and ad-hoc batches were plotted as
+  portfolio averages (swings between 0 and 78) and PQC adoption fell to 0
+  between monthly sweeps.
+- **`/app/api/trends` was not RBAC-scoped.** Analysts saw the global
+  aggregate. It is now limited to the user's visible domains; `org:` /
+  `community:` scopes are checked against the user's assignments (403
+  otherwise).
+- The per-domain history selector added duplicate entries every time the
+  Trends tab was opened.
 - **The monthly schedule depended on how long the scheduler had been up.**
   APScheduler's `IntervalTrigger` counted 30 days from process start and
   ignored `next_run`, and every web restart restarted the scheduler through

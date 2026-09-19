@@ -355,10 +355,111 @@ def api_ssllabs_refresh(domain):
     return jsonify({"status": status, "report": summary})
 
 
+def _trend_scope(user, db, scope: str):
+    """
+    Resolve a trends scope string to (domains | None, label).
+
+      all              admin: every domain (None); others: their visible domains
+      org:<id>         domains of one organisation the user may see
+      community:<id>   domains of every organisation in a community
+
+    Raises PermissionError / ValueError for forbidden or malformed scopes.
+    """
+    scope = (scope or "all").strip()
+    if scope == "all":
+        if user.is_admin:
+            return None, "All domains"
+        return (current_app.config["AUTH_STORE"].get_user_domains(user.id),
+                "My domains")
+    kind, _, raw = scope.partition(":")
+    if not raw.isdigit():
+        raise ValueError("bad scope")
+    sid = int(raw)
+    if kind == "org":
+        allowed = _allowed_org_ids(user, db)
+        if allowed is not None and sid not in allowed:
+            raise PermissionError
+        org = db.get_organisation(sid)
+        if not org:
+            raise ValueError("unknown organisation")
+        return db.get_org_domains(sid), f"Organisation: {org.get('name', sid)}"
+    if kind == "community":
+        if not user.is_admin and sid not in set(user.community_ids or []):
+            raise PermissionError
+        comm = next((c for c in db.get_communities() if c["id"] == sid), None)
+        if not comm:
+            raise ValueError("unknown community")
+        domains: set[str] = set()
+        for o in db.get_community_orgs(sid):
+            domains.update(db.get_org_domains(o["id"]))
+        return sorted(domains), f"Community: {comm.get('name', sid)}"
+    raise ValueError("bad scope")
+
+
 @app_bp.route("/api/trends")
 @require_auth
 def api_trends():
-    return jsonify(_db().get_sector_trends())
+    """
+    Time-bucketed trends (data/trends.py), scoped to what the user may see.
+
+    Query: scope=all|org:<id>|community:<id>  range=30d|90d|180d|365d|730d|all
+           granularity=auto|day|week|month|quarter  mode=snapshot|activity
+           stale_days=<int> (optional override)
+    """
+    from data.trends import compute_trends, GRANULARITIES
+    db   = _db()
+    user = current_user()
+    try:
+        domains, label = _trend_scope(user, db, request.args.get("scope", "all"))
+    except PermissionError:
+        return jsonify({"error": "forbidden"}), 403
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    gran = request.args.get("granularity", "auto")
+    gran = gran if gran in GRANULARITIES else None
+    stale_raw = request.args.get("stale_days", "")
+    stale = int(stale_raw) if stale_raw.isdigit() and int(stale_raw) > 0 else None
+
+    intervals = db.get_scan_schedule_intervals(domains)
+    result = compute_trends(
+        db.get_trend_rows(domains),
+        granularity=gran,
+        mode=request.args.get("mode", "snapshot"),
+        range_key=request.args.get("range", "all"),
+        stale_days=stale,
+        min_interval_days=min(intervals) if intervals else None,
+        max_interval_days=max(intervals) if intervals else None,
+    )
+    result["meta"]["scope"] = request.args.get("scope", "all")
+    result["meta"]["scope_label"] = label
+    result["meta"]["scope_domains"] = None if domains is None else len(set(domains))
+    return jsonify(result)
+
+
+@app_bp.route("/api/trends/scopes")
+@require_auth
+def api_trend_scopes():
+    """Scopes selectable on the Trends tab for the current user."""
+    db   = _db()
+    user = current_user()
+    out = [{"value": "all",
+            "label": "All domains" if user.is_admin else "My domains",
+            "group": ""}]
+    if user.is_admin:
+        comms = db.get_communities()
+    else:
+        comms = db.get_user_communities(user.id)
+    for c in comms:
+        out.append({"value": f"community:{c['id']}", "label": c["name"],
+                    "group": "Communities"})
+    allowed = _allowed_org_ids(user, db)
+    for o in db.get_organisations():
+        if allowed is None or o["id"] in allowed:
+            out.append({"value": f"org:{o['id']}", "label": o["name"],
+                        "count": o.get("domain_count"),
+                        "group": "Organisations"})
+    return jsonify(out)
 
 
 @app_bp.route("/api/runs")

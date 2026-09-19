@@ -1008,6 +1008,8 @@ additionally check `require_admin` or `user.can("permission")`.
 | GET | `/api/assessments?region=X` | user | Filter by region |
 | GET | `/api/assessments?country_code=X` | user | Filter by country |
 | GET | `/api/domain/<domain>` | user | Domain detail + history |
+| GET | `/api/trends` | user | Time-bucketed trends. `scope=all\|org:<id>\|community:<id>`, `range=30d\|90d\|180d\|365d\|730d\|all`, `granularity=auto\|day\|week\|month\|quarter`, `mode=snapshot\|activity`, `stale_days=N`. Returns `{meta, buckets[]}` |
+| GET | `/api/trends/scopes` | user | Scopes selectable on the Trends tab for the current user |
 
 ### Group Report (community_manager or admin)
 
@@ -1291,6 +1293,23 @@ distribution charts. Present in the "No TLS" stat card on the dashboard.
 synced. New Python modules must be added to `WEB_TRIGGERS` or `SCHEDULER_TRIGGERS`.
 
 ---
+
+### Trends model (`data/trends.py`)
+
+- `compute_trends()` is pure (no DB, no Flask); the routes pass rows from
+  `Database.get_trend_rows(domains)` and schedule intervals from
+  `Database.get_scan_schedule_intervals(domains)` (SSL Labs sweeps excluded;
+  non-auto schedules only count if their list overlaps the scope).
+- Snapshot = carry-forward of each domain's latest assessment to the end of
+  each period; stale cut-off = 3 × longest scan interval, clamped 7–400 d.
+  The last period is partial and plotted at "now".
+- Buckets are UTC calendar periods (ISO weeks start Monday). The frontend x
+  axis is linear epoch-ms with ticks placed by `trendTimeAxis()`, so no
+  Chart.js date adapter or extra CDN is needed.
+- `get_sector_trends()` (per-run aggregation) is kept only for the text
+  report in `reports/report_generator.py`.
+- Cost is O(rows + buckets × domains); ~36k rows × 53 weekly buckets × 3k
+  domains takes ~0.1 s (daily over a year: ~0.3 s).
 
 ## 10. Planned Features — Prioritised Backlog
 

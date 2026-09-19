@@ -332,7 +332,7 @@ restart_service() {
     fi
 }
 
-# Web must restart before scheduler (scheduler Requires= web)
+# Web restarts before scheduler (scheduler Wants=/After= web; independent since 2026-09)
 $needs_restart_web       && restart_service "pqc-monitor-web"       || warn "No restart needed: pqc-monitor-web"
 $needs_restart_scheduler && restart_service "pqc-monitor-scheduler" || warn "No restart needed: pqc-monitor-scheduler"
 

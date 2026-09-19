@@ -11,6 +11,7 @@ DISCLAIMER: Non-intrusive passive scanning only. Users must have proper
 authorisation before scanning any systems. For research purposes only.
 """
 
+import json
 import sys
 import os
 import logging
@@ -85,6 +86,10 @@ def load_config(config_path: str = None) -> dict:
             raw.get("ssllabs", {}).get("email", "")
         ),
         "ssllabs_enabled": raw.get("ssllabs", {}).get("enabled", True),
+        # Throttled weekly sweep (scanner/ssllabs_sweep.py). Concurrency is a
+        # ceiling — the sweep also honours the limit SSL Labs reports in /info.
+        "ssllabs_sweep_concurrency": raw.get("ssllabs", {}).get("sweep_concurrency", 6),
+        "ssllabs_sweep_max_age_days": raw.get("ssllabs", {}).get("sweep_max_age_days", 6),
         # Outbound mail (optional) — for password-reset links.
         # relay_password follows the same env-overrides-config pattern as the
         # other credentials: PQC_MAIL_PASSWORD wins; else mail.relay_password
@@ -668,15 +673,55 @@ def list_schedules(ctx):
         click.echo("No schedules configured.")
         click.echo("Add one with: pqc_monitor.py schedule --domains FILE --interval 90d")
         return
-    click.echo(f"\n{'#':<4} {'Name':<25} {'Interval':>10} {'Next run':<22} {'Last run':<22} En")
-    click.echo("-" * 90)
+    from scheduler.schedule_audit import schedule_kind
+    click.echo(f"\n{'#':<4} {'Name':<42} {'Kind':<14} {'Interval':>8} {'Next run':<20} {'Last run':<20} En")
+    click.echo("-" * 115)
     for r in rows:
         r = dict(r)
         enabled = "✓" if r.get("enabled") else "✗"
         click.echo(
-            f"{r['id']:<4} {r.get('name',''):<25} {r.get('interval_days',90):>8}d  "
-            f"{(r.get('next_run') or '')[:19]:<22} {(r.get('last_run') or 'never')[:19]:<22} {enabled}"
+            f"{r['id']:<4} {r.get('name','')[:42]:<42} {schedule_kind(r):<14} "
+            f"{r.get('interval_days',90):>6}d  "
+            f"{(r.get('next_run') or '')[:19]:<20} {(r.get('last_run') or 'never')[:19]:<20} {enabled}"
         )
+
+
+@cli.command("ssllabs-sweep")
+@click.option("--limit", type=int, default=None, help="Assess at most N domains")
+@click.option("--concurrency", type=int, default=None,
+              help="Max concurrent SSL Labs assessments (ceiling; /info limit also applies)")
+@click.option("--max-age-days", type=float, default=None,
+              help="Skip domains with an SSL Labs record newer than this")
+@click.option("--domain", "domains", multiple=True, help="Specific domain(s) only")
+@click.option("--dry-run", is_flag=True, help="Only report how many domains would be assessed")
+@click.pass_context
+def ssllabs_sweep(ctx, limit, concurrency, max_age_days, domains, dry_run):
+    """Run the throttled SSL Labs sweep now (normally scheduled weekly)."""
+    cfg = ctx.obj["config"]
+    db  = Database(cfg.get("db_path", "data/pqc_monitor.db"))
+    from scanner.ssllabs_client import SSLLabsClient
+    from scanner.ssllabs_sweep import (SSLLabsSweep, DEFAULT_CONCURRENCY,
+                                       DEFAULT_MAX_AGE_DAYS)
+    client = SSLLabsClient(cfg.get("ssllabs_email", ""))
+    if not client.available:
+        click.echo("❌ ssllabs.email / PQC_SSLLABS_EMAIL is not configured", err=True)
+        sys.exit(1)
+    sweep = SSLLabsSweep(
+        db, client,
+        concurrency=concurrency or cfg.get("ssllabs_sweep_concurrency", DEFAULT_CONCURRENCY),
+        max_age_days=max_age_days if max_age_days is not None
+        else cfg.get("ssllabs_sweep_max_age_days", DEFAULT_MAX_AGE_DAYS))
+    if dry_run:
+        targets = list(domains) if domains else sweep.targets()
+        click.echo(f"{len(targets)} domain(s) would be assessed "
+                   f"({sweep.stats['skipped_fresh']} skipped as fresh)")
+        info = client.info() or {}
+        click.echo(f"SSL Labs /info: maxAssessments={info.get('maxAssessments')} "
+                   f"currentAssessments={info.get('currentAssessments')} "
+                   f"newAssessmentCoolOff={info.get('newAssessmentCoolOff')}ms")
+        return
+    result = sweep.run(domains=list(domains) or None, limit=limit)
+    click.echo(json.dumps(result, indent=2, default=str))
 
 
 @cli.command("scheduler-daemon")
@@ -691,49 +736,49 @@ def scheduler_daemon(ctx):
     To add schedules use:
       pqc_monitor.py schedule --domains FILE --interval 90d
     """
-    import time
     import signal
+    import threading
     cfg = ctx.obj["config"]
     db  = Database(cfg.get("db_path", "data/pqc_monitor.db"))
 
     from scanner.orchestrator import ScanOrchestrator
     from scheduler.scan_scheduler import ScanScheduler
+    from scheduler.schedule_audit import schedule_kind
 
     orch  = ScanOrchestrator(cfg)
-    sched = ScanScheduler(orch, db)
-
-    if not sched.scheduler:
-        click.echo("❌ APScheduler is not installed. Run: pip install apscheduler",
-                   err=True)
-        sys.exit(1)
+    sched = ScanScheduler(orch, db, cfg)
 
     from version import VERSION
     click.echo(f"PQC-Monitor v{VERSION} scheduler starting")
     click.echo(f"Database: {cfg.get('db_path', 'data/pqc_monitor.db')}")
 
+    sched.repair_stale_next_run()
     schedules = sched.list_schedules()
     if schedules:
         click.echo(f"Loaded {len(schedules)} schedule(s):")
         for s in schedules:
-            click.echo(f"  #{s['id']} {s['name']}: every {s['interval_days']}d")
+            state = "" if s.get("enabled", 1) else " [disabled]"
+            click.echo(f"  #{s['id']} {s['name']} ({schedule_kind(s)}): every "
+                       f"{s['interval_days']}d, next run {s.get('next_run') or '—'}"
+                       f"{state}")
     else:
-        click.echo("No schedules configured yet. Add with: pqc_monitor.py schedule …")
+        click.echo("No schedules configured yet. Add with: "
+                   "scripts/schedule_audit.py --create-monthly")
 
-    sched.start()
-    click.echo("Scheduler running. Press Ctrl+C or send SIGTERM to stop.")
-
-    # Block until signal
-    stop_event = {"flag": False}
+    stop_event = threading.Event()
     def _handle_signal(sig, frame):
         click.echo(f"Signal {sig} received, shutting down…")
-        stop_event["flag"] = True
+        stop_event.set()
 
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT,  _handle_signal)
 
+    sched.start()
+    click.echo("Scheduler running (schedules re-read every minute). "
+               "Send SIGTERM to stop.")
     try:
-        while not stop_event["flag"]:
-            time.sleep(5)
+        while not stop_event.wait(5):
+            pass
     finally:
         sched.stop()
         click.echo("Scheduler stopped.")

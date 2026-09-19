@@ -97,8 +97,10 @@ class ScanOrchestrator:
 
     def scan_domains(self, domains: list, sector: str = "", region: str = "",
                      country_code: str = "", country: str = "",
-                     use_shodan: bool = False, progress_callback=None) -> str:
-        """Scan a list of domains. Returns run_id."""
+                     use_shodan: bool = False, progress_callback=None,
+                     notes: str = "") -> str:
+        """Scan a list of domains. Returns run_id. `notes` is stored on the
+        scan run (e.g. "scheduled:#1 …" for scheduler-initiated runs)."""
         logger.info(
             f"Starting scan: {len(domains)} domains | "
             f"Shodan={'yes' if use_shodan and self.shodan.available else 'no'} | "
@@ -106,7 +108,8 @@ class ScanOrchestrator:
             f"cdn={self.do_cdn}"
         )
         run_id = self.db.create_run(domains, sector=sector, region=region,
-                                    country_code=country_code, country=country)
+                                    country_code=country_code, country=country,
+                                    notes=notes)
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as ex:
                 futures = {
@@ -286,22 +289,13 @@ class ScanOrchestrator:
             except Exception as e:
                 logger.debug(f"Group enumeration failed for {domain}: {e}")
 
-        # ── 4b. SSL Labs cached report (display only — no scoring) ─
-        # Cache-only lookup (fromCache=on): never triggers a new SSL Labs
-        # assessment during a scan run. Fresh assessments are on-demand
-        # from the domain detail view.
-        if self.ssllabs_enabled and self.ssllabs.available and results:
-            try:
-                ssllabs_summary = self.ssllabs.get_cached(domain)
-                if ssllabs_summary:
-                    self.db.save_domain_extra(run_id, domain, "ssllabs",
-                                               ssllabs_summary)
-                    logger.debug(
-                        f"{domain} ssllabs: grade={ssllabs_summary.get('grade')} "
-                        f"(cached {ssllabs_summary.get('test_time')})"
-                    )
-            except Exception as e:
-                logger.debug(f"SSL Labs lookup failed for {domain}: {e}")
+        # ── 4b. SSL Labs ─────────────────────────────────────────
+        # Deliberately NOT queried inline. Verified 2026-09-19: on a cache
+        # miss, analyze?fromCache=on STARTS a new assessment (IN_PROGRESS),
+        # so an inline lookup per domain floods Qualys and is rejected with
+        # HTTP 429 (2,915 of 3,168 domains on the 2026-09-04 monthly run).
+        # SSL Labs data is collected by the throttled, separately scheduled
+        # sweep in scanner/ssllabs_sweep.py.
 
         # ── 5. CDN detection ──────────────────────────────────────
         cdn_result = None

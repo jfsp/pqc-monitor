@@ -18,9 +18,12 @@ Description=PQC-Monitor Scheduler Service
 Documentation=https://github.com/your-org/pqc-monitor
 After=network-online.target pqc-monitor-web.service
 Wants=network-online.target
-# Hard dependency: scheduler is useless without the web service, which
-# owns DB initialisation. If the web service stops, stop the scheduler too.
-Requires=pqc-monitor-web.service
+# Soft dependency (changed 2026-09 from Requires=): start after the web
+# service, which owns DB initialisation, but do NOT stop/restart together
+# with it. With Requires=, every web restart (i.e. most deploys) restarted
+# the scheduler too, killing in-flight scheduled scans. The DB wait in
+# ExecStartPre covers the start-up ordering.
+Wants=pqc-monitor-web.service
 PartOf=pqc-monitor.target
 StartLimitIntervalSec=120
 StartLimitBurst=3

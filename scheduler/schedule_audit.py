@@ -27,11 +27,19 @@ schedule and from coverage-gap detection. Pass include_na=True to keep them.
 A domain that gains a service later is simply picked up again on the next
 reconcile, because selection is by CURRENT latest level, not a static list.
 
-IMPORTANT: PQC-Monitor's ScanScheduler loads schedules only once, at daemon
-start (_load_saved_schedules). There is no live reload. After a write here the
-caller must restart the scheduler service for the change to take effect:
+Auto-managed schedules (ensure_auto_schedules)
+──────────────────────────────────────────────
+  All Domains — monthly (auto)          scan of serviceable domains
+  No-TLS Domains — monthly rescan (auto) scan of na domains that still resolve
+                                          (A/AAAA); unresolvable names are
+                                          recorded, not scanned
+  SSL Labs sweep — weekly (auto)        throttled SSL Labs collection
 
-    sudo systemctl restart pqc-monitor-scheduler
+Both auto domain lists are reconciled again by the scheduler right before
+each run, so domains added since the last run are always included.
+
+The scheduler daemon re-reads scheduled_scans every minute (since 2026-09):
+changes made here take effect without restarting the service.
 
 SPDX-License-Identifier: GPL-3.0-or-later
 Copyright (C) 2024 PQC-Monitor Contributors
@@ -51,8 +59,26 @@ AUTO_SCHEDULE_NAME = "All Domains \u2014 monthly (auto)"
 # Latest-assessment level that means "no reachable TLS service".
 NA_LEVEL = "na"
 
-RESTART_HINT = ("scheduler must be restarted to pick this up: "
-                "sudo systemctl restart pqc-monitor-scheduler")
+AUTO_NA_LIST_NAME = "No-TLS Domains (auto)"
+AUTO_NA_SCHEDULE_NAME = "No-TLS Domains \u2014 monthly rescan (auto)"
+AUTO_SSLLABS_SCHEDULE_NAME = "SSL Labs sweep \u2014 weekly (auto)"
+DEFAULT_SWEEP_INTERVAL_DAYS = 7
+
+# scheduled_scans.config_json keys
+KIND_SCAN = "scan"
+KIND_SSLLABS = "ssllabs_sweep"
+AUTO_SERVICEABLE = "serviceable"
+AUTO_NA = "na_resolvable"
+
+# First run of a newly created auto schedule (the monthly scan keeps
+# now + interval, as before).
+NA_FIRST_RUN_DELAY = timedelta(days=1)
+SSLLABS_FIRST_RUN_DELAY = timedelta(minutes=10)
+
+# Kept for callers/tests that still reference it; the daemon now reloads
+# schedules every tick, so no restart is required.
+RESTART_HINT = ("picked up by the running scheduler within ~1 minute "
+                "(no restart needed)")
 
 # Default per-scan config, matching what ScanScheduler._run_scheduled_scan reads.
 _DEFAULT_CONFIG = {
@@ -171,7 +197,10 @@ def audit_schedules(db, include_na: bool = False) -> dict:
         domain_set = set(domains)
 
         problems = []
-        if list_id is None or (list_name is None and not domains):
+        is_sweep = schedule_kind(row) == KIND_SSLLABS
+        if is_sweep:
+            pass    # the sweep selects its own targets; no list needed
+        elif list_id is None or (list_name is None and not domains):
             problems.append("references a missing domain list")
         elif not domains:
             problems.append("domain list is empty")
@@ -183,8 +212,11 @@ def audit_schedules(db, include_na: bool = False) -> dict:
               and not row.get("last_run")):
             problems.append("next_run is in the past and has never run "
                             "(scheduler may not be running)")
+        elif enabled and next_dt and next_dt < now - timedelta(days=1):
+            problems.append("overdue by more than a day "
+                            "(scheduler may not be running)")
 
-        if enabled and domain_set:
+        if enabled and domain_set and not is_sweep:
             covered_union |= domain_set
             for d in domain_set:
                 domain_schedule_count[d] = domain_schedule_count.get(d, 0) + 1
@@ -192,6 +224,7 @@ def audit_schedules(db, include_na: bool = False) -> dict:
         schedules.append({
             "id":            row.get("id"),
             "name":          row.get("name"),
+            "kind":          schedule_kind(row),
             "enabled":       enabled,
             "interval_days": row.get("interval_days"),
             "list_id":       list_id,
@@ -203,6 +236,12 @@ def audit_schedules(db, include_na: bool = False) -> dict:
         })
 
     covered = target & covered_union
+    try:
+        from scanner.dns_status import unresolvable_domains
+        unresolvable = set(unresolvable_domains(db)) & na
+    except Exception:
+        unresolvable = set()
+    na_covered = (na - unresolvable) & covered_union
     uncovered = sorted(target - covered_union)
     # Duplicates limited to target domains so na noise doesn't inflate the count.
     duplicated = sorted(d for d, n in domain_schedule_count.items()
@@ -233,6 +272,8 @@ def audit_schedules(db, include_na: bool = False) -> dict:
         "known_domains":  len(target),          # domains in scope for coverage
         "known_total":    len(serviceable | na),
         "na_excluded":    0 if include_na else len(na),
+        "na_covered":     len(na_covered),
+        "na_unresolvable": len(unresolvable),
         "include_na":     include_na,
         "schedules":      schedules,
         "coverage":       coverage,
@@ -253,6 +294,33 @@ def _find_auto_list_id(db):
     return None
 
 
+def row_config(row) -> dict:
+    """Parsed config_json of a scheduled_scans row ({} on error)."""
+    try:
+        cfg = json.loads(row.get("config_json") or "{}")
+        return cfg if isinstance(cfg, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def schedule_kind(row) -> str:
+    return row_config(row).get("kind") or KIND_SCAN
+
+
+def auto_kind(row) -> str:
+    """'serviceable' | 'na_resolvable' | '' for a schedule row. Rows created
+    before the 'auto' key existed are recognised by name."""
+    auto = row_config(row).get("auto")
+    if auto:
+        return auto
+    name = row.get("name")
+    if name == AUTO_SCHEDULE_NAME:
+        return AUTO_SERVICEABLE
+    if name == AUTO_NA_SCHEDULE_NAME:
+        return AUTO_NA
+    return ""
+
+
 def _find_auto_schedule(db, auto_list_id):
     """
     Locate the auto schedule by name, or failing that by the list it drives.
@@ -263,7 +331,8 @@ def _find_auto_schedule(db, auto_list_id):
             return row
     if auto_list_id is not None:
         for row in _read_scheduled_scans(db):
-            if row.get("domain_list_id") == auto_list_id:
+            if (row.get("domain_list_id") == auto_list_id
+                    and schedule_kind(row) == KIND_SCAN):
                 return row
     return None
 
@@ -389,3 +458,194 @@ def create_monthly_all_domains(db, interval_days: int = DEFAULT_INTERVAL_DAYS,
         "removed":         removed,
         "notes":           notes,
     }
+
+
+# ─── Auto schedules: no-TLS rescan + SSL Labs sweep ───────────────────────────
+
+def _find_list_by_name(db, name):
+    for row in db.get_domain_lists():
+        if row.get("name") == name:
+            return row.get("id")
+    return None
+
+
+def _find_schedule_by_name(db, name):
+    for row in _read_scheduled_scans(db):
+        if row.get("name") == name:
+            return row
+    return None
+
+
+def na_rescan_targets(db, refresh_dns: bool = True, dns_fn=None) -> dict:
+    """
+    No-TLS domains worth rescanning: current level=na AND resolvable.
+    With refresh_dns=True every na domain is re-checked in DNS first (and the
+    result stored); otherwise the last stored dns_status is used and domains
+    never checked are included (bias toward scanning).
+    Returns {"targets": [...], "by_status": {...}, "na": n}.
+    """
+    from scanner import dns_status as ds
+    _, na = _known_by_service(db)
+    if refresh_dns:
+        res = (dns_fn or ds.refresh_dns_status)(db, na)
+        status = res.get("status", {})
+        targets = sorted(d for d in na if status.get(d) == ds.RESOLVABLE)
+        by_status = res.get("by_status", {})
+    else:
+        latest = db.latest_extra_bulk(ds.DATA_TYPE)
+        targets, by_status = [], {}
+        for d in sorted(na):
+            st = (latest.get(d) or {}).get("status") if isinstance(latest.get(d), dict) else None
+            by_status[st or "unchecked"] = by_status.get(st or "unchecked", 0) + 1
+            if st in (None, ds.RESOLVABLE):
+                targets.append(d)
+    return {"targets": targets, "by_status": by_status, "na": len(na)}
+
+
+def reconcile_auto_list(db, row, dns_fn=None) -> dict:
+    """
+    Bring the domain list of an auto-managed scan schedule up to date right
+    before it runs. Returns {"list_id", "domains", "added", "removed", ...};
+    {} for rows that are not auto-managed scans.
+    """
+    kind = auto_kind(row)
+    if kind == AUTO_SERVICEABLE:
+        target = sorted(_known_by_service(db)[0])
+        extra = {}
+    elif kind == AUTO_NA:
+        info = na_rescan_targets(db, refresh_dns=True, dns_fn=dns_fn)
+        target = info["targets"]
+        extra = {"dns": info["by_status"]}
+    else:
+        return {}
+    list_id = row.get("domain_list_id")
+    _, existing = _resolve_list(db, list_id)
+    if list_id is None or _resolve_list(db, list_id)[0] is None:
+        name = AUTO_LIST_NAME if kind == AUTO_SERVICEABLE else AUTO_NA_LIST_NAME
+        list_id = db.save_domain_list(name, target,
+                                      query=f"auto-managed: {kind}")
+        with db._connect() as conn:
+            conn.execute("UPDATE scheduled_scans SET domain_list_id=? WHERE id=?",
+                         (list_id, row["id"]))
+        existing = []
+    else:
+        db.update_domain_list(list_id, domains=target)
+    cur, new = set(existing), set(target)
+    return {"list_id": list_id, "domains": target,
+            "added": sorted(new - cur), "removed": sorted(cur - new), **extra}
+
+
+def _ensure_schedule(db, name, list_id, interval_days, config, first_run,
+                     dry_run):
+    row = _find_schedule_by_name(db, name)
+    if row is None:
+        if not dry_run:
+            with db._connect() as conn:
+                conn.execute(
+                    "INSERT INTO scheduled_scans "
+                    "(name, domain_list_id, interval_days, next_run, last_run, "
+                    " enabled, config_json, sector, region) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (name, list_id, interval_days, first_run.isoformat(), None,
+                     1, json.dumps(config), "", ""))
+        return "create"
+    cfg = row_config(row)
+    merged = {**cfg, **config}
+    needs = (not bool(row.get("enabled", 1))
+             or row.get("interval_days") != interval_days
+             or row.get("domain_list_id") != list_id
+             or merged != cfg)
+    if not needs:
+        return "unchanged"
+    if not dry_run:
+        next_run = row.get("next_run")
+        if row.get("interval_days") != interval_days or not next_run:
+            next_run = first_run.isoformat()
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE scheduled_scans SET domain_list_id=?, interval_days=?, "
+                "enabled=1, next_run=?, config_json=? WHERE id=?",
+                (list_id, interval_days, next_run, json.dumps(merged), row["id"]))
+    return "update"
+
+
+def repair_stale_next_run(db, dry_run: bool = False) -> list:
+    """
+    Rows written by the pre-2026-09 scheduler never had next_run advanced: a
+    job that ran after its next_run still shows the old value. Set
+    next_run = last_run + interval for those. Returns [(id, old, new)].
+    """
+    fixed = []
+    for row in _read_scheduled_scans(db):
+        last = _parse_iso(row.get("last_run"))
+        nxt = _parse_iso(row.get("next_run"))
+        if last and nxt and last >= nxt:
+            new = (last + timedelta(days=row.get("interval_days") or 30)).isoformat()
+            fixed.append((row["id"], row.get("next_run"), new))
+            if not dry_run:
+                with db._connect() as conn:
+                    conn.execute("UPDATE scheduled_scans SET next_run=? WHERE id=?",
+                                 (new, row["id"]))
+    return fixed
+
+
+def ensure_auto_schedules(db, interval_days: int = DEFAULT_INTERVAL_DAYS,
+                          sweep_interval_days: int = DEFAULT_SWEEP_INTERVAL_DAYS,
+                          dry_run: bool = False, include_na: bool = False,
+                          ssllabs: bool = True) -> dict:
+    """
+    Idempotently create/refresh all auto-managed schedules:
+    the monthly serviceable scan, the monthly no-TLS rescan and (optionally)
+    the weekly SSL Labs sweep. No DNS lookups happen here — the no-TLS list
+    is seeded from stored dns_status and reconciled with live DNS right
+    before each run.
+    """
+    repaired = repair_stale_next_run(db, dry_run=dry_run)
+    main = create_monthly_all_domains(db, interval_days, dry_run=dry_run,
+                                      include_na=include_na)
+    out = {"dry_run": dry_run, "main": main, "repaired_next_run": repaired}
+
+    # Tag the main schedule so the scheduler can reconcile it before runs.
+    if not dry_run:
+        row = _find_auto_schedule(db, _find_auto_list_id(db))
+        if row is not None:
+            cfg = row_config(row)
+            if cfg.get("auto") != AUTO_SERVICEABLE or cfg.get("kind") != KIND_SCAN:
+                cfg.update({"auto": AUTO_SERVICEABLE, "kind": KIND_SCAN})
+                with db._connect() as conn:
+                    conn.execute("UPDATE scheduled_scans SET config_json=? WHERE id=?",
+                                 (json.dumps(cfg), row["id"]))
+
+    if include_na:
+        out["na"] = {"list_action": "skipped",
+                     "schedule_action": "skipped (--include-na: main schedule covers na)"}
+    else:
+        info = na_rescan_targets(db, refresh_dns=False)
+        target = info["targets"]
+        list_id = _find_list_by_name(db, AUTO_NA_LIST_NAME)
+        if list_id is None:
+            list_action = "create"
+            if not dry_run:
+                list_id = db.save_domain_list(AUTO_NA_LIST_NAME, target,
+                                              query=f"auto-managed: {AUTO_NA}")
+        else:
+            _, existing = _resolve_list(db, list_id)
+            list_action = "update" if set(existing) != set(target) else "unchanged"
+            if list_action == "update" and not dry_run:
+                db.update_domain_list(list_id, domains=target)
+        cfg = {**_DEFAULT_CONFIG, "kind": KIND_SCAN, "auto": AUTO_NA}
+        sched_action = _ensure_schedule(
+            db, AUTO_NA_SCHEDULE_NAME, list_id, interval_days, cfg,
+            _now() + NA_FIRST_RUN_DELAY, dry_run)
+        out["na"] = {"list_action": list_action, "schedule_action": sched_action,
+                     "domains": len(target), "na_total": info["na"],
+                     "dns_status": info["by_status"]}
+
+    if ssllabs:
+        sched_action = _ensure_schedule(
+            db, AUTO_SSLLABS_SCHEDULE_NAME, None, sweep_interval_days,
+            {"kind": KIND_SSLLABS, "auto": "ssllabs"},
+            _now() + SSLLABS_FIRST_RUN_DELAY, dry_run)
+        out["ssllabs"] = {"schedule_action": sched_action,
+                          "interval_days": sweep_interval_days}
+    return out

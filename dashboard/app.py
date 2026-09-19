@@ -606,7 +606,7 @@ footer {
       <div class="stat-card stat-card-filter" id="filter-card-weak"     onclick="setFilter('weak')"     title="Click to filter by Weak"><div class="stat-val val-weak" id="stat-weak">—</div><div class="stat-label">Weak</div></div>
       <div class="stat-card stat-card-filter" id="filter-card-moderate" onclick="setFilter('moderate')" title="Click to filter by Moderate"><div class="stat-val val-moderate" id="stat-moderate">—</div><div class="stat-label">Moderate</div></div>
       <div class="stat-card stat-card-filter" id="filter-card-ready"    onclick="setFilter('ready')"    title="Click to filter by PQC-Ready"><div class="stat-val val-ready" id="stat-ready">—</div><div class="stat-label">PQC-Ready</div></div>
-      <div class="stat-card stat-card-filter" id="filter-card-na"       onclick="setFilter('na')"       title="Click to filter by N/A (no TLS)"><div class="stat-val val-na" id="stat-na">—</div><div class="stat-label">No TLS</div></div>
+      <div class="stat-card stat-card-filter" id="filter-card-na"       onclick="setFilter('na')"       title="Click to filter by N/A (no TLS)"><div class="stat-val val-na" id="stat-na">—</div><div class="stat-label">No TLS</div><div id="stat-na-sub" style="font-size:.65rem;color:var(--muted);margin-top:.15rem"></div></div>
       <div class="stat-card stat-card-filter" id="filter-card-pqc"      onclick="setFilter('pqc')"      title="Click to filter PQC Detected"><div class="stat-val" id="stat-pqc" style="color:#a78bfa">—</div><div class="stat-label">PQC Detected</div></div>
       <div class="stat-card"><div class="stat-val" id="stat-ct-pqc" style="color:#22c55e">—</div><div class="stat-label">PQC Certs (CT)</div></div>
       <div class="stat-card"><div class="stat-val" id="stat-p1-actions" style="color:var(--critical)">—</div><div class="stat-label">Urgent Actions</div></div>
@@ -807,7 +807,7 @@ footer {
       <div class="panel-header"><div class="panel-title">Scan History</div></div>
       <div class="panel-body" style="padding:0">
         <table class="domain-table">
-          <thead><tr><th>Run ID</th><th>Started</th><th>Sector</th><th>Region</th><th>Status</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Run ID</th><th>Started</th><th>Source</th><th>Domains</th><th>Sector</th><th>Region</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody id="runs-tbody"></tbody>
         </table>
       </div>
@@ -1306,6 +1306,8 @@ async function loadSummary() {
   document.getElementById('stat-ready').textContent    = s.ready_count ?? '0';
   document.getElementById('stat-pqc').textContent      = s.pqc_count ?? '0';
   document.getElementById('stat-na').textContent       = s.na_count ?? '0';
+  const naSub = document.getElementById('stat-na-sub');
+  if (naSub) naSub.textContent = s.unresolvable_count ? `${s.unresolvable_count} not in DNS` : '';
 
   renderDistChart(s);
   // Also pull CT stats for the dashboard card
@@ -1575,7 +1577,7 @@ function renderAssessments(items) {
     return `<tr>
       <td><a class="domain-link" href="#domain/${encodeURIComponent(a.domain)}" data-domain="${esc(a.domain)}" onclick="openDomain(this.dataset.domain,'dashboard');return false">${esc(a.domain)}</a></td>
       <td>${isNA ? '<span class="score-badge score-na">N/A</span>' : `<span class="score-badge score-${lc}">${a.score??'?'}</span>`}</td>
-      <td><span class="level-dot dot-${lc}"></span>${isNA ? '<span style="color:var(--muted)">No TLS</span>' : ucfirst(lc)}</td>
+      <td><span class="level-dot dot-${lc}"></span>${isNA ? naLabelHtml(a) : ucfirst(lc)}</td>
       <td>${tlsArr.map(t=>`<span class="tls-pill">${t}</span>`).join(' ')}</td>
       <td style="font-family:var(--font-mono);font-size:0.75rem">${a.key_type||'—'}</td>
       <td>${a.has_pqc ? '<span class="pqc-pill">✓ PQC</span>' : '<span style="color:var(--muted);font-size:0.75rem">—</span>'}</td>
@@ -1620,6 +1622,17 @@ function renderTLSChart(items) {
   });
 }
 
+// No-TLS domains whose name no longer resolves (dns_status) — not scanned.
+const _UNRESOLVABLE = { nxdomain: 'Not in DNS (NXDOMAIN)', no_address: 'No A/AAAA record' };
+function isUnresolvable(a) { return !!(a && _UNRESOLVABLE[a.dns_status]); }
+function naLabelHtml(a) {
+  if (isUnresolvable(a)) {
+    const since = a.dns_since ? ` since ${String(a.dns_since).slice(0,10)}` : '';
+    return `<span style="color:var(--muted)" title="${esc(_UNRESOLVABLE[a.dns_status] + since)} — excluded from scans">No DNS</span>`;
+  }
+  return '<span style="color:var(--muted)">No TLS</span>';
+}
+
 // Cipher security-level → colour
 function cipherLevelColor(lvl) {
   return { recommended:'var(--ready)', acceptable:'var(--accent)',
@@ -1635,6 +1648,10 @@ function sslLabsGradeColor(g) {
 }
 function sslLabsBadge(sl, domain) {
   const url = (sl && sl.report_url) || `https://www.ssllabs.com/ssltest/analyze.html?d=${encodeURIComponent(domain)}`;
+  if (sl && !sl.grade && sl.status === 'ERROR') {
+    return `<div style="font-size:.8rem;margin-top:.25rem">SSL Labs: <span style="color:var(--muted)">assessment failed${sl.status_message ? ' — ' + esc(sl.status_message) : ''}</span>
+      ${sl.retrieved_at ? `<span style="color:var(--muted);font-size:.7rem;margin-left:.4rem">(${esc(sl.retrieved_at.slice(0,10))})</span>` : ''}</div>`;
+  }
   if (!sl || !sl.grade) {
     return `<div style="font-size:.8rem;margin-top:.25rem">SSL Labs: <span style="color:var(--muted)">no report</span>
       <a href="${url}" target="_blank" rel="noopener" style="color:var(--accent);font-size:.72rem;margin-left:.4rem">open ssllabs.com ↗</a></div>`;
@@ -1891,13 +1908,15 @@ function _dvRenderSummary() {
   const history = d.history || [];
   const assessedAt = (a.assessed_at || (history[history.length-1]||{}).assessed_at || '').slice(0,19).replace('T',' ');
   const isNA = a.level === 'na';
+  const dnsSt = (d.extra||{}).dns_status || null;
 
   body.innerHTML = `
     <div class="dv-grid">
       <div>
         <div class="dv-label">Score</div>
         <div style="font-family:var(--font-mono);font-size:2.5rem;color:${levelColor(a.level)}">${isNA ? 'N/A' : (a.score??'—')}</div>
-        <div style="color:${levelColor(a.level)};font-size:.85rem;margin-top:.25rem">${isNA ? 'No TLS Service' : ucfirst(a.level||'')}</div>
+        <div style="color:${levelColor(a.level)};font-size:.85rem;margin-top:.25rem">${isNA ? (dnsSt && _UNRESOLVABLE[dnsSt.status] ? 'No DNS record' : 'No TLS Service') : ucfirst(a.level||'')}</div>
+        ${isNA && dnsSt ? `<div style="color:var(--muted);font-size:.72rem;margin-top:.35rem">DNS: ${esc(dnsSt.label || dnsSt.status)}${dnsSt.since ? ' since ' + esc(String(dnsSt.since).slice(0,10)) : ''}${(dnsSt.addresses||[]).length ? ' — ' + esc(dnsSt.addresses.join(', ')) : ''}<br>checked ${esc(String(dnsSt.checked_at||'').slice(0,10))} · ${_UNRESOLVABLE[dnsSt.status] ? 'excluded from scans' : 'in the monthly no-TLS rescan'}</div>` : ''}
         ${assessedAt?`<div style="color:var(--muted);font-size:.72rem;margin-top:.5rem">Last assessed ${esc(assessedAt)} UTC</div>`:''}
         ${history.length>1?`<div style="color:var(--muted);font-size:.72rem;margin-top:.2rem">${history.length} assessments on record</div>`:''}
       </div>
@@ -2011,6 +2030,9 @@ function renderDomainFull() {
           · engine ${ssllabs.engine_version||'?'} · criteria ${ssllabs.criteria_version||'?'}
           · grade is informational only (not part of the PQC score)
         </div>`
+      : ssllabs && ssllabs.status === 'ERROR' ? `<div style="color:var(--muted);font-size:.8rem">SSL Labs could not assess this host${ssllabs.status_message ? ': ' + esc(ssllabs.status_message) : ''}
+          <span style="font-size:.7rem">(${esc((ssllabs.retrieved_at||'').slice(0,10))})</span>
+          <a href="${slUrl}" target="_blank" rel="noopener" style="color:var(--accent)">check ssllabs.com ↗</a></div>`
       : `<div style="color:var(--muted);font-size:.8rem">No SSL Labs report stored for this domain.
           <a href="${slUrl}" target="_blank" rel="noopener" style="color:var(--accent)">check ssllabs.com ↗</a></div>`}
       ${CAN_SCAN ? `<button class="btn-outline" style="margin-top:.7rem;font-size:.75rem" id="df-ssllabs-btn" onclick="refreshSSLLabs()">Request fresh SSL Labs assessment</button>
@@ -2173,6 +2195,19 @@ async function startScan() {
   }
 }
 
+function runSourceHtml(notes) {
+  const n = (notes || '').trim();
+  const m = /^scheduled:#(\d+)\s*(.*)$/.exec(n);
+  if (m) return `<span style="color:#a78bfa" title="${esc(m[2])}">Scheduled #${esc(m[1])}</span>`;
+  if (n.startsWith('reassess-all')) return `<span style="color:var(--muted)" title="${esc(n)}">reassess-all</span>`;
+  if (n) return `<span style="color:var(--muted)" title="${esc(n)}">${esc(n.length > 24 ? n.slice(0,24) + '…' : n)}</span>`;
+  return '<span style="color:var(--muted)">manual</span>';
+}
+function runDomainCount(run) {
+  const l = tryJSON(run.domain_list);
+  return Array.isArray(l) ? l.length : '—';
+}
+
 async function loadRuns() {
   const r = await fetch('/api/runs');
   const runs = await r.json();
@@ -2180,13 +2215,15 @@ async function loadRuns() {
   const sel = document.getElementById('reassess-run');
 
   tbody.innerHTML = runs.map(run => `<tr>
-    <td style="font-family:var(--font-mono)">${run.run_id}</td>
+    <td style="font-family:var(--font-mono)">${esc(run.run_id)}</td>
     <td style="font-size:.78rem;color:var(--muted)">${run.started_at?.slice(0,16)||''}</td>
+    <td style="font-size:.75rem">${runSourceHtml(run.notes)}</td>
+    <td style="font-size:.75rem;font-family:var(--font-mono)">${runDomainCount(run)}</td>
     <td>${run.sector||'—'}</td>
     <td>${run.region||'—'}</td>
     <td><span style="color:${run.status==='completed'?'var(--ready)':run.status==='failed'?'var(--critical)':'var(--moderate)'}">${run.status}</span></td>
     <td><button class="btn-outline" onclick="loadAssessments('${run.run_id}');showView2('dashboard')">View</button></td>
-  </tr>`).join('') || '<tr><td colspan="6" style="color:var(--muted);padding:1rem">No runs yet</td></tr>';
+  </tr>`).join('') || '<tr><td colspan="8" style="color:var(--muted);padding:1rem">No runs yet</td></tr>';
 
   sel.innerHTML = '<option value="">Select a scan run...</option>' +
     runs.map(r => `<option value="${r.run_id}">${r.run_id} — ${r.started_at?.slice(0,10)||''} (${r.status})</option>`).join('');

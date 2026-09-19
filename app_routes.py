@@ -127,6 +127,12 @@ def api_summary():
             "pqc_count":       sum(1 for a in visible if a.get("has_pqc")),
             "na_count":        sum(1 for a in visible if a.get("level") == "na"),
         }
+        stats["unresolvable_count"] = _unresolvable_count(
+            db, [a["domain"] for a in visible if a.get("level") == "na"])
+    else:
+        from scheduler.schedule_audit import _known_by_service
+        stats = dict(stats)
+        stats["unresolvable_count"] = _unresolvable_count(db, _known_by_service(db)[1])
     return jsonify({"stats": stats, "recent_runs": runs})
 
 
@@ -173,7 +179,35 @@ def api_assessments():
             if (_org_for_cc(a.get("domain", "")).get("country_code", "")).upper() == cc_upper
         ]
 
-    return jsonify(filter_assessments(all_, user))
+    visible = filter_assessments(all_, user)
+    _attach_dns_status(db, visible)
+    return jsonify(visible)
+
+
+def _attach_dns_status(db, rows):
+    """Add 'dns_status' (+ 'dns_since') to no-TLS rows. One bulk query."""
+    if not any(r.get("level") == "na" for r in rows):
+        return
+    try:
+        from scanner.dns_status import DATA_TYPE
+        dns = db.latest_extra_bulk(DATA_TYPE)
+    except Exception:
+        return
+    for r in rows:
+        if r.get("level") != "na":
+            continue
+        blob = dns.get(r.get("domain"))
+        if isinstance(blob, dict) and blob.get("status"):
+            r["dns_status"] = blob["status"]
+            r["dns_since"]  = blob.get("since")
+
+
+def _unresolvable_count(db, na_domains) -> int:
+    try:
+        from scanner.dns_status import unresolvable_domains
+        return len(set(unresolvable_domains(db)) & set(na_domains))
+    except Exception:
+        return 0
 
 
 @app_bp.route("/api/organisations")
@@ -253,7 +287,8 @@ def api_domain_detail(domain):
     history = db.get_domain_history(domain)
     scans   = db.get_domain_scans(domain)
     extra   = db.get_latest_domain_extra(
-        domain, data_types=["cipher_enum", "chain", "cdn", "ssllabs"])
+        domain, data_types=["cipher_enum", "chain", "cdn", "ssllabs",
+                            "group_enum", "dns_status"])
     tls_ports = _tls_ports_for(db, domain)
     return jsonify({"domain": domain, "history": history,
                     "scans": scans[:5], "extra": extra,

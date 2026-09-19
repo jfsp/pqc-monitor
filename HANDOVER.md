@@ -2,7 +2,7 @@
 
 **Version:** 1.12.0 (released, tag `v1.12.0`)
 **Date:** 2026-09-19
-**Status:** Active development — v1.12.0: time-based Trends tab (snapshot/activity views, org/community scope, RBAC-scoped API, cached); DB-driven scheduler with no-TLS rescan and throttled SSL Labs sweep; domain detail screen. No schema change since v18. Production is a small VM (2 vCPU, ~1 GB RAM) behind a Cloudflare Tunnel — keep per-request work index-only and bounded (see §2.12c)
+**Status:** Active development — v1.12.0: time-based Trends tab (snapshot/activity views, org/community scope, RBAC-scoped API, cached); DB-driven scheduler (APScheduler removed) with no-TLS rescan, DNS presence tracking and throttled SSL Labs sweep; domain detail screen. No schema change since v18. Production is a small VM (2 vCPU, ~1 GB RAM) behind a Cloudflare Tunnel — keep per-request work index-only and bounded (see §2.12c). Scheduler/sweep deployed and confirmed working 2026-09-19; follow-up debugging continues in a separate session (§2.12b "Open")
 **Purpose:** Context transfer for continuing development in a new session
 **Repository:** https://github.com/jfsp/pqc-monitor
 
@@ -29,10 +29,10 @@
 PQC-Monitor is an open-source platform for assessing the Post-Quantum Cryptography (PQC) readiness of internet-facing services within a sector or region. It performs passive TLS/certificate reconnaissance, scores each domain against regulatory guidelines (NIST SP 800-131Ar3, BSI TR-02102-1, CCN-STIC-221), tracks migration progress over time, and generates actionable migration roadmaps.
 
 **Technology stack:**
-Python 3.10+ · Flask 3.x · SQLite (WAL mode) · Gunicorn (production) · Werkzeug password hashing · APScheduler · Chart.js (dashboard) · Jinja2 templates
+Python 3.10+ · Flask 3.x · SQLite (WAL mode) · Gunicorn (production) · Werkzeug password hashing · dnspython · Chart.js (dashboard) · Jinja2 templates. The scheduler is a DB-driven ticker thread since v1.12.0 (APScheduler is no longer used at runtime; it may remain in `requirements.txt` until removed).
 
 **Deployment model:**
-Two systemd services — `pqc-monitor-web` (Gunicorn) and `pqc-monitor-scheduler` (APScheduler daemon) — managed by `pqc-monitor.target`. Nginx reverse proxy for TLS termination. Runs as the `pqcmonitor` system user. Runtime data under `/var/lib/pqc-monitor/`, code under `/opt/pqc-monitor/`.
+Two systemd services — `pqc-monitor-web` (Gunicorn) and `pqc-monitor-scheduler` (DB-driven scheduler daemon, `pqc_monitor.py scheduler-daemon`) — managed by `pqc-monitor.target`. Since v1.12.0 the scheduler `Wants=` (not `Requires=`) the web service, so web restarts no longer restart it. Nginx reverse proxy (behind a Cloudflare Tunnel in production). Runs as the `pqcmonitor` system user. Runtime data under `/var/lib/pqc-monitor/`, code under `/opt/pqc-monitor/`.
 
 **License:** GPL-3.0-or-later
 **AI-assisted:** Substantial portions generated with Claude (Anthropic). All code reviewed by developer.
@@ -69,6 +69,9 @@ sudo scripts/deploy.sh           # deploy last commit
 sudo scripts/deploy.sh --from abc1234
 ```
 
+`deploy.sh` does **not** install systemd unit files — after a unit changes,
+copy it to `/etc/systemd/system/` and `systemctl daemon-reload` by hand.
+
 ---
 
 ## 2. Version History
@@ -95,7 +98,7 @@ sudo scripts/deploy.sh --from abc1234
 | 1.9.1 | Fix: MX priority/non-FQDN normalisation (+ DB repair script); SMTP/STARTTLS reported no-TLS on 465/587/2525 (protocol-based dispatch, added 2525) |
 | 1.11.0 | User management Phase 1 (mailer, `/forgot` + `/reset`, `session_epoch`, `must_change_password`, CSRF, auth hardening; **schema v18**); schedule coverage audit + monthly auto-schedule; dashboard shows TLS-serving ports |
 | 1.10.0 | **PQC detection was broken for every server ever scanned** — rewritten to enumerate the key-exchange groups the server *offers* (raw ClientHello + HelloRetryRequest). New `scanner/group_enum.py`, `scripts/pqc_selftest.py`, GREASE soundness control, `domain_extra` index fix (full table scan → indexed) |
-| 1.12.0 | Time-based **Trends** (`data/trends.py`: calendar buckets, auto granularity, snapshot/activity, org/community scope, RBAC fix, result cache, covering index `idx_assessments_trend`); DB-driven scheduler (`next_run` source of truth); no-TLS monthly rescan + `dns_status`; throttled SSL Labs sweep; domain detail screen (`#domain/<name>`) |
+| 1.12.0 | Time-based **Trends** (`data/trends.py`: calendar buckets, auto granularity, snapshot/activity, org/community scope, RBAC fix, result cache, covering index `idx_assessments_trend`); DB-driven scheduler (`next_run` source of truth, APScheduler removed); no-TLS monthly rescan + `dns_status`; throttled SSL Labs sweep (inline scan lookup removed); domain detail screen (`#domain/<name>`); dashboard loading state; fix: IP-address SANs dropped the domain's result; fix: `/api/domain` never returned `group_enum` |
 
 ### 2.8 — v1.8.0 detail
 
@@ -198,6 +201,12 @@ needed there.
 
 **Full TLS cipher detail + SSL Labs integration (T3-3)**
 
+> **Partly superseded in v1.12.0.** The SSL Labs design below assumed
+> `fromCache=on` is a read-only cache lookup. It is not: on a cache miss it
+> **starts** a new assessment. The inline scan-time lookup was removed and
+> replaced by the throttled sweep (§2.12b). The `view-domain-full` drill-down
+> was folded into the domain detail screen (§2.12a).
+
 #### Fix 1 — Domain detail did not show the full accepted cipher set
 
 Root cause: the full enumeration lived in `domain_extra['cipher_enum']` but
@@ -228,11 +237,12 @@ modal truncated to 2 ciphers which meant it never reached the dashboard.
   Labs on European servers).
 - **SSL Labs API v4 integration** (`scanner/ssllabs_client.py`): cache-only
   during scan runs (`fromCache=on`, never triggers external assessments
-  inline); on-demand fresh assessment from the detail view (`startNew=on`,
-  `publish=off`, `scan.run` permission), polled by the UI. Grade + report
-  link shown in the modal/detail. **Display only — does not affect the PQC
-  score** (explicit decision). Requires one-time `register_email()` with an
-  organisational email; config `ssllabs.email` or `PQC_SSLLABS_EMAIL`.
+  inline — **wrong, see note above**); on-demand fresh assessment from the
+  detail view (`startNew=on`, `publish=off`, `scan.run` permission), polled
+  by the UI. Grade + report link shown in the modal/detail. **Display only —
+  does not affect the PQC score** (explicit decision). Requires one-time
+  `register_email()` with an organisational email; config `ssllabs.email` or
+  `PQC_SSLLABS_EMAIL`.
 - **`scripts/reassess_all.py`**: reassess every existing domain. Score-only
   by default (no traffic/CPU-light, reuses stored blobs, regenerates named
   findings); `--rescan` for a resource-guarded network rescan
@@ -256,10 +266,11 @@ SEED-SHA. Closes the visible gap vs SSL Labs on European servers.
 
 #### Added — SSL Labs API v4 (`scanner/ssllabs_client.py`)
 
-- **Design**: cache-only during scan runs (`fromCache=on`, maxAge 168h) —
-  fresh SSL Labs assessments take 60+ s and are concurrency-limited, so they
-  are only triggered on demand from the detail view (`startNew=on`,
+- **Design (v1.9.0)**: cache-only during scan runs (`fromCache=on`, maxAge
+  168h) — fresh SSL Labs assessments take 60+ s and are concurrency-limited,
+  so they are only triggered on demand from the detail view (`startNew=on`,
   `publish=off`) and polled by the UI (5 s → 10 s backoff, 40 attempts).
+  **Superseded in v1.12.0** — see §2.12b.
 - **Grade is display-only** — it does NOT feed the PQC score (decided
   2026-07-09).
 - **Registration**: v4 requires a one-time registration with an
@@ -272,9 +283,9 @@ SEED-SHA. Closes the visible gap vs SSL Labs on European servers.
   `POST /api/ssllabs/<domain>/refresh` (requires `scan.run` — it causes
   external scanning by Qualys against the target; audited as
   `ssllabs.refresh`).
-- **Storage**: `domain_extra['ssllabs']` = {host, status, grade (worst
-  across endpoints), grades, endpoints[], engine_version, criteria_version,
-  test_time, retrieved_at, report_url}.
+- **Storage**: `domain_extra['ssllabs']` = {host, status, status_message
+  (v1.12.0), grade (worst across endpoints), grades, endpoints[],
+  engine_version, criteria_version, test_time, retrieved_at, report_url}.
 - **Rate limits**: 429 (client cool-off) and 529 (service overload) are
   surfaced as `rate_limited`; scan-time lookups fail soft.
 
@@ -493,6 +504,8 @@ split was not used).
   (~13 timeout-bound connects); `--include-na` opts them back in. Selection is
   by *current* latest level, so na→service domains reconcile in and vice-versa.
   No live reload: after a write, restart `pqc-monitor-scheduler`.
+  **Superseded in v1.12.0:** `--create-monthly` now manages three auto
+  schedules and the daemon re-reads schedules every minute (§2.12b).
 
 - **Dashboard shows TLS-serving ports** (v1.11.0). `app_routes.py`
   `api_domain_detail` now returns `tls_ports` (from the latest run's successful
@@ -528,9 +541,9 @@ split was not used).
 > The §10 backlog previously earmarked v18 for T1-2 (geography on domain lists)
 > — that and any other pending schema change must use the **next free version**.
 > Phase 2 (2FA) is planned for **v19**; the next schema feature after that is
-> v20+.
+> v20+. v1.12.0 deliberately added **no** migration to keep v19 free.
 
-### 2.12a — v1.12.0: domain detail screen (2026-09-19)
+### 2.12a — v1.12.0: domain detail screen and dashboard loading (2026-09-19)
 
 Frontend-only change (`dashboard/app.py`) plus a small login-page script
 (`auth/auth_routes.py`). No schema change and no new API routes.
@@ -550,7 +563,8 @@ Frontend-only change (`dashboard/app.py`) plus a small login-page script
   in `showView`).
 - **Domain switcher:** an `<input list>` backed by a `<datalist>` built from
   `/api/assessments` (already scoped to the user, cached for 60 s). The user can
-  enter an exact name or any unique substring.
+  enter an exact name or any unique substring. **No-TLS (`level=na`) domains
+  are excluded** from the list and from the name match.
 - **Deep links:** `/app/#domain/example.com` can be bookmarked. The login page
   copies `location.hash` onto the form action so the fragment survives the
   post-login 302. The server never sees the fragment.
@@ -558,6 +572,14 @@ Frontend-only change (`dashboard/app.py`) plus a small login-page script
   timer is cleared on every domain change or exit. Content from the findings
   and the action plan now goes through `esc()`, and table links pass the
   domain through `data-domain` instead of string-building it into `onclick`.
+- **Dashboard loading state (fix).** The table's initial HTML was the
+  empty-state message "No scan data yet. Run a scan first.", and
+  `loadAssessments()` replaced it only after `/api/assessments` and
+  `/api/organisations` both returned — so on a large estate the empty-state
+  message showed for the whole load. It now shows "Loading assessments…"; a
+  non-200 or non-array response shows an error row with a Retry link (it used
+  to render as "No assessment data"); a load token (`_assessLoadToken`) drops
+  out-of-order responses (Refresh vs a run's "View").
 - Known, not caused by this change: the header nav bar overflows horizontally
   below ~600 px width.
 
@@ -569,15 +591,20 @@ Frontend-only change (`dashboard/app.py`) plus a small login-page script
   counted from process start and ignored `next_run`, which was never updated.
   The unit's `Requires=pqc-monitor-web` restarted the scheduler on every web
   deploy, so with deploys less than 30 days apart the monthly job would never
-  fire. Two restarts on 09-19 pushed it to 10-19.
+  fire. Two restarts on 09-19 pushed it to 10-19. Schedules were also read
+  only at daemon start.
 - The auto list covered 3,168 of 5,248 assessed domains: 2,046 no-TLS
   (excluded by design) and 34 serviceable domains added or changed after the
-  list was built on 07-29.
+  list was built on 07-29 (the list was a snapshot).
+- Scheduled runs were indistinguishable from manual CLI runs in Scan History
+  (empty sector, no notes).
 - SSL Labs: `analyze?fromCache=on` **starts** an assessment on a cache miss
   (verified: `IN_PROGRESS`). The inline lookup asked Qualys for one per domain
-  and got HTTP 429 for 2,915 of 3,168. Only 141 domains ever had a report.
+  and got HTTP 429 for 2,915 of 3,168 (journal: `SSL Labs rate-limited (429)`
+  × 2,915 on 09-04). Only 141 domains ever had a report.
 - Certificates with IP-address SANs failed with
-  `IPv4Address is not JSON serializable` (2 occurrences since July).
+  `IPv4Address is not JSON serializable` (2 occurrences since July), dropping
+  that domain's whole result.
 
 **Design**
 - `scheduler/scan_scheduler.py`: no APScheduler. A ticker thread (60 s) reads
@@ -588,6 +615,11 @@ Frontend-only change (`dashboard/app.py`) plus a small login-page script
   with notes `scheduled:%` are marked `interrupted`, and stale `next_run`
   (`last_run >= next_run`) is repaired to `last_run + interval`
   (`schedule_audit.repair_stale_next_run`, also called by `--create-monthly`).
+  A row with `next_run` NULL gets `now + interval` (never fires immediately).
+  Constructing `ScanScheduler` has no side effects (the web app uses it only to
+  list/add schedules).
+- Scheduled runs carry `scan_runs.notes = "scheduled:#<id> <name>"`
+  (`orchestrator.scan_domains(notes=…)`).
 - Job kind is in `config_json.kind`: `scan` (default) or `ssllabs_sweep`.
   Auto scans carry `config_json.auto` = `serviceable` or `na_resolvable`;
   row #1 predates the key and is recognised by name, then tagged by
@@ -596,35 +628,62 @@ Frontend-only change (`dashboard/app.py`) plus a small login-page script
 - **DNS status** (`scanner/dns_status.py`): status is `resolvable`,
   `nxdomain`, `no_address` or `dns_error` (A, then AAAA, one retry on
   errors), stored as `domain_extra.data_type='dns_status'` under the domain's
-  latest run with `since`, `checked_at`, `addresses` and `previous_status`.
-  Unresolvable = `nxdomain` or `no_address`. Only `resolvable` domains are
-  rescanned. `dns_error` domains are neither scanned nor marked. **No
-  migration: v19 stays reserved for TOTP.** A new index
-  `idx_domain_extra_type(data_type, recorded_at)` is created in
-  `_init_schema` (same pattern as `idx_domain_extra_domain`).
+  latest run with `status`, `label`, `since`, `checked_at`, `addresses` (≤4)
+  and `previous_status`. `since` is carried forward while the status is
+  unchanged. Unresolvable = `nxdomain` or `no_address`. Only `resolvable`
+  domains are rescanned. `dns_error` domains are neither scanned nor marked.
+  Unresolvable names are re-checked (DNS only) every cycle and rejoin the
+  rescan if they resolve again. **No migration: v19 stays reserved for
+  TOTP.** A new index `idx_domain_extra_type(data_type, recorded_at)` is
+  created in `_init_schema` (same pattern as `idx_domain_extra_domain`).
 - **SSL Labs sweep** (`scanner/ssllabs_sweep.py`). Targets: latest level is
   not `na` and the latest run had a successful handshake on 443, minus
   domains with an `ssllabs` record newer than `sweep_max_age_days` (default
   6). Concurrency is `min(sweep_concurrency (6), maxAssessments -
   currentAssessments - 1)`; starts are spaced by `newAssessmentCoolOff`.
+  - First call per host: `fromCache=on&maxAge=<h>` (READY → stored at once;
+    otherwise it has started an assessment and is polled). Never `startNew`.
   - 429: global pause of 60 s, doubling up to 10 min; concurrency drops by 1;
     the domain is re-queued.
   - 529/503: 15 min pause.
   - 401/403/441: abort.
+  - Network errors: 3 attempts per host.
   - Polls every 15 s, with a 20 min cap per host.
   - READY and ERROR results are stored under the latest run, the same place
-    the UI refresh uses.
+    the UI refresh uses; ERROR records (`status_message`) prevent retrying
+    untestable hosts until the next sweep.
+  - Progress logged every 50 hosts; summary on finish. An interrupted sweep
+    resumes (fresh records are skipped).
   - The inline lookup is removed from `orchestrator._scan_domain`.
+  - Throughput at concurrency 6: ~200–250 hosts/hour (~13 h for 3,168).
 - Auto schedules (`ensure_auto_schedules`, run by
   `scripts/schedule_audit.py --create-monthly`):
   - `All Domains — monthly (auto)`, 30 d
   - `No-TLS Domains — monthly rescan (auto)`, 30 d, first run now + 1 d
   - `SSL Labs sweep — weekly (auto)`, 7 d, first run now + 10 min, no list
+- **CLI**: `pqc_monitor.py ssllabs-sweep [--dry-run] [--limit N]
+  [--concurrency N] [--max-age-days D] [--domain X …]`;
+  `list-schedules` shows the job kind; `scheduler-daemon` prints each
+  schedule's next run at start. `scripts/schedule_audit.py` gained
+  `--refresh-dns`, `--no-ssllabs`, `--sweep-interval-days`, reports no-TLS
+  coverage and unresolvable counts, and flags schedules overdue by > 1 day.
+- **Config** (`ssllabs:` section): `sweep_concurrency` (6),
+  `sweep_max_age_days` (6).
 - UI: "No DNS" label and tooltip for unresolvable no-TLS domains; "N not in
   DNS" on the No TLS card; DNS line in the domain view; SSL Labs error
-  state; Scan History Source and Domains columns.
-- `/api/domain` (`app_routes.py`) now also returns `group_enum` (it was
-  missing, so production never showed offered groups) and `dns_status`.
+  state ("assessment failed — <reason>"); Scan History Source (Scheduled
+  #id / reassess-all / manual) and Domains columns.
+- API: `/api/summary` adds `unresolvable_count`; `/api/assessments` adds
+  `dns_status` / `dns_since` to no-TLS rows; `/api/domain` (`app_routes.py`)
+  now also returns `group_enum` (it was missing, so production never showed
+  offered groups) and `dns_status`.
+- **Fixes**: SAN values stringified in `tls_probe._parse_certificate()` and
+  `chain_validator._parse_cert_node()`; `save_scan_result()` writes
+  `raw_json` with `default=str` as a backstop.
+- systemd: scheduler `Requires=` → `Wants=` pqc-monitor-web.
+  `deploy.sh`: `scheduler/` added to `WEB_TRIGGERS` (the web app imports
+  `scheduler.schedule_audit` / `ScanScheduler`).
+- Tests: `tests/test_scheduler_sweep_dns.py` (30).
 
 **Deploy steps**
 1. Deploy the code (web and scheduler both restart).
@@ -638,6 +697,12 @@ Frontend-only change (`dashboard/app.py`) plus a small login-page script
 4. Confirm: `journalctl -u pqc-monitor-scheduler` lists 3 schedules with
    `next run`. The sweep starts about 10 min later; watch for
    `SSL Labs sweep progress` lines.
+
+**Status / open (2026-09-19):** deployed and confirmed working; further
+debugging continues in a separate session. To review after the first weekly
+sweep: the `SSL Labs sweep … finished` summary (ready / error / timeout /
+429 counts) — tune `sweep_concurrency` from it. After the first no-TLS
+rescan: DNS status counts and how many no-TLS domains gained a service.
 
 ### 2.12c — v1.12.0: time-based Trends (2026-09-19)
 
@@ -732,7 +797,10 @@ because `group_enum` blobs do not exist in historical rows and can only be
 produced from the network.
 
 Status at handover: started with `--limit 10`, verified working. **~4 909 of
-5 094 domains still need the backfill.**
+5 094 domains still need the backfill.** (Note 2026-09-19: the 07-29/30
+`reassess-all (rescan)` run covered 5,233 domains and the 09-04 scheduled run
+3,168; re-check the `--only-missing-groups --dry-run` count before assuming
+this is still outstanding.)
 
 ```bash
 # 0. Verify the enumerator is sound on this host FIRST.
@@ -777,6 +845,8 @@ spans the boundary.
   print('email=',repr(c.get('ssllabs_email')),'enabled=',c.get('ssllabs_enabled'))"
   grep -n "SSLLABS_EMAIL" /opt/pqc-monitor/app_factory.py
   ```
+  (2026-09-19: the email is confirmed set in production config; the sweep and
+  scheduler read it via `load_config()`.)
 - **testssl timing** — flags were tuned to stop the 130 s timeouts, but the
   real-world timings were still being measured at end of session. May need
   further trimming.
@@ -826,12 +896,13 @@ spans the boundary.
 pqc-monitor/
 ├── app_factory.py          # Production Flask app factory (Gunicorn entry point)
 ├── app_routes.py           # Auth-protected /app/* blueprint (analyst + admin API)
-├── pqc_monitor.py          # CLI entry point (scan, dashboard, schedule, reassess)
+├── pqc_monitor.py          # CLI entry point (scan, dashboard, schedule, reassess,
+│                           #   scheduler-daemon, list-schedules, ssllabs-sweep)
 ├── version.py              # VERSION file reader
 ├── admin/
 │   └── routes.py           # Admin-only /admin/* blueprint
 ├── auth/
-│   ├── auth_routes.py      # /login, /logout, /change-password, /forgot, /reset/<token>
+│   ├── auth_routes.py      # /login (keeps #fragment deep links), /logout, /change-password, /forgot, /reset/<token>
 │   ├── middleware.py       # require_auth, current_user (session_epoch check), filter_assessments
 │   ├── models.py           # User, AuditEvent dataclasses; PERMISSIONS dict
 │   ├── mailer.py           # Optional SMTP mailer: local MTA or authenticated relay (NEW v1.11.0)
@@ -856,7 +927,7 @@ pqc-monitor/
 │   ├── report_generator.py # CSV/JSON/text export
 │   └── community_report.py # Group Report: build_report(), export_csv(), export_pdf()
 ├── scanner/
-│   ├── orchestrator.py     # Scan coordinator
+│   ├── orchestrator.py     # Scan coordinator (no SSL Labs calls since v1.12.0)
 │   ├── tls_probe.py        # TLS handshake prober
 │   ├── crypto_assessor.py  # Scoring engine (guidelines → findings → score/level)
 │   ├── crypto_extractor.py # Certificate field parser
@@ -875,16 +946,16 @@ pqc-monitor/
 │   └── starttls_probe.py   # STARTTLS prober (SMTP/IMAP/POP3; LDAP explicitly unsupported)
 ├── scheduler/
 │   ├── scan_scheduler.py   # DB-driven scheduler: next_run is the source of truth, 60 s tick (rewritten v1.12.0)
-│   └── schedule_audit.py   # Schedule coverage audit + monthly auto-schedule (NEW v1.11.0)
+│   └── schedule_audit.py   # Coverage audit + auto schedules (main, no-TLS rescan, SSL Labs sweep)
 ├── scripts/                # See scripts/README.md for full usage
-│   ├── deploy.sh           # Incremental git→deployment sync
+│   ├── deploy.sh           # Incremental git→deployment sync (does not install systemd units)
 │   ├── sync-tree.sh        # Full-tree repo→/opt audit/sync
 │   ├── add_trend_index.py  # One-time covering index for Trends; run with services stopped (NEW v1.12.0)
 │   ├── audit_db_consistency.py # Read-only DB consistency audit (sections A–J)
 │   ├── backfill_services_assessed.py # Backfill services_assessed / key_types
 │   ├── fix_mx_entries.py   # Repair malformed MX host keys + dns_enum blobs
 │   ├── mail_selftest.py    # Verify SMTP relay credentials (NEW v1.11.0)
-│   ├── schedule_audit.py   # CLI for scheduler/schedule_audit.py (NEW v1.11.0)
+│   ├── schedule_audit.py   # CLI for scheduler/schedule_audit.py (--create-monthly, --refresh-dns)
 │   ├── fix_notls_level.py  # One-time DB fix: critical→na for no-TLS rows
 │   ├── bulk_assign.py      # Bulk region/community assignment from org name list
 │   ├── bulk_org_assign.py  # Bulk domain→org assignment by TLD
@@ -897,7 +968,7 @@ pqc-monitor/
 │   └── wait-for-db.sh      # DB readiness poll for systemd ExecStartPre
 ├── systemd/
 │   ├── pqc-monitor-web.service
-│   ├── pqc-monitor-scheduler.service
+│   ├── pqc-monitor-scheduler.service  # Wants= (not Requires=) web since v1.12.0
 │   ├── pqc-monitor.target
 │   ├── nginx-pqc-monitor.conf  # Sample reverse-proxy config
 │   └── pqc-monitor.env     # Secrets template
@@ -906,7 +977,8 @@ pqc-monitor/
 ├── Dockerfile              # Container image (development convenience)
 ├── docker-compose.yml      # Compose stack for local runs
 ├── requirements.txt
-├── tests/                  # 597 tests (all passing on main; test_trends.py NEW v1.12.0)
+├── tests/                  # 597 tests at v1.12.0 (all passing on main; test_trends.py
+│                           #   and test_scheduler_sweep_dns.py NEW v1.12.0)
 └── config/
     └── config.yaml.example
 ```
@@ -918,7 +990,7 @@ pqc-monitor/
 ### Request flow (production)
 
 ```
-Browser → nginx (TLS) → Gunicorn → Flask
+Browser → Cloudflare Tunnel → nginx → Gunicorn → Flask
                                     ├── /login, /logout       auth/auth_routes.py
                                     ├── /app/*                app_routes.py  (RBAC)
                                     │    ├── /api/summary
@@ -941,11 +1013,32 @@ orchestrator.scan_domain(domain)
   └── crypto_extractor   → parse certificate fields
   └── chain_validator    → verify chain
   └── cipher_enum        → enumerate cipher suites
+  └── group_enum         → offered key-exchange groups (PQC)
   └── cdn_detector       → CDN fingerprint
   └── shodan_client      → Shodan enrichment (optional, oss plan: shared dataset only)
   └── crypto_assessor    → score + findings → DomainAssessment
        └── level = "na"  if no TLS service found (score=0, no findings)
   └── database.save_assessment()
+```
+
+SSL Labs is **not** part of the scan pipeline (since v1.12.0) — see the
+scheduler jobs below.
+
+### Scheduler (v1.12.0)
+
+```
+pqc-monitor-scheduler (pqc_monitor.py scheduler-daemon)
+  start: mark orphaned 'scheduled:%' runs 'interrupted'; repair stale next_run
+  every 60 s: SELECT scheduled_scans WHERE enabled AND next_run <= now
+    kind=scan           (one at a time, scan lock)
+      auto=serviceable   → list := domains whose latest level != na
+      auto=na_resolvable → DNS-check every na domain (dns_status)
+                           → list := na domains that resolve
+      orchestrator.scan_domains(list, notes="scheduled:#<id> <name>")
+    kind=ssllabs_sweep  (runs alongside scans)
+      SSLLabsSweep: serviceable + TLS on 443 + no fresh ssllabs record
+  on finish: last_run = now; next_run = start + interval
+  on shutdown mid-run: next_run untouched → re-runs at next start
 ```
 
 ### DNS enumeration pipeline
@@ -974,6 +1067,9 @@ enumerate_domain(domain)
 | `na` | — | No TLS service found — not applicable |
 
 `na` domains are excluded from all score averages, level counts, and roadmap generation.
+Since v1.12.0 an `na` domain additionally carries a `dns_status`; the
+unresolvable ones (`nxdomain` / `no_address`) are shown as "No DNS" and are
+not scanned.
 
 ---
 
@@ -981,7 +1077,7 @@ enumerate_domain(domain)
 
 **Current schema version:** 18 (managed by `data/migrations.py`). v18 added the
 auth reset tables/columns; **v19 is reserved for Phase 2 TOTP 2FA**, so any other
-pending schema change takes v20+.
+pending schema change takes v20+. (v1.12.0 added no migration.)
 
 ### Key tables
 
@@ -992,12 +1088,30 @@ pending schema change takes v20+.
 > `get_latest_domain_extra()` were full table scans. Created automatically at DB
 > init — no migration step.
 
+> **v1.12.0 (no migration):**
+> - `domain_extra` gained `data_type='dns_status'` (`{status, label, since,
+>   checked_at, addresses, previous_status}`) and the index
+>   `idx_domain_extra_type(data_type, recorded_at)` for the bulk readers
+>   (`latest_extra_bulk()` now also returns `_recorded_at`). Created in
+>   `_init_schema`.
+> - `domain_extra['ssllabs']` blobs gained `status_message`; ERROR results
+>   are stored too (no grade).
+> - `scheduled_scans.config_json` carries `kind` (`scan` | `ssllabs_sweep`)
+>   and, for auto schedules, `auto` (`serviceable` | `na_resolvable` |
+>   `ssllabs`). The sweep row has `domain_list_id` NULL.
+> - `scan_runs.notes` = `scheduled:#<id> <name>` for scheduler runs;
+>   `scan_runs.status` can be `interrupted` (scheduled run killed by a
+>   restart).
+> - `idx_assessments_trend` (covering) is created by
+>   `scripts/add_trend_index.py`, not at init (§2.12c).
+
 **`scan_runs`** — one row per scan job
 ```sql
-run_id TEXT PK, started_at TEXT, completed_at TEXT,
-status TEXT, domain_count INTEGER, sector TEXT, region TEXT,
+run_id TEXT PK, started_at TEXT, finished_at TEXT, domain_list TEXT (JSON),
+status TEXT, sector TEXT, region TEXT, notes TEXT,
 country_code TEXT, country TEXT
 ```
+`status`: `running` | `completed` | `failed` | `partial` | `interrupted`
 
 **`assessments`** — one row per domain per scan run
 ```sql
@@ -1044,11 +1158,18 @@ must_change_password INTEGER NOT NULL DEFAULT 0,
 session_epoch        INTEGER NOT NULL DEFAULT 0
 ```
 
+**`scheduled_scans`** — schedules (the scheduler's source of truth)
+```sql
+id INTEGER PK, name TEXT, domain_list_id INTEGER FK (NULL for the SSL Labs sweep),
+interval_days INTEGER, next_run TEXT, last_run TEXT, enabled INTEGER,
+config_json TEXT (JSON: kind, auto, sector, region, country_code, country, use_shodan),
+sector TEXT, region TEXT
+```
+
 **`domain_organisations`** — domain ↔ org membership
-**`domain_lists`** — saved domain lists with JSON domain array
-**`domain_extra`** — keyed blob store (chain, cipher_enum, group_enum, CDN, DNS, Shodan, ssllabs)
+**`domain_lists`** — saved domain lists with JSON domain array (auto lists: "All Domains (auto)", "No-TLS Domains (auto)")
+**`domain_extra`** — keyed blob store (chain, cipher_enum, group_enum, CDN, DNS, Shodan, ssllabs, dns_status)
 **`raw_scans`** — raw probe results per port per domain per run
-**`scheduled_scans`** — periodic scan schedules (sector/region metadata)
 **`users`**, **`user_domain_lists`**, **`user_organisations`**, **`user_communities`** — RBAC tables
 **`roadmaps`** — saved roadmap results
 **`ct_queries`**, **`ct_certificates`** — CT monitor results (read via `get_ct_summaries()`)
@@ -1069,14 +1190,14 @@ additionally check `require_admin` or `user.can("permission")`.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/api/summary` | user | Dashboard stats (excludes `na`) |
-| GET | `/api/assessments` | user | Latest assessments (domain-scoped for analysts) |
+| GET | `/api/summary` | user | Dashboard stats (excludes `na`); `stats.unresolvable_count` = no-TLS domains not in DNS (v1.12.0) |
+| GET | `/api/assessments` | user | Latest assessments (domain-scoped for analysts); `na` rows carry `dns_status` / `dns_since` (v1.12.0) |
 | GET | `/api/assessments?run_id=X` | user | Assessments for a specific run |
 | GET | `/api/assessments?service_type=X` | user | Filter by service type |
 | GET | `/api/assessments?org_id=X` | user | Filter by organisation |
 | GET | `/api/assessments?region=X` | user | Filter by region |
 | GET | `/api/assessments?country_code=X` | user | Filter by country |
-| GET | `/api/domain/<domain>` | user | Domain detail + history |
+| GET | `/api/domain/<domain>` | user | Domain detail + history; `extra` = cipher_enum, chain, cdn, ssllabs, group_enum, dns_status; `tls_ports` |
 | GET | `/api/trends` | user | Time-bucketed trends. `scope=all\|org:<id>\|community:<id>`, `range=30d\|90d\|180d\|365d\|730d\|all`, `granularity=auto\|day\|week\|month\|quarter`, `mode=snapshot\|activity`, `stale_days=N`. Returns `{meta, buckets[]}` |
 | GET | `/api/trends/scopes` | user | Scopes selectable on the Trends tab for the current user |
 | GET | `/api/trends/domains` | user | Assessed domains in a trends scope (`scope=` as above) |
@@ -1106,7 +1227,7 @@ managers. The DB aggregate functions filter to that set when provided.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET/POST | `/login` | none | Login form + submit |
+| GET/POST | `/login` | none | Login form + submit (a `#fragment` deep link survives the redirect) |
 | GET | `/logout` | user | Ends the session |
 | GET/POST | `/change-password` | user | Self-service change (requires current password; forced when `must_change_password`) |
 | GET/POST | `/forgot` | none | Request a reset link (generic response, per-IP rate limited) |
@@ -1121,6 +1242,8 @@ synchroniser token on server-rendered forms, same-origin check on the JSON API.
 |--------|------|------|-------------|
 | GET | `/app/api/ssllabs/<domain>` | user | Poll cached/in-flight assessment; persists when READY |
 | POST | `/app/api/ssllabs/<domain>/refresh` | `scan.run` | Trigger a fresh assessment (`startNew=on`, `publish=off`) |
+
+Bulk collection is the scheduled sweep (§2.12b), not an endpoint.
 
 ### Admin (`/admin/*`, admin only)
 
@@ -1137,7 +1260,8 @@ synchroniser token on server-rendered forms, same-origin check on the JSON API.
 | POST | `/api/reassess` | Re-score existing scan data |
 | POST | `/api/discover` | AI-powered domain discovery |
 | POST | `/api/dns-enumerate` | DNS deep-dive enumeration |
-| GET | `/api/runs` | List scan runs |
+| GET | `/api/runs` | List scan runs (includes `notes` and the full `domain_list` JSON per run) |
+| GET/POST | `/api/schedules` | List / add schedules (picked up by the daemon within a minute) |
 
 ### Organisations
 
@@ -1200,6 +1324,10 @@ admins. Applied to all group report endpoints.
 | Roadmap | ✓ | ✓ (view only) | ✓ (view only) |
 | Settings | ✓ | ✓ | ✓ |
 
+The domain detail screen (`#domain/<name>`) has no tab; it is reachable from
+Dashboard and Roadmap for any domain the user can see (`/api/domain` is
+domain-scoped; out-of-scope domains show "You do not have access").
+
 ---
 
 ## 8. Known Issues & Technical Debt
@@ -1211,7 +1339,7 @@ Fix: move cipher strings to a JSON data file. See §10 T1-1.
 
 ### 8.2 `dashboard/app.py` is a monolith
 
-~2300-line file with HTML+CSS+JS as a Python string. New views should use
+~3200-line file with HTML+CSS+JS as a Python string. New views should use
 `static/` + Jinja2 templates.
 
 ### 8.3a Group enumeration adds ~15 TCP connections per domain
@@ -1252,6 +1380,21 @@ This file has been accidentally doubled twice during edits. After every change,
 verify: `grep -c "def _dnsdumpster_api" scanner/dns_enumerator.py` must return `1`.
 Also run `python3 -m py_compile scanner/dns_enumerator.py` before deploying.
 
+### 8.7 Found during v1.12.0 (not yet addressed)
+
+- **`/api/runs` payload.** Each run row includes its full `domain_list` JSON
+  (up to ~5,200 names); 20 runs ≈ MBs per Scan-tab load. Return a count
+  instead.
+- **`/api/assessments?region=` / `?country_code=`** call
+  `db.get_domain_org()` once per row (N queries); the dashboard filters
+  client-side so it is not on the default path.
+- **A scheduled scan interrupted by a restart re-runs from the beginning**
+  (the scan itself has no resume; the SSL Labs sweep does). Deploys that
+  touch `scanner/`/`scheduler/` during a monthly run cost a full rerun.
+- **Header nav overflows** horizontally below ~600 px.
+- `apscheduler` can be dropped from `requirements.txt` (no longer imported
+  by the scheduler) once confirmed unused elsewhere.
+
 ---
 
 ## 9. Critical Implementation Notes
@@ -1263,6 +1406,8 @@ Also run `python3 -m py_compile scanner/dns_enumerator.py` before deploying.
 - `app_factory.create_app()` is the production entry point
 
 **Always work in `app_factory.py` + `app_routes.py` + `admin/routes.py`.**
+(The legacy `/api/domain` returned `group_enum` while the production one did
+not until v1.12.0 — when adding fields, update `app_routes.py`.)
 
 ### 9.2 HTML structure of dashboard views
 
@@ -1282,8 +1427,8 @@ while i < len(body):
     if body[i:i+4] == '<div': depth += 1
     elif body[i:i+6] == '</div>': depth -= 1
     chunk = body[i:i+60]
-    for v in ['view-dashboard','view-domains','view-scan','view-trends',
-              'view-ct','view-roadmap','view-settings','view-group-report']:
+    for v in ['view-dashboard','view-domain','view-domains','view-scan','view-trends',
+              'view-ct','view-roadmap','view-settings','view-group_report']:
         if 'id=\"'+v+'\"' in chunk: view_depths[v] = depth
     i += 1
 for v,d in view_depths.items(): print(f'  {\"OK\" if d==2 else \"WRONG depth=\"+str(d)}  {v}')
@@ -1351,16 +1496,54 @@ does not exist and will raise a KeyError.
 - `StartLimitIntervalSec`/`StartLimitBurst` belong in `[Unit]`, not `[Service]`
 - No inline bash with shell variables in `ExecStartPre` — use a separate script
 - `Type=simple` is correct for gunicorn
+- The scheduler must **not** `Requires=` the web unit (a web restart would
+  restart it and kill in-flight scheduled scans); use `Wants=` + `After=`.
+- Unit files are not synced by `deploy.sh`; install them by hand.
 
 ### 9.10 level="na" — no-TLS domains
 
 Must be excluded from: score averages, level counts, roadmap generation,
-distribution charts. Present in the "No TLS" stat card on the dashboard.
+distribution charts, the domain-view switcher and the SSL Labs sweep. Present
+in the "No TLS" stat card on the dashboard. Since v1.12.0 each na domain is
+DNS-checked monthly (`dns_status`); resolvable ones are rescanned by the
+no-TLS auto schedule, unresolvable ones are shown as "No DNS" and skipped.
+A domain's latest `dns_status` may be stale once it becomes serviceable again
+— always intersect `unresolvable_domains()` with the current na set.
 
 ### 9.11 deploy.sh trigger sets
 
 `scripts/deploy.sh` restarts services only when files in their trigger sets are
 synced. New Python modules must be added to `WEB_TRIGGERS` or `SCHEDULER_TRIGGERS`.
+`scheduler/` is in **both** since v1.12.0 (the web app imports
+`scheduler.schedule_audit` and `ScanScheduler`).
+
+### 9.12 SSL Labs API behaviour (verified 2026-09-19)
+
+- `analyze?fromCache=on&maxAge=H` returns a cached report when one exists,
+  but on a cache **miss it starts a new assessment** (`DNS`/`IN_PROGRESS`).
+  Never call it in bulk outside `SSLLabsSweep`.
+- `/info` gives `maxAssessments`, `currentAssessments`,
+  `newAssessmentCoolOff` (ms) for the registered email — the sweep derives
+  its concurrency and start spacing from it.
+- 429 = too many concurrent/new assessments for this client; 529 = service
+  overloaded; 503 = maintenance; 441 = email not registered/invalid.
+- SSL Labs tests HTTPS (443) only; mail-only hosts return ERROR
+  ("Unable to connect to the server") — the sweep only targets domains with a
+  successful 443 handshake in their latest run.
+
+### 9.13 Scheduler rules (v1.12.0)
+
+- `scheduled_scans.next_run` is authoritative; never rely on process uptime.
+  Change a schedule by updating the row — the daemon picks it up within a
+  minute.
+- Run labels: anything started by the scheduler must pass
+  `notes="scheduled:#<id> <name>"` to `scan_domains()` (the `interrupted`
+  marking and the Scan History Source column depend on the prefix).
+- Auto schedules are identified by `config_json.auto` (or, for legacy row #1,
+  by name). Use `ensure_auto_schedules()` / `--create-monthly`, not manual
+  INSERTs, to create them.
+- Tests drive the scheduler synchronously with `tick()` + `wait_idle()` and a
+  fake orchestrator (`tests/test_scheduler_sweep_dns.py`).
 
 ---
 
@@ -1416,7 +1599,8 @@ synced. New Python modules must be added to `WEB_TRIGGERS` or `SCHEDULER_TRIGGER
 ### Tier 3 — New modules, moderate complexity
 
 - **[T3-2]** Geographic map view (choropleth + dot; requires T2-3; Leaflet.js)
-- ~~**[T3-3]** SSL Labs integration~~ — **delivered in v1.9.0** (cache-only during scans + on-demand fresh; results in domain_extra; display-only grade)
+- ~~**[T3-3]** SSL Labs integration~~ — **delivered in v1.9.0**; bulk collection
+  reworked in v1.12.0 as the throttled weekly sweep (display-only grade)
 - **[T3-4]** Sector benchmarking (AVG score by sector+region across all runs)
 
 ### Tier 4 — Significant architectural changes
@@ -1442,10 +1626,14 @@ synced. New Python modules must be added to `WEB_TRIGGERS` or `SCHEDULER_TRIGGER
 ### Scheduling
 
 - **[SCH-1]** ~~Schedule coverage audit + monthly auto-schedule~~ —
-  **delivered in v1.11.0** (`scheduler/schedule_audit.py` + `scripts/schedule_audit.py`). Possible follow-up:
-  a low-frequency discovery sweep for `level=na` domains (separate schedule or a
-  port-open-only mode) so late-appearing services are eventually caught; pairs
-  with P7 (scheduler watchdog).
+  **delivered in v1.11.0** (`scheduler/schedule_audit.py` + `scripts/schedule_audit.py`).
+  ~~Follow-up: a low-frequency discovery sweep for `level=na` domains~~ —
+  **delivered in v1.12.0** as the monthly no-TLS rescan with DNS presence
+  tracking.
+- **[SCH-2]** Resume for interrupted scheduled scans (skip domains already
+  assessed in the interrupted run) — see §8.7.
+- **[SCH-3]** Surface schedule health on the dashboard (next run, last run,
+  overdue flag, last sweep summary) — pairs with P7/P8.
 
 ---
 
@@ -1487,6 +1675,8 @@ the audit and remove orphans **before** enabling, then re-run
 scan-keyed tables (`raw_scans.run_id` etc.) only benefit if their FKs are
 declared — check the CREATE statements and add FK clauses via migration where
 missing (table-rebuild pattern, or accept trigger-based checks from P3).
+(v1.12.0: the SSL Labs sweep schedule row has `domain_list_id` NULL — keep the
+FK nullable.)
 
 **Test:** insert a `domain_organisations` row with a bogus `org_id` → must
 raise `IntegrityError`.
@@ -1591,10 +1781,12 @@ contradicts the inference.
 
 **Why:** crashed runs stay `status='running'` forever (audit section G).
 
-**How:** in the APScheduler daemon (`scheduler/`), add a periodic job (and a
-startup pass) that sets `status='failed'`, appending a watchdog note, for
-runs `running` longer than a configurable timeout (`config.yaml` key, default
-24h). Mirrors the audit's `STUCK_RUN_HOURS`.
+**Partly delivered in v1.12.0:** at daemon start, runs with notes
+`scheduled:%` still `running` are marked `interrupted`
+(`Database.mark_interrupted_runs`). **Remaining:** manual / web-initiated
+runs, and a periodic (not just startup) pass with a configurable timeout
+(`config.yaml` key, default 24h), mirroring the audit's `STUCK_RUN_HOURS`.
+Add it as a job kind in the DB-driven scheduler (no APScheduler).
 
 ### P8 — Schedule the audit itself (M)
 
@@ -1603,10 +1795,10 @@ dashboard number looks odd.
 
 **How:** refactor `scripts/audit_db_consistency.py` so the checks are
 importable (move the check functions + `Report` into `data/consistency.py`;
-the script becomes a thin CLI). Add a weekly APScheduler job that runs the
-checks and stores the ERROR/WARN/INFO counts (new small table
-`consistency_reports` or an `audit_log` action). Dashboard admin card shows
-the latest counts with a drill-down to the text report.
+the script becomes a thin CLI). Add a weekly job kind to the DB-driven
+scheduler that runs the checks and stores the ERROR/WARN/INFO counts (new
+small table `consistency_reports` or an `audit_log` action). Dashboard admin
+card shows the latest counts with a drill-down to the text report.
 
 **Suggested order of work for the next session:**
 1. Run the audit on production; apply reviewed fixes for ERRORs
@@ -1620,7 +1812,8 @@ the latest counts with a drill-down to the text report.
 
 ## Appendix A — Running the Test Suite
 
-Current suite: **523 tests, all passing** on `main` (11 modules).
+Current suite at v1.12.0: **597 tests, all passing** on `main` (includes
+`test_trends.py` and `test_scheduler_sweep_dns.py`, both new in v1.12.0).
 
 ```bash
 source .venv/bin/activate
@@ -1651,6 +1844,18 @@ journalctl -u pqc-monitor-scheduler -f
 # Deploy
 sudo scripts/deploy.sh --dry-run
 sudo scripts/deploy.sh
+# after a systemd unit change (not handled by deploy.sh)
+sudo cp systemd/pqc-monitor-scheduler.service /etc/systemd/system/ && sudo systemctl daemon-reload
+
+# Schedules (v1.12.0 — no restart needed after changes)
+./pqc_monitor.py list-schedules
+python3 scripts/schedule_audit.py                                # read-only audit
+python3 scripts/schedule_audit.py --create-monthly --dry-run
+python3 scripts/schedule_audit.py --create-monthly --refresh-dns # create/refresh auto schedules + DNS check
+
+# SSL Labs (normally the weekly sweep does this)
+./pqc_monitor.py ssllabs-sweep --dry-run      # pending hosts + account limits
+./pqc_monitor.py ssllabs-sweep --limit 20     # small manual batch
 
 # Connectivity tests
 bash scripts/shodan-test.sh         # tests 8.8.8.8 (free) + google.com (paid)
@@ -1670,21 +1875,23 @@ python3 scripts/fix_notls_level.py
 
 ## Appendix C — Adding a New Feature: Checklist
 
-1. **New DB columns** → add migration to `data/migrations.py`, bump version
+1. **New DB columns** → add migration to `data/migrations.py`, bump version (v19 is reserved for TOTP)
 2. **New DB methods** → add to `data/database.py` `Database` class
 3. **New scan step** → add module in `scanner/`, wire into `orchestrator._scan_domain`
+   (external rate-limited services such as SSL Labs belong in a scheduled job, not the scan)
 4. **New API endpoint** → `app_routes.py` (analyst/community_manager) or `admin/routes.py` (admin)
    - Always add `@require_auth` (or `@require_admin` / `@require_community_manager`)
    - Always call `filter_assessments()` for domain data
    - Always call `_allowed_org_ids()` for community-scoped group data
 5. **New dashboard view** → add HTML view div inside `<div class="main">` in `dashboard/app.py`
    - Verify all view divs at depth=2 using script in §9.2
-6. **New tests** → add to appropriate `tests/test_*.py`
-7. **Version bump** → edit `VERSION` file, add row to §2 table, add §2.x detail section
-8. **CHANGELOG** → add entry under new version heading
-9. **RBAC** → add permission strings to `PERMISSIONS` in `auth/models.py` if needed
-10. **Deploy script** → add new Python module to `WEB_TRIGGERS` / `SCHEDULER_TRIGGERS`
-11. **Lint check** → `python3 -m py_compile <file>` before delivering any Python file
+6. **New periodic job** → add a `kind` to `ScanScheduler._execute()` and create its row via `schedule_audit` (no APScheduler)
+7. **New tests** → add to appropriate `tests/test_*.py`
+8. **Version bump** → edit `VERSION` file, add row to §2 table, add §2.x detail section
+9. **CHANGELOG** → add entry under new version heading
+10. **RBAC** → add permission strings to `PERMISSIONS` in `auth/models.py` if needed
+11. **Deploy script** → add new Python module to `WEB_TRIGGERS` / `SCHEDULER_TRIGGERS`
+12. **Lint check** → `python3 -m py_compile <file>` before delivering any Python file
 
 ---
 
@@ -1692,14 +1899,17 @@ python3 scripts/fix_notls_level.py
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/deploy.sh` | Incremental git→/opt/pqc-monitor sync; restarts only affected services |
+| `scripts/deploy.sh` | Incremental git→/opt/pqc-monitor sync; restarts only affected services (does not install systemd units) |
 | `scripts/sync-tree.sh` | Full-tree repo→/opt audit/sync (excludes `.git`; never clobbers local config unless forced) |
+| `scripts/add_trend_index.py` | One-time covering index `idx_assessments_trend` for Trends; run with services stopped |
 | `scripts/reassess_all.py` | Reassess/rescan every domain (`--rescan`, `--only-missing`, `--only-missing-groups`) |
 | `scripts/pqc_selftest.py` | PQC group-enum self-test (GREASE gate first) + testssl.sh cross-check |
 | `scripts/fix_mx_entries.py` | Repair malformed MX host keys across domain-keyed tables + `dns_enum` blobs |
 | `scripts/backfill_services_assessed.py` | Backfill `services_assessed` / `key_types` on old assessment rows |
 | `scripts/mail_selftest.py` | Verify SMTP relay credentials from the shell (local + starttls + ssl) |
-| `scripts/schedule_audit.py` | Schedule coverage audit; `--create-monthly` auto-schedule (excludes `level=na`) |
+| `scripts/schedule_audit.py` | Schedule coverage audit; `--create-monthly` creates/refreshes the auto schedules (main, no-TLS rescan, SSL Labs sweep) and repairs stale `next_run`; `--refresh-dns`, `--no-ssllabs`, `--sweep-interval-days`, `--include-na` |
+| `pqc_monitor.py ssllabs-sweep` | Run the throttled SSL Labs sweep now (`--dry-run`, `--limit`, `--concurrency`, `--max-age-days`, `--domain`) |
+| `pqc_monitor.py list-schedules` | List schedules with kind, next and last run |
 | `scripts/shodan-test.sh` | Two-tier Shodan key + plan test (8.8.8.8 free; google.com paid) |
 | `scripts/dnsdumpster-test.sh` | DNSDumpster API key test; reports record counts per type |
 | `scripts/fix_notls_level.py` | One-time retroactive fix for critical→na no-TLS rows |

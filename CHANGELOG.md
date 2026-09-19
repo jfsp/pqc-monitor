@@ -74,6 +74,15 @@ This project uses [Semantic Versioning](https://semver.org/).
   so web restarts no longer restart it.
 
 ### Fixed
+- **Trends returned HTTP 504 after the caching change.** The cache-validity
+  check used `MAX(assessed_at)`, which has no index, so every request (cache
+  hits included) scanned the whole assessments table including
+  `findings_json`. On the 1 GB production VM that was disk-bound and exceeded
+  nginx's 120 s timeout. The check is now `COUNT(*), MAX(id)` (index-only).
+  New optional covering index `idx_assessments_trend`
+  (`scripts/add_trend_index.py`) lets trend reads skip the table entirely.
+  The domain picker request now waits for the trends response instead of
+  running in parallel on the second Gunicorn worker.
 - **Trend charts were averaging partial runs.** `get_sector_trends()` grouped
   by scan run, so one-domain rescans and ad-hoc batches were plotted as
   portfolio averages (swings between 0 and 78) and PQC adoption fell to 0

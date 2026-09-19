@@ -1309,9 +1309,14 @@ synced. New Python modules must be added to `WEB_TRIGGERS` or `SCHEDULER_TRIGGER
   Chart.js date adapter or extra CDN is needed.
 - `/api/trends` results are cached per Gunicorn worker (`_TRENDS_CACHE` in
   `app_routes.py`, LRU 64, TTL 300 s). Key: `db.get_assessments_version()`
-  (count, max id, max assessed_at), SHA-1 of the scope's domain set, all
+  (count, max id), SHA-1 of the scope's domain set, all
   params and the schedule intervals. `meta.cached` / `meta.compute_ms` report
   it. The browser keeps its own 120 s cache per query string.
+- Every query on the `/api/trends` request path must avoid a table scan of
+  `assessments` (rows carry large `findings_json`; production has 1 GB RAM).
+  `get_assessments_version()` is `COUNT(*), MAX(id)` only; a test checks the
+  query plan. Run `scripts/add_trend_index.py` once per database (services
+  stopped) to create `idx_assessments_trend`; the code works without it.
 - Production runs behind a Cloudflare Tunnel (cloudflared → nginx on
   localhost). Measured: full read + daily compute ≈ 0.4 s; the 4–5 s seen
   were requests queued behind `/api/assessments` on 2 sync workers.

@@ -426,9 +426,9 @@ class Database:
         aset = {d.lower().strip() for d in domains if d}
         if not aset:
             return []
-        # lower(domain) cannot use idx_assessments_domain, but domains are not
-        # normalised on write, and a scan inside SQLite that returns only the
-        # matching rows is far cheaper than building dicts for every row.
+        # lower(domain) cannot seek an index, but domains are not normalised
+        # on write. With idx_assessments_trend (scripts/add_trend_index.py)
+        # this is a scan of that small covering index, not of the table.
         vals = sorted(aset)
         with self._connect() as conn:
             if len(vals) <= self._TREND_SQL_FILTER_MAX:
@@ -451,15 +451,21 @@ class Database:
 
     def get_assessments_version(self) -> tuple:
         """
-        Cheap change marker for the assessments table (row count, max id,
-        latest assessed_at). Any insert, delete or re-assessment changes it;
-        used to invalidate cached trend results.
+        Cheap change marker for the assessments table: (row count, max id).
+        Re-assessments insert new rows and deletions lower the count, so any
+        change that affects trends changes the marker. Used to invalidate
+        cached trend results.
+
+        Must stay cheap: it runs on every /api/trends request, cache hits
+        included. COUNT(*) walks the smallest index and MAX(id) is a rowid
+        lookup. Do NOT add MAX(assessed_at): assessed_at has no index, so it
+        forces a scan of the whole table, findings_json included (the cause
+        of 504s on the 1 GB production VM).
         """
         with self._connect() as conn:
             r = conn.execute(
-                "SELECT COUNT(*), MAX(id), MAX(assessed_at) FROM assessments"
-            ).fetchone()
-        return (r[0], r[1], r[2])
+                "SELECT COUNT(*), MAX(id) FROM assessments").fetchone()
+        return (r[0], r[1])
 
     def get_scan_schedule_intervals(self, domains=None) -> list:
         """

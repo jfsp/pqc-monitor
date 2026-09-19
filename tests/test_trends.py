@@ -419,6 +419,37 @@ class TestTrendRows(unittest.TestCase):
             "level": "weak", "findings": [], "has_pqc": False})
         self.assertNotEqual(v1, self.db.get_assessments_version())
 
+    def _plan(self, sql):
+        with self.db._connect() as c:
+            return " ".join(r[-1] for r in c.execute("EXPLAIN QUERY PLAN " + sql))
+
+    def test_version_query_never_scans_table(self):
+        """Regression: MAX(assessed_at) forced a full table scan (504s in prod)."""
+        plan = self._plan("SELECT COUNT(*), MAX(id) FROM assessments")
+        self.assertNotRegex(plan, r"SCAN assessments(?! USING)")
+        import inspect
+        from data.database import Database
+        self.assertNotIn("MAX(assessed_at)",
+                         inspect.getsource(Database.get_assessments_version).split('"""')[-1])
+
+    def test_trend_rows_use_covering_index_when_present(self):
+        import subprocess
+        script = os.path.join(os.path.dirname(__file__), "..", "scripts", "add_trend_index.py")
+        out = subprocess.run([sys.executable, script, "--db", self.db.db_path],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("COVERING INDEX idx_assessments_trend", out.stdout)
+        cols = "SELECT domain, assessed_at, score, level, has_pqc FROM assessments"
+        self.assertIn("COVERING INDEX idx_assessments_trend", self._plan(cols))
+        self.assertIn("COVERING INDEX idx_assessments_trend",
+                      self._plan(cols + " WHERE lower(domain) IN ('a.com')"))
+        # idempotent, and results unchanged
+        again = subprocess.run([sys.executable, script, "--db", self.db.db_path],
+                               capture_output=True, text=True)
+        self.assertIn("already exists", again.stdout)
+        got = {r["domain"] for r in self.db.get_trend_rows(["A.com", "b.com"])}
+        self.assertEqual(got, {"a.com", "B.com"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2412,12 +2412,17 @@ async function loadTrends(force) {
     granularity: trendState.gran, mode: trendState.mode,
   }).toString();
   const seq = ++trendSeq;
-  if (trendDomainsScope !== trendState.scope) populateDomainSelector();
+  // The domain picker is refreshed only AFTER the trends response, so the two
+  // requests never occupy both sync Gunicorn workers at once.
+  const refreshPicker = () => {
+    if (trendDomainsScope !== trendState.scope) populateDomainSelector();
+  };
   const hit = trendClientCache.get(q);
   if (!force && hit && Date.now() - hit.t < TREND_CLIENT_TTL) {
     trendData = hit.data;
     setTrendLoading(false);
     renderTrends();
+    refreshPicker();
     return;
   }
   setTrendLoading(true);
@@ -2435,6 +2440,7 @@ async function loadTrends(force) {
     trendData = data;
     setTrendLoading(false);
     renderTrends();
+    refreshPicker();
   } catch (e) {
     if (seq !== trendSeq) return;
     setTrendLoading(false, 'Could not load trends: ' + (e && e.message ? e.message : e));

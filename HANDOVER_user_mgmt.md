@@ -1,14 +1,21 @@
 # PQC-Monitor — User Management Enhancements: Implementation Handover
 
-Status: **Phase 1 DELIVERED (2026-07-31), verified on the live server.**
+Status: **Phase 1 DELIVERED (2026-07-31), verified on the live server, released
+in v1.11.0 (tag `v1.11.0`).**
 Phase 2 (2FA) + self-service email change remain for a later session. This
 document is self-sufficient to implement Phase 2 from, together with the
 `pqc-monitor` source tree.
 
-## Phase 1 — delivered & verified (proposed v1.12.0)
+## Phase 1 — delivered & verified (released in v1.11.0)
 Shipped as ready-to-deploy files; 95/95 existing auth tests pass; password
 reset and session-invalidation confirmed working against a Gmail relay on the
 live server.
+
+> **Open follow-up — missing tests.** The Phase 1 commit message announced new
+> unit and Flask integration tests (token lifecycle, mailer transports, CSRF
+> block/allow, session-kill, `must_change`). Those tests are **not present in
+> `tests/` on `main`** — the auth suite is still the 95 pre-existing tests. Add
+> them before Phase 2 modifies the login flow.
 
 What shipped:
 - **Mailer** `auth/mailer.py` — optional; `mode: local` (local MTA) or `relay`
@@ -67,17 +74,23 @@ between sessions. Phase 1 (mailer + reset) is deployed and verified; Phase 2
 
 ## Current state (verified against the tree, do not assume — re-read on start)
 
-Files: `auth/store.py` (all `password_hash` access, PBKDF2-SHA256 600k),
-`auth/middleware.py` (sessions, `current_user()`, decorators, `AuthProvider`
-ABC), `auth/models.py` (User, roles, permissions), `auth/auth_routes.py`
-(`/login`, `/logout`, `/change-password` — already requires current password),
-`admin/routes.py` (`_ADMIN_HTML` panel + user CRUD API; `POST /admin/api/users/<uid>/password`
-is the admin reset, correctly no old-password), `app_factory.py` (blueprint
-wiring, session cookie flags, `secret_key`).
+Files: `auth/store.py` (all `password_hash` access, PBKDF2-SHA256 600k, reset
+tokens, `session_epoch`), `auth/middleware.py` (sessions, `current_user()` incl.
+epoch check, decorators, `AuthProvider` ABC), `auth/models.py` (User, roles,
+permissions), `auth/auth_routes.py` (`/login`, `/logout`, `/change-password` —
+requires current password — plus `/forgot` and `/reset/<token>`),
+`auth/mailer.py` (optional SMTP mailer, Phase 1), `auth/csrf.py` (synchroniser
+token + same-origin guard, Phase 1), `admin/routes.py` (`_ADMIN_HTML` panel +
+user CRUD API; `POST /admin/api/users/<uid>/password` is the admin reset,
+correctly no old-password, accepts `{"must_change": true}`), `app_factory.py`
+(blueprint wiring, session cookie flags, CSRF + mailer wiring, `secret_key`
+hardening).
 
 Key facts that constrain the design:
-- **Schema version is 17.** Add new migrations as **v18, v19** at the END of
-  `MIGRATIONS` in `data/migrations.py` — never edit existing entries. Runner:
+- **Schema version is 18** (v18 = `password_reset_tokens`,
+  `users.must_change_password`, `users.session_epoch`). Add new migrations at
+  the END of `MIGRATIONS` in `data/migrations.py` — never edit existing entries.
+  **v19 is reserved for Phase 2 TOTP 2FA**; anything else takes v20+. Runner:
   `apply_migrations()` is idempotent and tolerates "column already present".
 - Auth tables evolve through `data/migrations.py` now (that is where
   `user_organisations` v-tables were added), **not** through
@@ -89,12 +102,17 @@ Key facts that constrain the design:
   order. `Database()` (which runs migrations) is constructed at startup before
   AuthStore serves requests.
 - Sessions: signed cookie, `HttpOnly`, `SameSite=Lax`, `Secure` when HTTPS,
-  8h. `current_user()` reloads the user each request and drops the session if
-  `is_active` is false. There is **no server-side session id** to revoke
-  individual sessions today.
-- **No SMTP/email code exists anywhere.** No CSRF tokens. No email-format
-  validation. Login IP rate-limiter is per-process in-memory. `secret_key`
-  falls back to a per-process random value if unset (multi-worker hazard).
+  8h. `current_user()` reloads the user each request, drops the session if
+  `is_active` is false, and rejects a cookie whose `session_epoch` is stale.
+  There is still **no server-side session id**, so individual sessions cannot be
+  revoked selectively — only the all-sessions epoch bump exists.
+- Post-Phase-1 state (was listed here as missing, now shipped): the optional
+  SMTP mailer exists (`auth/mailer.py`), CSRF is enforced app-wide
+  (`auth/csrf.py`), email-format validation runs in `create_user`/`update_user`,
+  `authenticate()` uses a constant-time dummy hash for unknown users, and
+  `secret_key` hard-fails in production instead of the per-process random
+  fallback. Still open: the **login IP rate-limiter is per-process in-memory**
+  (does not aggregate across Gunicorn workers).
 - Secrets policy (memory): relay password lives in **`.env`**, which is in the
   `PROTECTED` array in `deploy.sh` (must remain `config/config.yaml`, `.env`,
   `.venv/` only). Never commit credentials to `config.yaml`.

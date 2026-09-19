@@ -6,6 +6,119 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+---
+
+## [1.11.0] — 2026-07-31
+
+Released as tag `v1.11.0`. Three independently-deployable changes plus a
+follow-up, delivered in the 2026-07-29/31 sessions and verified on the live
+server.
+
+### Added
+- **User management Phase 1 — self-service password reset + auth hardening**
+  (spec: `HANDOVER_user_mgmt.md`):
+  - `auth/mailer.py` — optional SMTP mailer, `mode: local` (local MTA) or
+    `relay` (STARTTLS/SSL: Gmail app-password, Proton Bridge). Pure stdlib
+    `smtplib`; `send()` never raises into the request path.
+  - Public `/forgot` and `/reset/<token>`: single-use SHA-256-hashed tokens,
+    default 45-minute TTL, newest-token-wins, generic responses regardless of
+    account existence, per-IP rate limit, fully audited, no auto-login.
+  - **Session invalidation on password change** — `users.session_epoch` is
+    bumped by `set_password`, written into the session at login and checked in
+    `current_user()`. Reset and admin-reset sign out ALL sessions; a
+    self-service change re-issues the current device so only OTHER sessions
+    drop.
+  - **Forced password change** — `users.must_change_password`; admin reset
+    accepts `{"must_change": true}`; flagged users are pinned to
+    `/change-password` (API returns 403) until they set a new password.
+  - **App-wide CSRF** (`auth/csrf.py`) — form synchroniser token plus a strict
+    same-origin (Origin/Referer) guard for the JSON API, enforced via
+    `before_request`, skipped under `TESTING`.
+  - Hardening: email-format validation in `create_user`/`update_user`;
+    constant-time dummy hash in `authenticate()` for unknown users;
+    `secret_key` hard-fails at startup in production instead of falling back to
+    a silent per-process random value.
+  - `scripts/mail_selftest.py` — verify relay credentials from the shell.
+    `relay_password` is config-or-env (`PQC_MAIL_PASSWORD` overrides
+    `mail.relay_password`).
+  - **Schema v18**: `password_reset_tokens`, `users.must_change_password`,
+    `users.session_epoch`.
+- **Schedule coverage audit + monthly auto-schedule** —
+  `scheduler/schedule_audit.py` (logic) + `scripts/schedule_audit.py` (CLI).
+  Reports which assessed domains are in no enabled schedule and can
+  create/refresh ONE auto-managed monthly schedule (`--create-monthly`, default
+  30 days, `--interval-days` overrides). Idempotent and cron-safe; writes the
+  schedule tables directly rather than going through APScheduler, so the
+  scheduler service must be restarted after a write. `level=na` domains are
+  **excluded by default** (`--include-na` opts them back in) — they are the
+  worst-case unit of work (~13 timeout-bound connects). Selection is by the
+  *current* latest level, so domains reconcile in and out automatically.
+- **Dashboard shows TLS-serving ports** — `api_domain_detail` returns
+  `tls_ports` derived from the latest run's successful probes (not the
+  truncated `scans[:5]`); `dashboard/app.py` renders "TLS ports" in the summary
+  box and "TLS-serving ports" in the drill-down. `_PORT_SERVICE` labels
+  direct-TLS and STARTTLS ports; unknown ports render as "port N".
+
+### Notes
+- Migration numbering: v18 was consumed by the auth reset feature. The §10
+  backlog previously earmarked v18 for T1-2 (geography on domain lists); that
+  and any other pending schema change must take the next free version.
+  Phase 2 (TOTP 2FA) is reserved for **v19**; the next schema feature after
+  that is v20+.
+- 95/95 existing auth tests pass. Automated coverage for the Phase 1 paths
+  (token lifecycle, mailer transports, CSRF block/allow, session-kill,
+  must_change) is **not yet in `tests/`** — see HANDOVER_user_mgmt.md.
+
+---
+
+## [1.10.0] — 2026-07-12
+
+### Fixed
+- **PQC detection was wrong for every domain ever scanned**: `has_pqc` was
+  decided by regex-matching PQC indicators (`mlkem`, `kyber`, …) against the
+  **cipher suite name**. In TLS 1.3 the suite encodes only AEAD + hash
+  (`TLS_AES_256_GCM_SHA384`); the key-exchange group — where ML-KEM lives — is
+  carried in the `supported_groups`/`key_share` extensions and never appears in
+  the suite name, so the regex could not fire for any real server. `has_pqc`
+  was therefore `False` for every row in the database. Detection now enumerates
+  the key-exchange groups the server **offers**.
+- **`get_latest_domain_extra()` full-table-scanned `domain_extra`**: the only
+  index led with `run_id` while the query filters on `domain`. New index
+  `idx_domain_extra_domain(domain, data_type, recorded_at)`, created via
+  `CREATE INDEX IF NOT EXISTS` at DB init (no migration step). Also affected the
+  score-only reassess path and the dashboard domain-detail view.
+
+### Added
+- **`scanner/group_enum.py`** — offered key-exchange group enumerator. Speaks
+  TLS 1.3 directly (RFC 8446 §4.1.4): for each candidate group it sends a
+  ClientHello with `supported_groups=[G]` and an **empty `key_share`**; a
+  HelloRetryRequest naming G means G is offered, a fatal alert means it is not.
+  The handshake is never completed, so no local ML-KEM implementation is
+  required. Grading is on *offered*, not *negotiated*, groups — the negotiated
+  group is a property of the client/server pair. `pqc_grading_basis` records
+  which basis was used (`offered` = authoritative, `negotiated` = fallback).
+  Cost: ~15 TCP connections per domain.
+- **GREASE soundness control** — `probe_negative_control()` probes RFC 8701
+  GREASE codepoints, which no conformant server may select. If one is reported
+  as offered, the enumerator is producing false positives and every result is
+  suspect.
+- **`scripts/pqc_selftest.py`** — standalone self-test (not wired into
+  startup): runs the GREASE gate first, then exercises the real scanner path
+  against reference hosts and cross-checks against **testssl.sh** (which
+  reports *offered* KEMs; sslscan reports only the negotiated group and cannot
+  corroborate). Requires a full testssl checkout at `/opt/testssl/`; honours
+  `$PQC_TESTSSL`.
+- **`data/database.py`**: `domains_with_successful_extra()` and
+  `latest_extra_bulk()` — bulk helpers replacing one query per domain.
+- **`scripts/reassess_all.py`**: `--only-missing-groups` for the group-enum
+  backfill; a failed `group_enum` blob counts as missing so errored domains are
+  retried. A full network rescan is required to fix historical `has_pqc` —
+  score-only reassess cannot, since no historical row has a `group_enum` blob.
+
+---
+
 ## [1.9.1] — 2026-07-09
 
 ### Fixed
@@ -62,7 +175,7 @@ This project uses [Semantic Versioning](https://semver.org/).
   correct row — drops the duplicate, or deletes rows whose value has no
   recoverable hostname. No network; idempotent; `--dry-run` / `--config`
   / `--db`.
-- **Tests**: `tests/test_mx_and_smtp.py` (12 tests) — MX normalisation,
+- **Tests**: `tests/test_mx_and_smtp.py` (13 tests) — MX normalisation,
   candidate building, STARTTLS port coverage, protocol dispatch, and the
   repair-script cleaning logic.
 
@@ -262,7 +375,7 @@ This project uses [Semantic Versioning](https://semver.org/).
 - `reports/community_report.py`: weasyprint PDF generation (A4 landscape)
 - 8 new API endpoints under `/app/api/communities` and `/app/api/regions`
 - `community` CLI group with 7 subcommands (create, list, add-org, remove-org,
-  assign-user, revoke-user, report, region-report)
+  assign-user, report, region-report)
 - Admin UI: Communities section with create/edit/delete and org assignment
 - Schema v17: `communities`, `community_organisations`, `user_communities`
 - 31 new tests
@@ -341,10 +454,6 @@ This project uses [Semantic Versioning](https://semver.org/).
 - T3-1: `scanner/dns_enumerator.py` — CT SANs + wordlist + DNSDumpster
 - `POST /api/dns-enumerate` endpoint
 - `dns_enumerate` flag on `POST /api/save-domains`
-
----
-
-## [Unreleased]
 
 ---
 

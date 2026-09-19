@@ -1,8 +1,8 @@
 # PQC-Monitor — Developer Handover Document
 
-**Version:** 1.10.0
-**Date:** 2026-07-12
-**Status:** Active development — full cipher detail + SSL Labs integration; MX + SMTP/STARTTLS fixes; PQC detection rewritten (offered-group enumeration); DB index fix
+**Version:** 1.11.0 (released, tag `v1.11.0`)
+**Date:** 2026-08-05
+**Status:** Active development — user management Phase 1 (self-service password reset, session invalidation, CSRF, auth hardening; schema v18); schedule coverage audit + monthly auto-schedule; dashboard TLS-serving ports. Previous release 1.10.0 rewrote PQC detection (offered-group enumeration) — the full network backfill of historical rows may still be in progress
 **Purpose:** Context transfer for continuing development in a new session
 **Repository:** https://github.com/jfsp/pqc-monitor
 
@@ -93,51 +93,8 @@ sudo scripts/deploy.sh --from abc1234
 | 1.8.0 | Fix: community report scoping; DNS enum quota detection + passive fallback; --skip-scanned; test scripts |
 | 1.9.0 | Full cipher detail in UI (drill-down view); findings name specific ciphers; CAMELLIA/SEED probes; SSL Labs API v4 integration (T3-3, display-only) |
 | 1.9.1 | Fix: MX priority/non-FQDN normalisation (+ DB repair script); SMTP/STARTTLS reported no-TLS on 465/587/2525 (protocol-based dispatch, added 2525) |
+| 1.11.0 | User management Phase 1 (mailer, `/forgot` + `/reset`, `session_epoch`, `must_change_password`, CSRF, auth hardening; **schema v18**); schedule coverage audit + monthly auto-schedule; dashboard shows TLS-serving ports |
 | 1.10.0 | **PQC detection was broken for every server ever scanned** — rewritten to enumerate the key-exchange groups the server *offers* (raw ClientHello + HelloRetryRequest). New `scanner/group_enum.py`, `scripts/pqc_selftest.py`, GREASE soundness control, `domain_extra` index fix (full table scan → indexed) |
-
-### 2.7b — Unreleased (delivered 2026-07-31 session, pending version tags)
-
-Four independently-deployable changes were delivered this session as
-ready-to-deploy zips + conventional-commit messages. Version numbers below are
-**proposed**; assign on deploy.
-
-- **Schedule coverage audit + monthly auto-schedule** (proposed v1.11.0).
-  New `scheduler/schedule_audit.py` (logic) + `scripts/schedule_audit.py` (CLI).
-  Reports which assessed domains are in no enabled schedule and can create/
-  refresh ONE auto-managed monthly schedule (`--create-monthly`, default 30d,
-  `--interval-days` overrides). Idempotent/cron-safe; decoupled from
-  APScheduler (writes tables directly). **`level=na` (no-service) domains are
-  excluded by default** — scanning them is the worst-case unit of work
-  (~13 timeout-bound connects); `--include-na` opts them back in. Selection is
-  by *current* latest level, so na→service domains reconcile in and vice-versa.
-  No live reload: after a write, restart `pqc-monitor-scheduler`.
-
-- **Dashboard shows TLS-serving ports** (proposed v1.11.0). `app_routes.py`
-  `api_domain_detail` now returns `tls_ports` (from the latest run's successful
-  probes, not the truncated `scans[:5]`); `dashboard/app.py` renders a
-  "TLS ports" line in the summary box and "TLS-serving ports" in the drill-down.
-  `_PORT_SERVICE` labels direct-TLS + STARTTLS ports; unknown → "port N".
-
-- **User management Phase 1 — self-service password reset + auth hardening**
-  (proposed v1.12.0). See `HANDOVER_user_mgmt.md` for the full spec. Summary:
-  optional SMTP mailer (`auth/mailer.py`; local MTA or authenticated relay);
-  public `/forgot` + `/reset/<token>` (single-use, hashed, expiring tokens;
-  generic responses; per-IP rate limit); **session invalidation on password
-  change** via `users.session_epoch`; `users.must_change_password` + forced-
-  change flow; **app-wide CSRF** (`auth/csrf.py` — form synchronizer token +
-  same-origin guard for the JSON API, skipped under TESTING); email-format
-  validation; constant-time auth for unknown users; `secret_key` hard-fails in
-  production instead of a silent random fallback. Follow-up: `scripts/
-  mail_selftest.py` and `relay_password` now supports config-or-env
-  (`PQC_MAIL_PASSWORD` overrides `mail.relay_password`). **Schema migration v18**
-  (see numbering note below). 95/95 existing auth tests pass.
-
-> **Migration numbering:** the auth reset feature consumed **schema v18**
-> (`password_reset_tokens`, `users.must_change_password`, `users.session_epoch`).
-> The §10 backlog previously earmarked v18 for T1-2 (geography on domain lists)
-> — that and any other pending schema change must use the **next free version**.
-> Phase 2 (2FA) is planned for **v19**; the next schema feature after that is
-> v20+.
 
 ### 2.8 — v1.8.0 detail
 
@@ -518,7 +475,61 @@ line.
 
 ---
 
-### 2. Production actions taken this session (on the live DB)
+### 2.12 — v1.11.0 detail (delivered 2026-07-29/31, released as tag `v1.11.0`)
+
+Four independently-deployable changes were delivered across these sessions as
+ready-to-deploy zips + conventional-commit messages, and all shipped together in
+**v1.11.0** (the earlier drafts of this section proposed v1.11.0/v1.12.0 — that
+split was not used).
+
+- **Schedule coverage audit + monthly auto-schedule** (v1.11.0).
+  New `scheduler/schedule_audit.py` (logic) + `scripts/schedule_audit.py` (CLI).
+  Reports which assessed domains are in no enabled schedule and can create/
+  refresh ONE auto-managed monthly schedule (`--create-monthly`, default 30d,
+  `--interval-days` overrides). Idempotent/cron-safe; decoupled from
+  APScheduler (writes tables directly). **`level=na` (no-service) domains are
+  excluded by default** — scanning them is the worst-case unit of work
+  (~13 timeout-bound connects); `--include-na` opts them back in. Selection is
+  by *current* latest level, so na→service domains reconcile in and vice-versa.
+  No live reload: after a write, restart `pqc-monitor-scheduler`.
+
+- **Dashboard shows TLS-serving ports** (v1.11.0). `app_routes.py`
+  `api_domain_detail` now returns `tls_ports` (from the latest run's successful
+  probes, not the truncated `scans[:5]`); `dashboard/app.py` renders a
+  "TLS ports" line in the summary box and "TLS-serving ports" in the drill-down.
+  `_PORT_SERVICE` labels direct-TLS + STARTTLS ports; unknown → "port N".
+
+- **User management Phase 1 — self-service password reset + auth hardening**
+  (v1.11.0). See `HANDOVER_user_mgmt.md` for the full spec. Summary:
+  optional SMTP mailer (`auth/mailer.py`; local MTA or authenticated relay);
+  public `/forgot` + `/reset/<token>` (single-use, hashed, expiring tokens;
+  generic responses; per-IP rate limit); **session invalidation on password
+  change** via `users.session_epoch`; `users.must_change_password` + forced-
+  change flow; **app-wide CSRF** (`auth/csrf.py` — form synchronizer token +
+  same-origin guard for the JSON API, skipped under TESTING); email-format
+  validation; constant-time auth for unknown users; `secret_key` hard-fails in
+  production instead of a silent random fallback. **Schema migration v18**
+  (see numbering note below). 95/95 existing auth tests pass.
+
+- **Mail follow-up** (v1.11.0). `scripts/mail_selftest.py` verifies relay
+  credentials from the shell, and `relay_password` now supports config-or-env
+  (`PQC_MAIL_PASSWORD` overrides `mail.relay_password`), matching the other API
+  keys.
+
+> **Test gap (open):** the Phase 1 commit message announced new unit and Flask
+> integration tests for token lifecycle, mailer transports, CSRF block/allow,
+> session-kill and `must_change`. Those tests are **not in `tests/`** on `main`;
+> only the 95 pre-existing auth tests cover this area. Add them before Phase 2
+> touches the login flow.
+
+> **Migration numbering:** the auth reset feature consumed **schema v18**
+> (`password_reset_tokens`, `users.must_change_password`, `users.session_epoch`).
+> The §10 backlog previously earmarked v18 for T1-2 (geography on domain lists)
+> — that and any other pending schema change must use the **next free version**.
+> Phase 2 (2FA) is planned for **v19**; the next schema feature after that is
+> v20+.
+
+### 2.13 — Production actions taken on the live DB (v1.10.0 session)
 
 1. Ran `fix_mx_entries.py` — repaired malformed `domain` keys
    (`5 smtp.bde.es` → `smtp.bde.es`, `20 mail01.bancaditalia.it` → …,
@@ -537,7 +548,7 @@ correct `na` that becomes the newest row.
 
 ---
 
-### 3.1 Deployment checklist — v1.10.0 (PQC rewrite)
+### 2.14 — Deployment checklist: v1.10.0 PQC backfill
 
 **IN PROGRESS AT END OF SESSION — the PQC backfill rescan.**
 
@@ -574,7 +585,7 @@ PQC-positive domains will jump from ~zero to their true count. This is a
 **measurement artefact, not a migration event** — note it in any report that
 spans the boundary.
 
-### 3.2 Still open / not verified
+### 2.15 — Still open / not verified
 
 - **SSL Labs "not configured (ssllabs.email)"** — reported this session, root
   cause **not confirmed**. The repo code is correct (verified in a sandbox:
@@ -602,7 +613,7 @@ spans the boundary.
 
 ---
 
-### 3. Deployment checklist (next session / when applying)
+### 2.16 — Deployment checklist (when applying the v1.9.x fixes)
 
 - Deliver as a zip (per workflow — never server-side patch scripts).
 - After deploy, confirm the assessor fix is actually present:
@@ -618,15 +629,17 @@ spans the boundary.
   domains genuinely lacking cipher data. Mind the e2-micro: keep workers
   low (default 2), score-only unless a rescan is required.
 
-### 5. Open threads / suggestions (not done)
+### 2.17 — Open threads / suggestions
 
-- **Repo→/opt sync script** (requested earlier, separate from this session):
-  full-tree sync excluding `.git`, overwrite mode (only new/changed files)
-  + audit mode, never overwrite local `/opt` config unless `--force`.
+- ~~**Repo→/opt sync script**~~ — **delivered** as `scripts/sync-tree.sh`
+  (full-tree audit/sync excluding `.git`; does not overwrite local `/opt`
+  config unless forced).
 - **`--service smtp` filter** for a targeted rescan (re-probe only
   mail-bearing hosts to pick up the STARTTLS fix without a full rescan).
-- **Group-report view** (`view-group-report`) is referenced but absent from
-  the rendered shell — pre-existing, not caused by this session's changes.
+- ~~**Group-report view absent from the rendered shell**~~ — **not a defect.**
+  The view exists in `dashboard/app.py` as `id="view-group_report"` (underscore,
+  not hyphen), rendered inside `{% if can_view_group_report %}` together with
+  its nav button. Earlier greps for `view-group-report` simply missed it.
 - General reminder: the dashboard shows **newest-per-domain**, so any
   assessor change only reaches the display after a reassess. A wrong newest
   row (from buggy logic) persists until overwritten or deleted.
@@ -644,17 +657,19 @@ pqc-monitor/
 ├── admin/
 │   └── routes.py           # Admin-only /admin/* blueprint
 ├── auth/
-│   ├── auth_routes.py      # Login/logout/change-password routes
-│   ├── middleware.py       # require_auth, current_user, filter_assessments
+│   ├── auth_routes.py      # /login, /logout, /change-password, /forgot, /reset/<token>
+│   ├── middleware.py       # require_auth, current_user (session_epoch check), filter_assessments
 │   ├── models.py           # User, AuditEvent dataclasses; PERMISSIONS dict
-│   └── store.py            # AuthStore: user/session/domain-list CRUD (SQLite)
+│   ├── mailer.py           # Optional SMTP mailer: local MTA or authenticated relay (NEW v1.11.0)
+│   ├── csrf.py             # Synchroniser token + same-origin guard for the JSON API (NEW v1.11.0)
+│   └── store.py            # AuthStore: user/session/domain-list CRUD, reset tokens (SQLite)
 ├── ct/
 │   └── ct_monitor.py       # Certificate Transparency log monitor (crt.sh)
 ├── dashboard/
 │   └── app.py              # DASHBOARD_HTML SPA + legacy create_app() (dev only)
 ├── data/
 │   ├── database.py         # Database class: all SQLite queries
-│   ├── migrations.py       # Schema migration runner (current: v17)
+│   ├── migrations.py       # Schema migration runner (current: v18)
 │   ├── geo_inference.py    # TLD-based country/region inference
 │   └── tld_geo.csv         # ccTLD → country_code/country/region mapping
 ├── domain_discovery/
@@ -679,11 +694,19 @@ pqc-monitor/
 │   ├── dns_enumerator.py   # DNS deep-dive (CT SANs + wordlist + DNSDumpster + passive)
 │   ├── service_discovery.py# Port scanner
 │   ├── shodan_client.py    # Shodan integration
-│   └── starttls_probe.py   # STARTTLS prober (SMTP/IMAP/LDAP)
+│   ├── ssllabs_client.py   # Qualys SSL Labs API v4 client (display-only grade)
+│   └── starttls_probe.py   # STARTTLS prober (SMTP/IMAP/POP3; LDAP explicitly unsupported)
 ├── scheduler/
-│   └── scan_scheduler.py   # APScheduler wrapper
-├── scripts/
+│   ├── scan_scheduler.py   # APScheduler wrapper
+│   └── schedule_audit.py   # Schedule coverage audit + monthly auto-schedule (NEW v1.11.0)
+├── scripts/                # See scripts/README.md for full usage
 │   ├── deploy.sh           # Incremental git→deployment sync
+│   ├── sync-tree.sh        # Full-tree repo→/opt audit/sync
+│   ├── audit_db_consistency.py # Read-only DB consistency audit (sections A–J)
+│   ├── backfill_services_assessed.py # Backfill services_assessed / key_types
+│   ├── fix_mx_entries.py   # Repair malformed MX host keys + dns_enum blobs
+│   ├── mail_selftest.py    # Verify SMTP relay credentials (NEW v1.11.0)
+│   ├── schedule_audit.py   # CLI for scheduler/schedule_audit.py (NEW v1.11.0)
 │   ├── fix_notls_level.py  # One-time DB fix: critical→na for no-TLS rows
 │   ├── bulk_assign.py      # Bulk region/community assignment from org name list
 │   ├── bulk_org_assign.py  # Bulk domain→org assignment by TLD
@@ -698,8 +721,14 @@ pqc-monitor/
 │   ├── pqc-monitor-web.service
 │   ├── pqc-monitor-scheduler.service
 │   ├── pqc-monitor.target
+│   ├── nginx-pqc-monitor.conf  # Sample reverse-proxy config
 │   └── pqc-monitor.env     # Secrets template
-├── tests/
+├── docs/                   # DATABASE.md, historical handovers, presentation deck
+├── install.sh              # --demo (dev) / --production installer
+├── Dockerfile              # Container image (development convenience)
+├── docker-compose.yml      # Compose stack for local runs
+├── requirements.txt
+├── tests/                  # 523 tests (all passing on main)
 └── config/
     └── config.yaml.example
 ```
@@ -772,7 +801,9 @@ enumerate_domain(domain)
 
 ## 5. Database Schema
 
-**Current schema version:** 17 (managed by `data/migrations.py`)
+**Current schema version:** 18 (managed by `data/migrations.py`). v18 added the
+auth reset tables/columns; **v19 is reserved for Phase 2 TOTP 2FA**, so any other
+pending schema change takes v20+.
 
 ### Key tables
 
@@ -821,14 +852,33 @@ community_id INTEGER FK, org_id INTEGER FK  -- PK: both cols
 user_id TEXT, community_id INTEGER FK  -- PK: both cols
 ```
 
+**`password_reset_tokens`** (v18)
+```sql
+id INTEGER PK, user_id INTEGER FK → users(id) ON DELETE CASCADE,
+token_hash TEXT (SHA-256), created_at TEXT, expires_at TEXT,
+used_at TEXT, request_ip TEXT
+```
+Indexes: `idx_prt_token(token_hash)`, `idx_prt_user(user_id)`.
+
+**`users`** (v18 additions)
+```sql
+must_change_password INTEGER NOT NULL DEFAULT 0,
+session_epoch        INTEGER NOT NULL DEFAULT 0
+```
+
 **`domain_organisations`** — domain ↔ org membership
 **`domain_lists`** — saved domain lists with JSON domain array
-**`domain_extra`** — keyed blob store (CDN, DNS, Shodan enrichment)
-**`tls_results`** — raw probe results per port per domain per run
-**`users`**, **`user_domain_lists`**, **`user_organisations`** — RBAC tables
+**`domain_extra`** — keyed blob store (chain, cipher_enum, group_enum, CDN, DNS, Shodan, ssllabs)
+**`raw_scans`** — raw probe results per port per domain per run
+**`scheduled_scans`** — periodic scan schedules (sector/region metadata)
+**`users`**, **`user_domain_lists`**, **`user_organisations`**, **`user_communities`** — RBAC tables
 **`roadmaps`** — saved roadmap results
-**`ct_summaries`**, **`ct_certificates`** — CT monitor results
+**`ct_queries`**, **`ct_certificates`** — CT monitor results (read via `get_ct_summaries()`)
 **`audit_log`** — all auth and data-access events
+
+> Naming trap: there is **no** `tls_results` or `ct_summaries` table. The raw
+> probe rows live in `raw_scans`; `get_ct_summaries()` is a `Database` method
+> over `ct_queries`. Earlier revisions of this document listed both incorrectly.
 
 ---
 
@@ -871,6 +921,33 @@ additionally check `require_admin` or `user.can("permission")`.
 which returns `None` for admins (no filter) or a `set` of org IDs for community
 managers. The DB aggregate functions filter to that set when provided.
 
+### Authentication (unauthenticated where noted)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET/POST | `/login` | none | Login form + submit |
+| GET | `/logout` | user | Ends the session |
+| GET/POST | `/change-password` | user | Self-service change (requires current password; forced when `must_change_password`) |
+| GET/POST | `/forgot` | none | Request a reset link (generic response, per-IP rate limited) |
+| GET/POST | `/reset/<token>` | none | Single-use, expiring, hashed token; never auto-logs-in |
+
+All state-changing routes are covered by the CSRF layer (`auth/csrf.py`):
+synchroniser token on server-rendered forms, same-origin check on the JSON API.
+
+### SSL Labs (v1.9.0)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/app/api/ssllabs/<domain>` | user | Poll cached/in-flight assessment; persists when READY |
+| POST | `/app/api/ssllabs/<domain>/refresh` | `scan.run` | Trigger a fresh assessment (`startNew=on`, `publish=off`) |
+
+### Admin (`/admin/*`, admin only)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET/POST/PATCH/DELETE | `/admin/api/users[/<uid>]` | User CRUD |
+| POST | `/admin/api/users/<uid>/password` | Admin password reset; accepts `{"must_change": true}` |
+
 ### Scanning (admin only)
 
 | Method | Path | Description |
@@ -901,6 +978,24 @@ managers. The DB aggregate functions filter to that set when provided.
 | `admin` | Everything: scan, discover, manage users/lists/orgs/communities, CT, roadmap |
 | `community_manager` | View Group Report for assigned communities only; cannot scan or manage |
 | `analyst` | View assessments/roadmaps/CT for assigned domains only |
+
+### Session and password handling (v1.11.0)
+
+- Signed cookie session, `HttpOnly`, `SameSite=Lax`, `Secure` when HTTPS, 8 h.
+- `users.session_epoch` is bumped by `set_password` and written into the session
+  at login; `current_user()` rejects a cookie carrying a stale epoch. A reset or
+  admin reset therefore signs out **all** sessions; a self-service change
+  re-issues the current device, so only the other sessions drop. Legacy cookies
+  without an epoch default to 0 and stay valid until the next change.
+- `users.must_change_password` pins the user to `/change-password` (API returns
+  403) until a new password is set.
+- Reset tokens: single-use, SHA-256-hashed at rest, 45-minute default TTL,
+  newest-token-wins, per-IP rate limited, audited; reset never auto-logs-in.
+- `secret_key` hard-fails at startup in production rather than falling back to a
+  per-process random value; `authenticate()` runs a constant-time dummy hash for
+  unknown usernames.
+- There is still **no server-side session id**, so individual sessions cannot be
+  revoked selectively — only the epoch bump (all-sessions) exists.
 
 ### Community manager scoping
 
@@ -1123,8 +1218,9 @@ synced. New Python modules must be added to `WEB_TRIGGERS` or `SCHEDULER_TRIGGER
 ### User management (spec: `HANDOVER_user_mgmt.md`)
 
 - **[UM-1]** ~~Self-service password reset by email + auth hardening~~ —
-  **delivered this session (Phase 1)**. Old-password-on-change was already
-  enforced for self-service.
+  **delivered in v1.11.0 (Phase 1)**. Old-password-on-change was already
+  enforced for self-service. Follow-up: add the missing automated tests for the
+  Phase 1 paths (see §2.12).
 - **[UM-2]** **2FA (TOTP), optional per user — Phase 2, next session.** Schema
   **v19**; `pyotp` dependency; QR rendered client-side. Changes the login flow
   (intermediate pending-2FA state), backup codes, admin disable-path. Full
@@ -1135,7 +1231,7 @@ synced. New Python modules must be added to `WEB_TRIGGERS` or `SCHEDULER_TRIGGER
 ### Scheduling
 
 - **[SCH-1]** ~~Schedule coverage audit + monthly auto-schedule~~ —
-  **delivered this session** (`scripts/schedule_audit.py`). Possible follow-up:
+  **delivered in v1.11.0** (`scheduler/schedule_audit.py` + `scripts/schedule_audit.py`). Possible follow-up:
   a low-frequency discovery sweep for `level=na` domains (separate schedule or a
   port-open-only mode) so late-appearing services are eventually caught; pairs
   with P7 (scheduler watchdog).
@@ -1152,7 +1248,7 @@ Status: **proposed, not yet implemented** — run the audit on production first,
 clean the ERRORs it reports (orphans, invariant rows, malformed domains), then
 start here. Each item is sized S/M/L and lists the files to touch.
 
-> **Delivered this session (auth path):** several security-hardening items
+> **Delivered in v1.11.0 (auth path):** several security-hardening items
 > adjacent to this roadmap shipped with User-Management Phase 1 —
 > **CSRF protection** (`auth/csrf.py`), **`secret_key` hard-fail in production**
 > (was a silent per-process random fallback that breaks multi-worker gunicorn
@@ -1313,6 +1409,8 @@ the latest counts with a drill-down to the text report.
 
 ## Appendix A — Running the Test Suite
 
+Current suite: **523 tests, all passing** on `main` (11 modules).
+
 ```bash
 source .venv/bin/activate
 python3 -m unittest discover -s tests -p 'test_*.py'
@@ -1384,6 +1482,13 @@ python3 scripts/fix_notls_level.py
 | Script | Purpose |
 |--------|---------|
 | `scripts/deploy.sh` | Incremental git→/opt/pqc-monitor sync; restarts only affected services |
+| `scripts/sync-tree.sh` | Full-tree repo→/opt audit/sync (excludes `.git`; never clobbers local config unless forced) |
+| `scripts/reassess_all.py` | Reassess/rescan every domain (`--rescan`, `--only-missing`, `--only-missing-groups`) |
+| `scripts/pqc_selftest.py` | PQC group-enum self-test (GREASE gate first) + testssl.sh cross-check |
+| `scripts/fix_mx_entries.py` | Repair malformed MX host keys across domain-keyed tables + `dns_enum` blobs |
+| `scripts/backfill_services_assessed.py` | Backfill `services_assessed` / `key_types` on old assessment rows |
+| `scripts/mail_selftest.py` | Verify SMTP relay credentials from the shell (local + starttls + ssl) |
+| `scripts/schedule_audit.py` | Schedule coverage audit; `--create-monthly` auto-schedule (excludes `level=na`) |
 | `scripts/shodan-test.sh` | Two-tier Shodan key + plan test (8.8.8.8 free; google.com paid) |
 | `scripts/dnsdumpster-test.sh` | DNSDumpster API key test; reports record counts per type |
 | `scripts/fix_notls_level.py` | One-time retroactive fix for critical→na no-TLS rows |

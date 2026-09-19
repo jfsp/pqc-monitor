@@ -30,7 +30,8 @@ tracking readiness for Post-Quantum Cryptography (PQC) migration. It provides:
 - Scoring against NIST SP 800-131Ar3, BSI TR-02102-1, and CCN-STIC-221
 - Certificate Transparency log monitoring for PQC certificate deployments
 - PQC migration roadmap generation with phased action plans
-- Role-based web interface: **Admin** and **Analyst** roles with domain-list scoping
+- Role-based web interface: **Admin**, **Community Manager** and **Analyst** roles,
+  with domain-list and community scoping
 - Periodic scan scheduling with trend tracking
 
 ---
@@ -63,29 +64,37 @@ tracking readiness for Post-Quantum Cryptography (PQC) migration. It provides:
 pqc-monitor/
 ├── VERSION                     # Single source of truth for version string
 ├── version.py                  # Python version module (reads VERSION)
-├── pqc_monitor.py              # CLI entry point (10 commands)
-├── app_factory.py              # Flask application factory (RBAC-enabled)
-├── app_routes.py               # Analyst /app/* blueprint
+├── pqc_monitor.py              # CLI entry point (12 commands + `community` group)
+├── app_factory.py              # Flask application factory (RBAC, CSRF, mailer wiring)
+├── app_routes.py               # Analyst / community-manager /app/* blueprint
+├── install.sh                  # Installer: --demo (dev) / --production
+├── Dockerfile                  # Container image (development convenience)
+├── docker-compose.yml          # Compose stack for local runs
 │
 ├── auth/                       # Authentication & authorisation
-│   ├── models.py               # User, AuditEvent dataclasses; role constants
-│   ├── store.py                # SQLite user store, password hashing, audit log
+│   ├── models.py               # User, AuditEvent dataclasses; role/permission constants
+│   ├── store.py                # SQLite user store, password hashing, reset tokens, audit log
 │   ├── middleware.py           # Flask decorators, session helpers, AuthProvider
-│   └── auth_routes.py          # /login, /logout, /change-password
+│   ├── auth_routes.py          # /login, /logout, /change-password, /forgot, /reset/<token>
+│   ├── mailer.py               # Optional SMTP mailer (local MTA or authenticated relay)
+│   └── csrf.py                 # Synchroniser token + same-origin guard for the JSON API
 │
 ├── admin/
-│   └── routes.py               # /admin/* — user/domain-list management SPA
+│   └── routes.py               # /admin/* — users, domain lists, orgs, communities, audit
 │
 ├── scanner/                    # Scanning engine
 │   ├── orchestrator.py         # Parallel scan coordinator
 │   ├── service_discovery.py    # TCP-connect port discovery + DANE/DNSSEC
 │   ├── tls_probe.py            # TLS handshake & certificate extraction
-│   ├── starttls_probe.py       # SMTP/IMAP/POP3 STARTTLS upgrade
+│   ├── starttls_probe.py       # SMTP/IMAP/POP3 STARTTLS upgrade (protocol-based dispatch)
 │   ├── chain_validator.py      # Full certificate chain analysis
 │   ├── cipher_enum.py          # Active cipher suite enumeration
+│   ├── group_enum.py           # Offered key-exchange group enumeration (authoritative for PQC)
+│   ├── dns_enumerator.py       # CT SANs + wordlist + DNSDumpster + passive DNS fallback
 │   ├── cdn_detector.py         # CDN detection (Cloudflare, Fastly, Akamai …)
 │   ├── crypto_assessor.py      # Multi-guideline scoring engine
 │   ├── crypto_extractor.py     # Raw scan → normalised CryptoFacts
+│   ├── ssllabs_client.py       # Qualys SSL Labs API v4 client (display-only grade)
 │   └── shodan_client.py        # Optional Shodan API wrapper
 │
 ├── ct/
@@ -102,13 +111,19 @@ pqc-monitor/
 │
 ├── data/
 │   ├── database.py             # SQLite storage layer
-│   └── migrations.py           # Incremental schema versioning
+│   ├── migrations.py           # Incremental schema versioning (current: v18)
+│   ├── geo_inference.py        # TLD-based country/region inference
+│   └── tld_geo.csv             # ccTLD → country_code/country/region mapping
 │
 ├── scheduler/
-│   └── scan_scheduler.py       # APScheduler periodic scan management
+│   ├── scan_scheduler.py       # APScheduler periodic scan management
+│   └── schedule_audit.py       # Schedule coverage audit + monthly auto-schedule
 │
 ├── reports/
-│   └── report_generator.py     # CSV / JSON / plain-text export
+│   ├── report_generator.py     # CSV / JSON / plain-text export
+│   └── community_report.py     # Group Report build / CSV / PDF (weasyprint)
+│
+├── scripts/                    # Operational scripts — see scripts/README.md
 │
 ├── guidelines/                 # Versioned cryptographic policy rules (JSON)
 │   ├── nist_800_131a.json      # NIST SP 800-131Ar3 (Oct 2024)
@@ -122,7 +137,8 @@ pqc-monitor/
 │   ├── pqc-monitor.env         # Environment file template
 │   └── nginx-pqc-monitor.conf  # Sample nginx reverse proxy config
 │
-├── tests/                      # 340 unit tests
+├── docs/                       # DATABASE.md, historical handovers, presentation
+├── tests/                      # 523 unit tests
 └── config/
     └── config.yaml.example     # Annotated configuration template
 ```
@@ -135,11 +151,11 @@ The version is stored in the `VERSION` file at the project root. It is the
 single source of truth — all other components read from it:
 
 ```
-cat VERSION         # 1.1.0
+cat VERSION         # 1.11.0
 ```
 
 ```python
-from version import VERSION   # "1.1.0"
+from version import VERSION   # "1.11.0"
 ```
 
 The version appears in:
@@ -147,7 +163,7 @@ The version appears in:
 - The login page footer
 - The admin panel header
 - `pqc_monitor.py --version`
-- `GET /api/version` → `{"version": "1.1.0", "name": "PQC-Monitor"}`
+- `GET /api/version` → `{"version": "1.11.0", "name": "PQC-Monitor"}`
 
 To release a new version, update `VERSION` and add a CHANGELOG entry.
 No other source files need editing.
@@ -312,7 +328,9 @@ After starting the services, navigate to `https://your.domain.example`.
 **Default credentials:** `admin` / `changeme123`
 
 > ⚠️ **Change this immediately.** Click your username → *Password* or use
-> the admin panel → Edit user → Reset password.
+> the admin panel → Edit user → Reset password (optionally forcing a change at
+> next login). If the optional mailer is configured, users can also reset their
+> own password from the **Forgot password?** link on the login page.
 
 ---
 
@@ -327,9 +345,15 @@ Key settings:
 | `database.path` | `data/pqc_monitor.db` | SQLite database path |
 | `scanning.timeout` | `10` | Seconds per connection attempt |
 | `scanning.max_workers` | `20` | Parallel scan threads |
-| `scanning.ports` | `[443,8443,465,993,636]` | TLS ports to probe |
+| `scanning.ports` | `[443,8443,465,993,995,636,5061]` | Direct-TLS ports to probe |
+| `scanning.use_starttls` | `true` | Also probe STARTTLS ports (25/587/2525/143/110) |
 | `scheduler.default_interval_days` | `90` | Default scan interval |
 | `guidelines.active` | all three | Which guideline files to apply |
+| `mail.enabled` | `false` | Optional SMTP mailer (password-reset emails) |
+| `mail.mode` | `local` | `local` (local MTA) or `relay` (authenticated submission) |
+| `reset.token_ttl_minutes` | `45` | Password-reset token lifetime |
+| `reset.base_url` | — | Absolute base URL used to build reset links |
+| `ssllabs.enabled` / `ssllabs.email` | — | Qualys SSL Labs API v4 (registered email) |
 
 Environment variables override config file values:
 
@@ -338,6 +362,8 @@ Environment variables override config file values:
 | `PQC_SECRET_KEY` | `dashboard.secret_key` |
 | `SHODAN_API_KEY` | `shodan.api_key` |
 | `ANTHROPIC_API_KEY` | `ai.anthropic_api_key` |
+| `PQC_MAIL_PASSWORD` | `mail.relay_password` (preferred; never commit to yaml) |
+| `PQC_SSLLABS_EMAIL` | `ssllabs.email` |
 
 ---
 
@@ -351,6 +377,7 @@ depending on role:
 | Tab | Description |
 |-----|-------------|
 | Dashboard | Summary cards, distribution chart, TLS coverage, domain table |
+| Group Report | By Community / Region / Country aggregates, charts, CSV+PDF export (admin + community manager) |
 | Domain Discovery | Natural-language domain list generation |
 | Scan | Manual scan, re-assessment, scan history |
 | Trends | Score over time, level changes, PQC adoption, per-domain history |
@@ -364,8 +391,10 @@ Analysts see only domains from their assigned domain lists. Admins see all domai
 
 | Section | Description |
 |---------|-------------|
-| Users | Create, edit, disable, delete users; reset passwords |
+| Users | Create, edit, disable, delete users; reset passwords (optionally forcing a change at next login) |
 | Domain Lists | View all lists; see which users are assigned |
+| Organisations | Create, edit, delete organisations; sector/region/country metadata |
+| Communities | Create, edit, delete communities; assign organisations and community managers |
 | Audit Log | Login/logout events, data access, scan initiations |
 
 ---
@@ -391,6 +420,7 @@ python3 pqc_monitor.py --help
 | `report` | Generate a full text readiness report |
 | `list-runs` | List recent scan runs |
 | `list-schedules` | List configured periodic schedules |
+| `community` | Command group: `create`, `list`, `add-org`, `remove-org`, `assign-user`, `report`, `region-report` |
 
 ```bash
 # Examples
@@ -410,6 +440,7 @@ python3 pqc_monitor.py ct-monitor --domain example.com --fetch-pem
 | Role | Capabilities |
 |------|-------------|
 | **Admin** | Full access: manage users, view all domains, run scans, access admin panel, view audit log |
+| **Community Manager** | Group Report for assigned communities and organisations only; cannot scan or manage users |
 | **Analyst** | Read-only access to assigned domain lists only |
 
 ### Domain-list scoping
@@ -429,6 +460,23 @@ Assignment workflow:
 - Secure flag enabled in production (requires HTTPS)
 - 10 failed login attempts → 15-minute account lockout
 - 10 login attempts per IP per minute rate limit
+- `dashboard.secret_key` hard-fails at startup in production instead of falling
+  back to a per-process random value (which breaks multi-worker Gunicorn)
+- CSRF protection app-wide: synchroniser token on the server-rendered auth
+  forms plus a strict same-origin check on the JSON API
+- Changing or resetting a password bumps `users.session_epoch`, which signs out
+  every other session immediately
+
+### Password reset and forced change
+
+- **Self-service:** `/forgot` → emailed link → `/reset/<token>`. Tokens are
+  single-use, SHA-256-hashed at rest and expire (default 45 minutes); creating a
+  new one invalidates outstanding tokens. Responses are identical whether or not
+  the account exists; per-IP rate limited; every event audited; reset never
+  auto-logs-in. Requires the optional mailer (`mail.enabled`) — without it,
+  admin-mediated reset still works.
+- **Forced change:** an admin reset may set `must_change_password`, pinning the
+  user to `/change-password` until a new password is set.
 
 ### SAML / External IdP (future)
 
@@ -479,9 +527,10 @@ sudo -u pqcmonitor /opt/pqc-monitor/.venv/bin/python3 \
     -m unittest discover -s /opt/pqc-monitor/tests -p 'test_*.py'
 ```
 
-340 tests covering: scoring engine, database layer, guidelines JSON, scanner
+523 tests covering: scoring engine, database layer, guidelines JSON, scanner
 modules, CDN detection, certificate chain validation, cipher enumeration,
-CT monitor, roadmap generator, and the full RBAC auth layer.
+STARTTLS/MX handling, SSL Labs client, CT monitor, roadmap generator,
+communities/organisations, and the RBAC auth layer.
 
 ---
 
@@ -511,6 +560,7 @@ python3 pqc_monitor.py reassess <run_id>
 | 🟠 Weak | 26–50 | Below recommended minimums; no PQC |
 | 🟡 Moderate | 51–75 | Good classical crypto (TLS 1.3, ECDHE, SHA-256); no PQC yet |
 | 🟢 Ready | 76–100 | PQC detected (ML-KEM, ML-DSA) or transition complete |
+| ⚪ N/A (`na`) | — | No reachable TLS service; excluded from averages, level counts, roadmaps and auto-scheduling |
 
 ---
 

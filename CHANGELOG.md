@@ -76,6 +76,21 @@ This project uses [Semantic Versioning](https://semver.org/).
   `--refresh-dns`). Scan History shows a Source and a Domains column.
 - systemd: the scheduler now `Wants=` instead of `Requires=` the web service,
   so web restarts no longer restart it.
+- The scheduler no longer uses APScheduler; schedules added or edited from the
+  UI or CLI are picked up by the running daemon within a minute.
+  `list-schedules` shows each job's kind and `scheduler-daemon` logs every
+  schedule's next run at start.
+- `pqc_monitor.py ssllabs-sweep` (`--dry-run`, `--limit`, `--concurrency`,
+  `--max-age-days`, `--domain`) runs the SSL Labs sweep on demand. New config
+  keys `ssllabs.sweep_concurrency` (default 6, a ceiling below the account
+  limit SSL Labs reports) and `ssllabs.sweep_max_age_days` (default 6).
+  Stored SSL Labs results gain `status_message`; the domain view shows
+  "assessment failed — <reason>" for hosts SSL Labs could not test.
+- `scripts/schedule_audit.py` reports no-TLS coverage and the number of
+  unresolvable names, and flags schedules overdue by more than a day.
+- `/api/summary` returns `unresolvable_count`; `/api/assessments` adds
+  `dns_status` / `dns_since` to no-TLS rows; `/api/domain` also returns
+  `group_enum` and `dns_status`.
 
 ### Fixed
 - **Trends returned HTTP 504 after the caching change.** The cache-validity
@@ -118,6 +133,24 @@ This project uses [Semantic Versioning](https://semver.org/).
   two loads overlap, a slower older response can no longer overwrite a newer one.
 - The domain box on the domain screen now lists only domains with a TLS
   service; no-TLS (`level=na`) domains are excluded.
+- `scripts/deploy.sh` did not restart the web service when only `scheduler/`
+  changed, although the web app imports it; `scheduler/` is now in
+  `WEB_TRIGGERS`.
+- The 1.9.0 note that scan-time SSL Labs lookups were "cache-only" and never
+  started assessments was wrong (see the SSL Labs item above).
+
+### Upgrade notes
+- No schema migration (still v18; v19 stays reserved for TOTP 2FA). New
+  indexes: `idx_domain_extra_type` is created automatically at start-up;
+  `idx_assessments_trend` is created once with `scripts/add_trend_index.py`
+  while the services are stopped.
+- `deploy.sh` does not install systemd units. Copy the updated
+  `systemd/pqc-monitor-scheduler.service` to `/etc/systemd/system/` and run
+  `systemctl daemon-reload`.
+- Run `scripts/schedule_audit.py --create-monthly --refresh-dns` once to
+  create the no-TLS and SSL Labs schedules, record DNS status for no-TLS
+  domains and repair the stale `next_run` of the existing monthly schedule.
+- New tests: `tests/test_trends.py`, `tests/test_scheduler_sweep_dns.py`.
 
 ---
 

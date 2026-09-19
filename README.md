@@ -32,7 +32,12 @@ tracking readiness for Post-Quantum Cryptography (PQC) migration. It provides:
 - PQC migration roadmap generation with phased action plans
 - Role-based web interface: **Admin**, **Community Manager** and **Analyst** roles,
   with domain-list and community scoping
-- Periodic scan scheduling with trend tracking
+- Periodic scan scheduling with time-based trend tracking: a monthly scan of
+  all TLS-serving domains, a monthly rescan of no-TLS domains that still
+  resolve in DNS (names that no longer resolve are recorded and skipped), and
+  a weekly throttled Qualys SSL Labs sweep
+- Per-domain detail screen with findings, recommendations, full TLS details and
+  the migration action plan, linkable as `#domain/<name>`
 
 ---
 
@@ -49,6 +54,7 @@ tracking readiness for Post-Quantum Cryptography (PQC) migration. It provides:
   - [First Login](#first-login)
 - [Configuration](#configuration)
 - [Web Interface](#web-interface)
+- [Scheduled Jobs](#scheduled-jobs)
 - [CLI Reference](#cli-reference)
 - [Role-Based Access Control](#role-based-access-control)
 - [Updating](#updating)
@@ -64,7 +70,7 @@ tracking readiness for Post-Quantum Cryptography (PQC) migration. It provides:
 pqc-monitor/
 ├── VERSION                     # Single source of truth for version string
 ├── version.py                  # Python version module (reads VERSION)
-├── pqc_monitor.py              # CLI entry point (12 commands + `community` group)
+├── pqc_monitor.py              # CLI entry point (13 commands + `community` group)
 ├── app_factory.py              # Flask application factory (RBAC, CSRF, mailer wiring)
 ├── app_routes.py               # Analyst / community-manager /app/* blueprint
 ├── install.sh                  # Installer: --demo (dev) / --production
@@ -95,6 +101,8 @@ pqc-monitor/
 │   ├── crypto_assessor.py      # Multi-guideline scoring engine
 │   ├── crypto_extractor.py     # Raw scan → normalised CryptoFacts
 │   ├── ssllabs_client.py       # Qualys SSL Labs API v4 client (display-only grade)
+│   ├── ssllabs_sweep.py        # Throttled SSL Labs collection job (weekly schedule)
+│   ├── dns_status.py           # DNS presence check for no-TLS domains
 │   └── shodan_client.py        # Optional Shodan API wrapper
 │
 ├── ct/
@@ -112,12 +120,13 @@ pqc-monitor/
 ├── data/
 │   ├── database.py             # SQLite storage layer
 │   ├── migrations.py           # Incremental schema versioning (current: v18)
+│   ├── trends.py               # Time-bucketed trend aggregation (Trends tab)
 │   ├── geo_inference.py        # TLD-based country/region inference
 │   └── tld_geo.csv             # ccTLD → country_code/country/region mapping
 │
 ├── scheduler/
-│   ├── scan_scheduler.py       # APScheduler periodic scan management
-│   └── schedule_audit.py       # Schedule coverage audit + monthly auto-schedule
+│   ├── scan_scheduler.py       # DB-driven scheduler (scheduled_scans.next_run, 60 s tick)
+│   └── schedule_audit.py       # Coverage audit + auto schedules (scan, no-TLS rescan, SSL Labs)
 │
 ├── reports/
 │   ├── report_generator.py     # CSV / JSON / plain-text export
@@ -133,12 +142,12 @@ pqc-monitor/
 ├── systemd/                    # Systemd deployment files
 │   ├── pqc-monitor.target      # Service group target
 │   ├── pqc-monitor-web.service # Gunicorn web service
-│   ├── pqc-monitor-scheduler.service  # APScheduler daemon
+│   ├── pqc-monitor-scheduler.service  # Scheduler daemon (Wants= the web service)
 │   ├── pqc-monitor.env         # Environment file template
 │   └── nginx-pqc-monitor.conf  # Sample nginx reverse proxy config
 │
 ├── docs/                       # DATABASE.md, historical handovers, presentation
-├── tests/                      # 523 unit tests
+├── tests/                      # 597 unit tests
 └── config/
     └── config.yaml.example     # Annotated configuration template
 ```
@@ -163,7 +172,7 @@ The version appears in:
 - The login page footer
 - The admin panel header
 - `pqc_monitor.py --version`
-- `GET /api/version` → `{"version": "1.11.0", "name": "PQC-Monitor"}`
+- `GET /api/version` → `{"version": "1.12.0", "name": "PQC-Monitor"}`
 
 To release a new version, update `VERSION` and add a CHANGELOG entry.
 No other source files need editing.
@@ -228,7 +237,7 @@ Three units are installed:
 |------|---------|
 | `pqc-monitor.target` | Service group — manages both services together |
 | `pqc-monitor-web.service` | Gunicorn WSGI server (Flask app) |
-| `pqc-monitor-scheduler.service` | APScheduler periodic scan daemon |
+| `pqc-monitor-scheduler.service` | Scheduler daemon: runs the jobs in `scheduled_scans` (scans, SSL Labs sweep) |
 
 ```bash
 # Start everything
@@ -251,6 +260,17 @@ sudo systemctl stop pqc-monitor.target
 
 The web service and scheduler are independent. A scan initiated by the
 scheduler will never block a user's web request — they run in separate processes.
+The scheduler unit only `Wants=` the web unit, so restarting the web service
+does not restart the scheduler or interrupt a running scheduled scan.
+
+After the first start, create the automatic schedules once:
+
+```bash
+sudo -u pqcmonitor /opt/pqc-monitor/.venv/bin/python3 \
+    /opt/pqc-monitor/scripts/schedule_audit.py --create-monthly --refresh-dns
+```
+
+See [Scheduled Jobs](#scheduled-jobs).
 
 ### Reverse Proxy (nginx)
 
@@ -347,13 +367,15 @@ Key settings:
 | `scanning.max_workers` | `20` | Parallel scan threads |
 | `scanning.ports` | `[443,8443,465,993,995,636,5061]` | Direct-TLS ports to probe |
 | `scanning.use_starttls` | `true` | Also probe STARTTLS ports (25/587/2525/143/110) |
-| `scheduler.default_interval_days` | `90` | Default scan interval |
+| `scheduler.default_interval_days` | `90` | Present in the example config but not currently read; the auto schedules default to 30 days (`schedule_audit.py --interval-days`) and `schedule --interval` sets its own |
 | `guidelines.active` | all three | Which guideline files to apply |
 | `mail.enabled` | `false` | Optional SMTP mailer (password-reset emails) |
 | `mail.mode` | `local` | `local` (local MTA) or `relay` (authenticated submission) |
 | `reset.token_ttl_minutes` | `45` | Password-reset token lifetime |
 | `reset.base_url` | — | Absolute base URL used to build reset links |
 | `ssllabs.enabled` / `ssllabs.email` | — | Qualys SSL Labs API v4 (registered email) |
+| `ssllabs.sweep_concurrency` | `6` | Max parallel SSL Labs assessments in the sweep (also capped by the account limit SSL Labs reports) |
+| `ssllabs.sweep_max_age_days` | `6` | Hosts with an SSL Labs result newer than this are skipped |
 
 Environment variables override config file values:
 
@@ -376,16 +398,25 @@ depending on role:
 
 | Tab | Description |
 |-----|-------------|
-| Dashboard | Summary cards, distribution chart, TLS coverage, domain table |
+| Dashboard | Summary cards, distribution chart, TLS coverage, domain table. No-TLS domains that no longer resolve in DNS are labelled "No DNS". Clicking a domain opens its detail screen |
 | Group Report | By Community / Region / Country aggregates, charts, CSV+PDF export (admin + community manager) |
 | Domain Discovery | Natural-language domain list generation |
-| Scan | Manual scan, re-assessment, scan history |
+| Scan | Manual scan, re-assessment, scan history (with source — scheduled / manual — and domain count) |
 | Trends | Time-based trends (day/week/month/quarter, auto from schedule cadence): average score + domains monitored, readiness level share, PQC adoption; snapshot or scan-activity view; scope by organisation/community; per-domain history |
 | CT Monitor | Certificate Transparency log monitoring |
 | Roadmap | PQC migration plan generator |
 | Settings | Guidelines, scoring guide, version information |
 
 Analysts see only domains from their assigned domain lists. Admins see all domains.
+
+**Domain detail screen.** Clicking a domain on the Dashboard or Roadmap tab
+opens a full page with the score summary, all findings with their
+recommendations, the full TLS details (protocols, ports, offered key-exchange
+groups, accepted cipher suites, certificate chain, SSL Labs grade) and the
+migration action plan. It has its own URL (`/app/#domain/example.com`, which
+can be bookmarked and survives the login redirect), a searchable box to switch
+to another domain, and a Back button that returns to the previous tab with its
+filters and scroll position.
 
 ### `/admin` — Administration (Admin role only)
 
@@ -396,6 +427,39 @@ Analysts see only domains from their assigned domain lists. Admins see all domai
 | Organisations | Create, edit, delete organisations; sector/region/country metadata |
 | Communities | Create, edit, delete communities; assign organisations and community managers |
 | Audit Log | Login/logout events, data access, scan initiations |
+
+---
+
+## Scheduled Jobs
+
+The scheduler daemon reads the `scheduled_scans` table every minute and starts
+any enabled job whose `next_run` has passed. `next_run` is the source of
+truth: restarts do not reset the cadence, jobs that fell due while the daemon
+was down run when it starts, and schedule changes take effect without a
+restart. After each run `next_run` is set to the run's start time plus the
+interval.
+
+`scripts/schedule_audit.py --create-monthly` creates and maintains three
+automatic schedules:
+
+| Schedule | Interval | What it does |
+|----------|----------|--------------|
+| All Domains — monthly (auto) | 30 days | Scans every domain whose latest assessment found a TLS service |
+| No-TLS Domains — monthly rescan (auto) | 30 days | Checks every no-TLS domain in DNS; rescans those that still resolve, so services that come online are detected. Names with no DNS entry or no A/AAAA record are recorded ("No DNS") with the date first seen and are not scanned; they are re-checked each month |
+| SSL Labs sweep — weekly (auto) | 7 days | Collects Qualys SSL Labs results for TLS-serving HTTPS domains without a recent result, staying within the limits SSL Labs sets for your account and backing off when rate-limited |
+
+Both domain lists are rebuilt right before each run, so newly added domains
+are always included. Scheduled runs are marked `Scheduled #<id>` in Scan
+History. SSL Labs is not contacted during scans; the grade is display-only and
+does not affect the PQC score.
+
+```bash
+python3 pqc_monitor.py list-schedules                        # kind, next and last run
+python3 scripts/schedule_audit.py                            # read-only coverage audit
+python3 scripts/schedule_audit.py --create-monthly --dry-run
+python3 scripts/schedule_audit.py --create-monthly --refresh-dns
+python3 pqc_monitor.py ssllabs-sweep --dry-run               # pending hosts + account limits
+```
 
 ---
 
@@ -419,7 +483,8 @@ python3 pqc_monitor.py --help
 | `export` | Export results to CSV, JSON, or text |
 | `report` | Generate a full text readiness report |
 | `list-runs` | List recent scan runs |
-| `list-schedules` | List configured periodic schedules |
+| `list-schedules` | List configured schedules (kind, next and last run) |
+| `ssllabs-sweep` | Run the throttled SSL Labs sweep now (normally weekly via the scheduler) |
 | `community` | Command group: `create`, `list`, `add-org`, `remove-org`, `assign-user`, `report`, `region-report` |
 
 ```bash
@@ -504,6 +569,10 @@ sudo ./install.sh --production
 # 4. Restart services
 sudo systemctl start pqc-monitor.target
 
+# 4a. When upgrading to 1.12.0: create the new automatic schedules once
+sudo -u pqcmonitor /opt/pqc-monitor/.venv/bin/python3 \
+    /opt/pqc-monitor/scripts/schedule_audit.py --create-monthly --refresh-dns
+
 # 5. Verify
 sudo systemctl status pqc-monitor-web
 journalctl -u pqc-monitor-web -n 20
@@ -511,7 +580,10 @@ journalctl -u pqc-monitor-web -n 20
 
 The installer preserves `/etc/pqc-monitor/config.yaml` and
 `/etc/pqc-monitor/pqc-monitor.env`. Database migrations run automatically
-on first startup after an update.
+on first startup after an update. If you deploy with `scripts/deploy.sh`
+instead of the installer, copy changed files from `systemd/` to
+`/etc/systemd/system/` and run `systemctl daemon-reload` yourself — the deploy
+script does not install unit files.
 
 ---
 
@@ -527,9 +599,10 @@ sudo -u pqcmonitor /opt/pqc-monitor/.venv/bin/python3 \
     -m unittest discover -s /opt/pqc-monitor/tests -p 'test_*.py'
 ```
 
-523 tests covering: scoring engine, database layer, guidelines JSON, scanner
+597 tests covering: scoring engine, database layer, guidelines JSON, scanner
 modules, CDN detection, certificate chain validation, cipher enumeration,
-STARTTLS/MX handling, SSL Labs client, CT monitor, roadmap generator,
+STARTTLS/MX handling, SSL Labs client and sweep, scheduler, DNS status of
+no-TLS domains, trends, CT monitor, roadmap generator,
 communities/organisations, and the RBAC auth layer.
 
 ---
@@ -560,7 +633,7 @@ python3 pqc_monitor.py reassess <run_id>
 | 🟠 Weak | 26–50 | Below recommended minimums; no PQC |
 | 🟡 Moderate | 51–75 | Good classical crypto (TLS 1.3, ECDHE, SHA-256); no PQC yet |
 | 🟢 Ready | 76–100 | PQC detected (ML-KEM, ML-DSA) or transition complete |
-| ⚪ N/A (`na`) | — | No reachable TLS service; excluded from averages, level counts, roadmaps and auto-scheduling |
+| ⚪ N/A (`na`) | — | No reachable TLS service; excluded from averages, level counts, roadmaps and the main monthly scan. Rescanned monthly if the name still resolves; shown as "No DNS" and not scanned if it does not |
 
 ---
 

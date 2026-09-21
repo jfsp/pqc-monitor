@@ -312,7 +312,7 @@ server.
   database. Repairs BOTH (a) the `domain` primary-key column across every
   domain-keyed table — raw_scans, assessments, ct_queries, ct_certificates,
   domain_extra, roadmaps, domain_organisations — where a bad MX host was fed
-  in as a scan target (e.g. `5 smtp.bde.es`, `20 mail01.x.it`,
+  in as a scan target (e.g. `5 smtp.xxx.xxx`, `20 mail01.xxxx.xxxx`,
   `primary DNS domain`), and (b) the `dns_enum` enrichment blobs
   (`mx_hosts`, `subdomains`, `tls_candidates[].host`). Per malformed domain
   key it renames to the normalised FQDN, or — on collision with an existing

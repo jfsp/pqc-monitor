@@ -200,10 +200,10 @@ python3 pqc_monitor.py dashboard
 
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
-| OS | Ubuntu 22.04 LTS | Ubuntu 24.04 LTS |
+| OS | Debian 13 (trixie) or Ubuntu 22.04 LTS | Debian 13 (trixie) or Ubuntu 24.04 LTS |
 | Python | 3.10 | 3.12 |
 | RAM | 512 MB | 2 GB |
-| Disk | 1 GB | 10 GB (for scan data) |
+| Disk | 1 GB | 10 GB (for scan data over large periods of time) |
 | CPU | 1 core | 2–4 cores |
 | Network | Outbound TCP 443/80 | Outbound unrestricted |
 

@@ -771,13 +771,13 @@ upstream timings, cf_ray, request id).
 ### 2.13 — Production actions taken on the live DB (v1.10.0 session)
 
 1. Ran `fix_mx_entries.py` — repaired malformed `domain` keys
-   (`5 smtp.bde.es` → `smtp.bde.es`, `20 mail01.bancaditalia.it` → …,
+   (`5 smtp.xxxx.xxxx` → `smtp.xxxxxx.xxx`, `20 xxxxx.xxxxxx.xxx` → …,
    `primary DNS domain` deleted).
-2. Discovered a batch of no-TLS hosts (`a-bancox2.bde.es`, `x-www.bde.es`,
-   several `escb.eu`) showing **"30 weak"**. Root cause: a reassess run
+2. Discovered a batch of no-TLS hosts showing **"30 weak"**.
+   Root cause: a reassess run
    (`06b6e9c1`, 2026-07-10 08:53) executed with the **pre-fix assessor**.
    Confirmed via `services_assessed=0` on those rows.
-3. Deleted the erroneous rows manually:
+4. Deleted the erroneous rows manually:
    `DELETE FROM assessments WHERE services_assessed=0 AND level!='na';`
    After the delete, the hosts correctly show **No TLS** again (the older
    `na` row became the newest).
@@ -1683,8 +1683,8 @@ raise `IntegrityError`.
 
 ### P2 — Single `canonical_domain()` choke point (S/M)
 
-**Why:** the MX-priority bug class, case variants (`WWW.bde.es` vs
-`www.bde.es`), trailing dots and punycode/unicode IDN duplicates all exist
+**Why:** the MX-priority bug class, case variants (`WWW.xxxxx.xxxx` vs
+`www.xxxxx.xx`), trailing dots and punycode/unicode IDN duplicates all exist
 because normalisation happens per-module, inconsistently. One function, called
 at every ingress, removes four audit categories.
 

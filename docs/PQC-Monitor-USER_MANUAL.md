@@ -135,6 +135,7 @@ Changing your password **invalidates all your other active sessions**, on every 
 | Settings (reference) | ✅ | ✅ |
 | **Group Report** tab | ❌ | ✅ |
 | Report export | via API (§10) | Group Report CSV/PDF + API |
+| **CBOM export** (CycloneDX, §10.1) | organisations assigned to you | organisations in your communities and assigned to you |
 | Scan, Domain Discovery, roadmap generation, CT runs, admin panel | ❌ | ❌ |
 
 If you need a domain scanned, a roadmap regenerated or a CT query executed, ask an administrator.
@@ -194,6 +195,9 @@ Columns: **Domain · Score · Level · TLS · Key · PQC · Findings**.
   ascending, i.e. worst first.
 - Three dropdown filters stack with the card filters: **All Organisations**, **All Regions**,
   **All Countries**.
+- **⬇ CBOM** (next to the filters) downloads the Cryptography Bill of Materials of the
+  organisation selected in **All Organisations**. It is disabled until an organisation is
+  selected. Use the selector next to it to choose CycloneDX 1.6 (default) or 1.7. See §10.1.
 - **↻ Refresh** re-fetches the latest assessment per domain.
 
 > **SCREENSHOT PLACEHOLDER — `06-assessments-table.png`**
@@ -264,8 +268,10 @@ Aggregate readiness across a set of organisations. Visible only to `community_ma
 **Charts** — a readiness-distribution donut and a score-by-organisation bar chart.
 
 **Table** — one row per organisation: Organisation, CC (country code), Sector, Domains, Score,
-Level, and counts for Crit / Weak / Mod / Ready / NTLS / PQC. Every column except Sector is
-sortable; click again to reverse.
+Level, and counts for Crit / Weak / Mod / Ready / NTLS / PQC. Every column except Sector and
+CBOM is sortable; click again to reverse. The **CBOM** column's ⬇ button downloads that
+organisation's CBOM (§10.1), in the CycloneDX version selected on the Dashboard (1.6 unless
+changed).
 
 > **SCREENSHOT PLACEHOLDER — `09-group-report.png`**
 > Group Report loaded for a community: summary paragraph, donut, bar chart and table.
@@ -403,6 +409,57 @@ the browser while signed in:
 Add `&run_id=<id>` to export a specific scan run; without it you get the latest assessment per
 domain. Exports are scoped to your visible domains and are recorded in the audit log.
 
+### 10.1 CBOM — Cryptography Bill of Materials (CycloneDX)
+
+The CBOM hands an organisation its own cryptographic inventory in a standard format, so it can
+be loaded into its tools: CBOMkit (viewer and compliance check), Dependency-Track,
+`cyclonedx-cli`, an asset inventory or a CMDB. It follows the CycloneDX CBOM model, the IBM/CBOM
+format that is now part of CycloneDX.
+
+**Where:**
+- Dashboard: select the organisation in **All Organisations**, then click **⬇ CBOM**.
+- Group Report: use the ⬇ button in the organisation's row.
+- Admin → Organisations: use the **⬇ CBOM** button (administrators).
+
+The export is always for **one organisation**. There is no export of all organisations.
+
+**Who:**
+- Administrators can export any organisation.
+- Community managers can export the organisations of their communities and the ones assigned
+  to them.
+- Analysts can export the organisations assigned to them, limited to the domains they can see.
+
+Every export is recorded in the audit log (`cbom.export`).
+
+**Version:** CycloneDX **1.6** (default) is read by the widest range of tools. **1.7** adds
+certificate serial numbers, fingerprints, lifecycle state, extensions, and the standard
+algorithm-family and elliptic-curve names. Choose 1.7 only if your tool supports it.
+
+**What is inside** (file `cbom-<organisation>-<date>.cdx.json`):
+
+| Part | Content |
+|---|---|
+| Services | One per domain: its TLS endpoints (`https://host:443`, `smtp://host:25`, …) and the PQC-Monitor score, level, PQC status, offered groups, CDN and SSL Labs grade. Domains without TLS, or not yet scanned, are listed without endpoints |
+| Protocols | Per endpoint and TLS version: the accepted cipher suites (with IANA code points) and the offered key-exchange groups |
+| Algorithms | Every algorithm in use, with its NIST quantum security level (0 = not quantum-safe) and classical strength. Hybrid groups such as X25519MLKEM768 reference their ML-KEM and ECDH parts |
+| Certificates and keys | The certificate of each endpoint, the CA chain when analysed, still-valid certificates from CT logs, and their public keys |
+| Findings | PQC-Monitor findings and recommendations, as annotations on the domain |
+| Occurrences | For each asset, the endpoints (or CT-log entries) where it was seen |
+
+**Limits:**
+- It contains only what can be observed from the internet; it is marked as an *incomplete*
+  inventory.
+- TLS 1.3 shows the suite the server prefers, not every suite it accepts.
+- Full cipher-suite and key-exchange-group lists are collected on HTTPS (443). Mail and other
+  ports show the negotiated suite.
+- It reflects the latest scan; rescan first if the organisation has just changed its
+  configuration.
+
+**API / automation:** `GET /app/api/organisations/<id>/cbom?spec=1.6|1.7`. Add `findings=0`,
+`ct=0` or `notls=0` to leave out the findings, the CT-log certificates or the services without
+TLS. Administrators can also run `pqc_monitor.py cbom --org <id|name> -o file.cdx.json` on the
+server.
+
 ---
 
 ## 11. Analyst workflows
@@ -439,6 +496,16 @@ domain. Exports are scoped to your visible domains and are recorded in the audit
 3. Sort by Score ascending to lead with the weakest organisations, or by Crit to lead with the
    most acute.
 4. Export PDF for distribution, CSV for your own analysis.
+
+### 11.5 Handing an organisation its cryptographic inventory
+
+1. Make sure the organisation's domains were scanned recently (Dashboard → filter by the
+   organisation → check the assessment dates in the domain detail).
+2. Download the CBOM (§10.1). Use 1.6 unless the receiving tool needs 1.7.
+3. Point the organisation's team at the algorithms with NIST quantum security level 0
+   (RSA/ECDH/ECDSA key exchange and signatures). Those are the migration targets. Annotated
+   findings carry the recommendations.
+4. Their own tooling can then track the remediation and compare later exports.
 
 ---
 

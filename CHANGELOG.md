@@ -8,6 +8,76 @@ This project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **CBOM export per organisation.** An organisation's cryptographic inventory
+  can be downloaded as a CycloneDX Cryptography Bill of Materials and loaded
+  into other tools (CBOMkit, Dependency-Track, cyclonedx-cli, …). CycloneDX
+  **1.6** by default (the version CBOMkit and most tools read; IBM/CBOM is
+  upstreamed there) or **1.7** on request (adds certificate serial number,
+  fingerprint, lifecycle state and extensions, algorithm families and elliptic
+  curves from the CycloneDX registry). New module `reports/cbom.py`.
+- What the CBOM contains, per organisation:
+  - one `service` per domain, with the endpoint URIs that completed a TLS
+    handshake and the PQC-Monitor score, level, offered groups, CDN, SSL Labs
+    grade and finding counts as `pqc-monitor:*` properties;
+  - a `protocol` component per endpoint and TLS version, with the cipher
+    suites (algorithm references and IANA code points) and the offered
+    key-exchange groups;
+  - `algorithm` components, deduplicated, with NIST quantum and classical
+    security levels and OIDs. Hybrid groups (X25519MLKEM768,
+    SecP256r1MLKEM768, SecP384r1MLKEM1024) depend on their ML-KEM and ECDH
+    parts;
+  - the leaf certificate of each endpoint, the CA chain when it was analysed,
+    and the public keys of these certificates;
+  - certificates found in CT logs that are still valid (up to 20 per domain);
+  - domains without TLS and domains not yet assessed, as services without
+    endpoints;
+  - PQC-Monitor findings as CycloneDX `annotations` on the domain's service;
+  - the endpoints (or crt.sh entries) where each asset was seen
+    (`evidence.occurrences`). The dependency graph runs organisation →
+    services → protocols and certificates → algorithms and keys. Lifecycle
+    phase is `discovery`, and the inventory is marked `incomplete`
+    (externally observable cryptography only).
+- `GET /app/api/organisations/<id>/cbom` returns the file
+  `cbom-<org>-<date>.cdx.json`. Options: `spec=1.6|1.7`, and `findings=0`,
+  `ct=0`, `notls=0` to leave those parts out. Exports are audited as
+  `cbom.export`. There is no all-organisations export.
+- Who can export (new permission `cbom.export`): admins can export any
+  organisation; community managers the organisations in their communities and
+  the ones assigned to them; analysts only the organisations assigned to them,
+  limited to the domains they can already see.
+- UI: a **⬇ CBOM** button with a CycloneDX version selector on the Dashboard,
+  enabled once an organisation is selected in the organisation filter. A CBOM
+  button on each organisation row of the Group Report and in Admin → Organisations.
+- CLI: `pqc_monitor.py cbom --org <id|name> [--spec 1.7] [--no-findings]
+  [--no-ct] [--no-notls] [-o file|-]`.
+- `requirements-dev.txt` (`cyclonedx-python-lib[json-validation]`): the new
+  `tests/test_cbom.py` validates generated CBOMs against the official
+  CycloneDX 1.6 and 1.7 schemas when it is installed, and skips that check
+  otherwise.
+
+### Changed
+- `/api/organisations` returns, for community managers, the organisations of
+  their communities as well as the ones assigned to them (the same set as the
+  Group Report). For non-admins each organisation now includes `domains` and
+  `domain_count`, so the Dashboard's region and country filters work for them.
+  Before, these filters did nothing for non-admins because `domains` was
+  missing.
+
+### Notes
+- No schema change (still v18; v19 reserved for TOTP). Export reads are
+  index seeks by domain (`latest_assessments_for`, `latest_network_scans_for`,
+  `latest_extra_for`, `ct_certificates_for` in `data/database.py`).
+  Measured on the test fixture: 500 domains × 10 runs in about 0.5 s,
+  producing a 6 MB file.
+- Data comes from the latest scan that actually probed each domain, not the
+  run of the latest assessment: a score-only reassessment writes a new run
+  that has no raw scans.
+- The CA chain only appears for domains whose chain was analysed. On Python
+  3.13 `chain_validator` currently stores only the leaf certificate (see
+  HANDOVER §8.8), so intermediates and roots will appear once that is fixed and
+  the domains are rescanned.
+
 ---
 
 ## [1.12.0] — 2026-09-19
@@ -312,7 +382,7 @@ server.
   database. Repairs BOTH (a) the `domain` primary-key column across every
   domain-keyed table — raw_scans, assessments, ct_queries, ct_certificates,
   domain_extra, roadmaps, domain_organisations — where a bad MX host was fed
-  in as a scan target (e.g. `5 smtp.bde.es`, `20 mail01.x.it`,
+  in as a scan target (e.g. `5 smtp.xxx.xxx`, `20 mail01.xxxx.xxxx`,
   `primary DNS domain`), and (b) the `dns_enum` enrichment blobs
   (`mx_hosts`, `subdomains`, `tls_candidates[].host`). Per malformed domain
   key it renames to the normalised FQDN, or — on collision with an existing

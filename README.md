@@ -38,6 +38,11 @@ tracking readiness for Post-Quantum Cryptography (PQC) migration. It provides:
   a weekly throttled Qualys SSL Labs sweep
 - Per-domain detail screen with findings, recommendations, full TLS details and
   the migration action plan, linkable as `#domain/<name>`
+- **CBOM export** per organisation: the observed cryptographic inventory
+  (protocols, cipher suites, key-exchange groups including ML-KEM hybrids,
+  certificates, keys, algorithms with NIST quantum security levels) as a
+  CycloneDX 1.6 (or 1.7) Cryptography Bill of Materials, ready for CBOMkit,
+  Dependency-Track or any CycloneDX tool
 
 ---
 
@@ -130,7 +135,8 @@ pqc-monitor/
 │
 ├── reports/
 │   ├── report_generator.py     # CSV / JSON / plain-text export
-│   └── community_report.py     # Group Report build / CSV / PDF (weasyprint)
+│   ├── community_report.py     # Group Report build / CSV / PDF (weasyprint)
+│   └── cbom.py                 # CycloneDX CBOM export per organisation
 │
 ├── scripts/                    # Operational scripts — see scripts/README.md
 │
@@ -200,10 +206,10 @@ python3 pqc_monitor.py dashboard
 
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
-| OS | Ubuntu 22.04 LTS | Ubuntu 24.04 LTS |
+| OS | Debian 13 (trixie) or Ubuntu 22.04 LTS | Debian 13 (trixie) or Ubuntu 24.04 LTS |
 | Python | 3.10 | 3.12 |
 | RAM | 512 MB | 2 GB |
-| Disk | 1 GB | 10 GB (for scan data) |
+| Disk | 1 GB | 10 GB (for scan data over large periods of time) |
 | CPU | 1 core | 2–4 cores |
 | Network | Outbound TCP 443/80 | Outbound unrestricted |
 
@@ -409,6 +415,27 @@ depending on role:
 
 Analysts see only domains from their assigned domain lists. Admins see all domains.
 
+**CBOM export.** To export an organisation's cryptographic inventory as a
+CycloneDX CBOM, select the organisation in the Dashboard's organisation filter,
+choose CycloneDX 1.6 (default; widest tool support) or 1.7, and click
+**⬇ CBOM**. The Group Report has a CBOM button on every organisation row, and
+Admin → Organisations has one per organisation. The file
+(`cbom-<org>-<date>.cdx.json`) contains:
+- one service per domain, with its TLS endpoints and the PQC-Monitor score and
+  level;
+- per endpoint, the TLS protocol versions with their cipher suites and offered
+  key-exchange groups;
+- the certificates and their public keys;
+- every algorithm with its NIST quantum security level;
+- certificates seen in CT logs;
+- the findings, as annotations.
+
+Exports cover one organisation at a time. Admins can export any organisation,
+community managers the organisations in their communities, and analysts the
+organisations assigned to them. Every export is written to the audit log. API:
+`GET /app/api/organisations/<id>/cbom?spec=1.6|1.7` (`findings=0`, `ct=0`,
+`notls=0` leave those parts out).
+
 **Domain detail screen.** Clicking a domain on the Dashboard or Roadmap tab
 opens a full page with the score summary, all findings with their
 recommendations, the full TLS details (protocols, ports, offered key-exchange
@@ -481,6 +508,7 @@ python3 pqc_monitor.py --help
 | `ct-monitor` | Query CT logs for PQC certificate deployments |
 | `roadmap` | Generate PQC migration roadmap |
 | `export` | Export results to CSV, JSON, or text |
+| `cbom` | Export one organisation's CBOM (CycloneDX 1.6/1.7): `--org <id\|name> [--spec 1.7] [-o file\|-]` |
 | `report` | Generate a full text readiness report |
 | `list-runs` | List recent scan runs |
 | `list-schedules` | List configured schedules (kind, next and last run) |
@@ -493,6 +521,7 @@ python3 pqc_monitor.py discover "financial institutions in Spain" -o domains.txt
 python3 pqc_monitor.py scan --domains domains.txt --sector finance --region Spain
 python3 pqc_monitor.py roadmap --format text
 python3 pqc_monitor.py export --format csv -o results.csv
+python3 pqc_monitor.py cbom --org "Banco Ejemplo" --spec 1.6 -o banco.cdx.json
 python3 pqc_monitor.py ct-monitor --domain example.com --fetch-pem
 ```
 
@@ -505,8 +534,8 @@ python3 pqc_monitor.py ct-monitor --domain example.com --fetch-pem
 | Role | Capabilities |
 |------|-------------|
 | **Admin** | Full access: manage users, view all domains, run scans, access admin panel, view audit log |
-| **Community Manager** | Group Report for assigned communities and organisations only; cannot scan or manage users |
-| **Analyst** | Read-only access to assigned domain lists only |
+| **Community Manager** | Group Report and CBOM export for assigned communities and organisations only; cannot scan or manage users |
+| **Analyst** | Read-only access to assigned domain lists only; CBOM export of the organisations assigned to them |
 
 ### Domain-list scoping
 
@@ -599,11 +628,15 @@ sudo -u pqcmonitor /opt/pqc-monitor/.venv/bin/python3 \
     -m unittest discover -s /opt/pqc-monitor/tests -p 'test_*.py'
 ```
 
-597 tests covering: scoring engine, database layer, guidelines JSON, scanner
+639 tests covering: scoring engine, database layer, guidelines JSON, scanner
 modules, CDN detection, certificate chain validation, cipher enumeration,
 STARTTLS/MX handling, SSL Labs client and sweep, scheduler, DNS status of
-no-TLS domains, trends, CT monitor, roadmap generator,
+no-TLS domains, trends, CT monitor, roadmap generator, CBOM export,
 communities/organisations, and the RBAC auth layer.
+
+`pip install -r requirements-dev.txt` adds the official CycloneDX schema
+validator, so `tests/test_cbom.py` also validates the generated CBOMs against
+the CycloneDX 1.6 and 1.7 schemas. Without it that check is skipped.
 
 ---
 

@@ -218,10 +218,116 @@ def api_organisations():
     db   = _db()
     if user.is_admin:
         return jsonify(db.get_organisations())
-    # Analysts see only their assigned orgs
-    org_ids = user.org_ids
-    orgs = [db.get_organisation(oid) for oid in org_ids if oid]
-    return jsonify([o for o in orgs if o])
+    # Analysts see their assigned orgs; community managers also the orgs of
+    # their communities (same set as the Group Report, _allowed_org_ids).
+    org_ids = sorted(_allowed_org_ids(user, db) or set()) \
+        if user.is_community_manager else list(user.org_ids)
+    orgs = []
+    for oid in org_ids:
+        o = db.get_organisation(oid) if oid else None
+        if o:
+            # domains/domain_count: the dashboard's region and country filters
+            # read o.domains (the admin listing already includes them).
+            o["domains"] = db.get_org_domains(oid)
+            o["domain_count"] = len(o["domains"])
+            orgs.append(o)
+    orgs.sort(key=lambda o: (o.get("name") or "").lower())
+    return jsonify(orgs)
+
+
+# ── CBOM export (one organisation at a time) ──────────────────────────────────
+
+_FALSE_ARGS = {"0", "false", "no", "off"}
+
+
+def _flag_arg(name: str, default: bool = True) -> bool:
+    v = request.args.get(name)
+    if v is None or v == "":
+        return default
+    return v.strip().lower() not in _FALSE_ARGS
+
+
+def _cbom_scope(user, db, org_id: int):
+    """
+    Domains of `org_id` that `user` may export, plus the scope note written
+    into the CBOM. Returns (None, None) when the org is outside the user's scope.
+
+      admin              any organisation, all of its domains
+      community_manager  orgs of its communities + directly assigned orgs
+                         (_allowed_org_ids, as the Group Report), all domains
+      analyst            directly assigned orgs only, limited to the domains
+                         the analyst can already see (get_user_domains)
+    """
+    if user.is_admin:
+        allowed = None
+    elif user.is_community_manager:
+        allowed = _allowed_org_ids(user, db) or set()
+    else:
+        allowed = set(user.org_ids)
+    if allowed is not None and org_id not in allowed:
+        return None, None
+    domains = db.get_org_domains(org_id)
+    if user.is_admin or user.is_community_manager:
+        return domains, "organisation"
+    visible = set(current_app.config["AUTH_STORE"].get_user_domains(user.id))
+    scoped = [d for d in domains if d in visible]
+    if len(scoped) == len(domains):
+        return scoped, "organisation"
+    return scoped, (f"organisation, restricted to the {len(scoped)} of "
+                    f"{len(domains)} domains visible to the requesting user")
+
+
+@app_bp.route("/api/organisations/<int:org_id>/cbom")
+@require_auth
+def api_org_cbom(org_id):
+    """
+    CycloneDX CBOM (Cryptography Bill of Materials) of ONE organisation.
+
+    Query: spec=1.6 (default) | 1.7; findings=0, ct=0, notls=0 drop the
+    PQC-Monitor findings, the CT-log certificates and the services without
+    TLS. There is deliberately no all-organisations variant.
+    """
+    from reports.cbom import (SPEC_VERSIONS, DEFAULT_SPEC, generate_org_cbom,
+                              dumps, media_type, cbom_filename)
+    user = current_user()
+    if not user.can("cbom.export"):
+        return jsonify({"error": "forbidden"}), 403
+    db = _db()
+    domains, note = _cbom_scope(user, db, org_id)
+    if domains is None:
+        return jsonify({"error": "forbidden"}), 403
+    org = db.get_organisation(org_id)
+    if not org:
+        return jsonify({"error": "organisation not found"}), 404
+    spec = (request.args.get("spec") or DEFAULT_SPEC).strip()
+    if spec not in SPEC_VERSIONS:
+        return jsonify({"error": f"spec must be one of {', '.join(SPEC_VERSIONS)}"}), 400
+    include_findings = _flag_arg("findings")
+    include_ct       = _flag_arg("ct")
+    include_no_tls   = _flag_arg("notls")
+    try:
+        bom = generate_org_cbom(db, org, domains, spec=spec,
+                                include_findings=include_findings,
+                                include_ct=include_ct,
+                                include_no_tls=include_no_tls,
+                                scope_note=note)
+    except Exception:
+        logger.exception("CBOM export failed for org %s", org_id)
+        return jsonify({"error": "CBOM generation failed"}), 500
+    _audit("cbom.export", resource=f"org:{org_id}",
+           detail=(f"spec={spec} domains={len(domains)} "
+                   f"components={len(bom.get('components', []))} "
+                   f"findings={int(include_findings)} ct={int(include_ct)} "
+                   f"notls={int(include_no_tls)}"))
+    return Response(
+        dumps(bom),
+        content_type=f"{media_type(spec)}; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{cbom_filename(org)}"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 # TCP port -> service label. Direct-TLS ports plus the STARTTLS set; anything

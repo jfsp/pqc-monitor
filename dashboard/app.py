@@ -693,6 +693,14 @@ footer {
             <option value="">All Countries</option>
           </select>
           <button class="btn-outline" id="btn-clear-filter" style="display:none" onclick="setFilter(null)">✕ Clear filter</button>
+          <span class="cbom-export" title="Download the organisation's Cryptography Bill of Materials (CycloneDX CBOM). Select an organisation first.">
+            <button class="btn-outline" id="btn-org-cbom" onclick="exportOrgCbom()" disabled>⬇ CBOM</button>
+            <select id="cbom-spec" aria-label="CycloneDX version"
+              style="background:var(--panel);border:1px solid var(--border);color:var(--text);padding:.25rem .3rem;border-radius:4px;font-size:.72rem">
+              <option value="1.6">CycloneDX 1.6</option>
+              <option value="1.7">CycloneDX 1.7</option>
+            </select>
+          </span>
           <button class="btn-outline" onclick="loadAssessments()">↻ Refresh</button>
         </div>
       </div>
@@ -1277,6 +1285,7 @@ footer {
         <th onclick="grSort('ready')" style="text-align:right;cursor:pointer" title="Ready">Ready <span class="gr-sort-ind" data-col="ready"></span></th>
         <th onclick="grSort('no_tls')" style="text-align:right;cursor:pointer" title="No TLS">NTLS <span class="gr-sort-ind" data-col="no_tls"></span></th>
         <th onclick="grSort('pqc_count')" style="text-align:right;cursor:pointer" title="PQC detected">PQC <span class="gr-sort-ind" data-col="pqc_count"></span></th>
+        <th style="text-align:center" title="Download the organisation's CBOM (CycloneDX, version chosen on the Dashboard; default 1.6)">CBOM</th>
       </tr></thead>
       <tbody id="gr-tbody"></tbody>
     </table>
@@ -1467,6 +1476,28 @@ function populateOrgDropdown() {
   const current = sel.value;
   sel.innerHTML = '<option value="">All Organisations</option>' +
     _orgsCache.map(o => `<option value="${o.id}" ${current == o.id ? 'selected' : ''}>${esc(o.name)}</option>`).join('');
+  updateCbomButton();
+}
+
+// ─── CBOM export (one organisation at a time) ───────────────────────────────
+function updateCbomButton() {
+  const btn = document.getElementById('btn-org-cbom');
+  if (!btn) return;
+  const orgId = document.getElementById('filter-org')?.value || '';
+  btn.disabled = !orgId;
+  const org = _orgsCache.find(o => String(o.id) === String(orgId));
+  btn.title = org ? `Download the CBOM of ${org.name}` : 'Select an organisation first';
+}
+
+function cbomUrl(orgId, spec) {
+  const v = spec || document.getElementById('cbom-spec')?.value || '1.6';
+  return `/app/api/organisations/${encodeURIComponent(orgId)}/cbom?spec=${encodeURIComponent(v)}`;
+}
+
+function exportOrgCbom() {
+  const orgId = document.getElementById('filter-org')?.value || '';
+  if (!orgId) return;
+  window.location = cbomUrl(orgId);
 }
 
 function populateRegionDropdown() {
@@ -1498,6 +1529,7 @@ function applyDropdownFilters() {
   _activeOrg     = document.getElementById('filter-org')?.value     || '';
   _activeRegion  = document.getElementById('filter-region')?.value  || '';
   _activeCountry = document.getElementById('filter-country')?.value || '';
+  updateCbomButton();
   applyFilterAndSort();
 }
 
@@ -3354,6 +3386,9 @@ function grRenderTable() {
       <td style="text-align:right;color:#22c55e">${o.ready||0}</td>
       <td style="text-align:right;color:var(--muted)">${o.no_tls||0}</td>
       <td style="text-align:right;color:#38bdf8">${o.pqc_count||0}</td>
+      <td style="text-align:center">${o.id != null
+        ? `<button class="btn-outline" style="font-size:.7rem;padding:.1rem .45rem" data-org-id="${esc(String(o.id))}" onclick="grExportCbom(this.dataset.orgId)" title="Download the CBOM of ${esc(o.name||'')}">⬇</button>`
+        : ''}</td>
     </tr>`;
   }).join('');
 
@@ -3382,6 +3417,7 @@ function grRenderTable() {
     <td style="text-align:right;color:#22c55e">${tot.ready}</td>
     <td style="text-align:right;color:var(--muted)">${tot.no_tls}</td>
     <td style="text-align:right;color:#38bdf8">${tot.pqc_count}</td>
+    <td></td>
   </tr>`;
 
   table.style.display = '';
@@ -3502,6 +3538,11 @@ function grExportPDF() {
     ? `/app/api/regions/${encodeURIComponent(val)}/report.pdf`
     : `/app/api/countries/${encodeURIComponent(val)}/report.pdf`;
   window.location = url;
+}
+
+function grExportCbom(orgId) {
+  if (!orgId) return;
+  window.location = cbomUrl(orgId);
 }
 
 </script>

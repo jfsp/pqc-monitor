@@ -1446,6 +1446,7 @@ async function loadOrgs() {
     <td>
       <button class="btn btn-outline btn-sm" onclick="openEditOrg(${o.id})">Edit</button>
       <button class="btn btn-outline btn-sm" onclick="openOrgDomains(${o.id},'${esc(o.name)}')">Domains</button>
+      <a class="btn btn-outline btn-sm" href="/app/api/organisations/${o.id}/cbom" title="Download the CycloneDX CBOM (1.6) of this organisation" style="text-decoration:none">⬇ CBOM</a>
       <button class="btn btn-danger btn-sm" onclick="deleteOrg(${o.id},'${esc(o.name)}')">Delete</button>
     </td>
   </tr>`).join('') || '<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:1.5rem">No organisations yet.</td></tr>';

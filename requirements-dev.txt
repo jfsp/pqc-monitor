@@ -1,0 +1,10 @@
+# PQC-Monitor development / test-only requirements
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Not needed in production. Install on top of requirements.txt:
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+# Official CycloneDX JSON schemas + strict validator, used by
+# tests/test_cbom.py to validate generated CBOMs (1.6 and 1.7).
+# Without it that check is skipped.
+cyclonedx-python-lib[json-validation]>=8.0

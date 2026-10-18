@@ -1199,6 +1199,149 @@ class Database:
             ).fetchone()
         return row["run_id"] if row else None
 
+    # ─── CBOM export (per organisation) ───────────────────────────
+    # Bulk readers for reports/cbom.py. Every statement seeks an index by
+    # domain (one small query per domain inside a single connection) so an
+    # export never scans assessments/raw_scans/domain_extra, which carry large
+    # JSON blobs. See HANDOVER §2.12d.
+
+    _CBOM_IN_CHUNK = 500
+
+    def latest_assessments_for(self, domains) -> dict:
+        """
+        Newest assessment row per domain for the given domains, keyed by the
+        domain spelling stored in `assessments`. Matching is exact first
+        (index seek); names with no exact hit are retried case-insensitively
+        with one index-only scan, because domains are not normalised on write.
+        Domains never assessed are simply absent from the result.
+        """
+        names = list(dict.fromkeys(
+            d.strip() for d in (domains or []) if d and d.strip()))
+        if not names:
+            return {}
+        stored: set = set()
+        with self._connect() as conn:
+            for i in range(0, len(names), self._CBOM_IN_CHUNK):
+                chunk = names[i:i + self._CBOM_IN_CHUNK]
+                ph = ",".join("?" * len(chunk))
+                stored.update(r[0] for r in conn.execute(
+                    f"SELECT DISTINCT domain FROM assessments WHERE domain IN ({ph})",
+                    chunk))
+            stored_lc = {s.lower() for s in stored}
+            missing = sorted({n.lower() for n in names} - stored_lc)
+            for i in range(0, len(missing), self._CBOM_IN_CHUNK):
+                chunk = missing[i:i + self._CBOM_IN_CHUNK]
+                ph = ",".join("?" * len(chunk))
+                stored.update(r[0] for r in conn.execute(
+                    f"SELECT DISTINCT domain FROM assessments "
+                    f"WHERE lower(domain) IN ({ph})", chunk))
+            out = {}
+            for name in sorted(stored):
+                row = conn.execute(
+                    "SELECT * FROM assessments WHERE domain=? "
+                    "ORDER BY assessed_at DESC, id DESC LIMIT 1", (name,)
+                ).fetchone()
+                if row:
+                    out[name] = self._parse_assessment_row(row)
+        return out
+
+    def latest_network_scans_for(self, domains) -> dict:
+        """
+        Raw probe results of the most recent run that actually probed each
+        domain: {domain: {"run_id", "scanned_at", "scans": [raw dicts]}}.
+
+        Not the run of the newest assessment: a score-only reassessment
+        (scripts/reassess_all.py, /api/reassess) writes assessments under a
+        new run that has no raw_scans rows.
+        """
+        out = {}
+        with self._connect() as conn:
+            for d in dict.fromkeys(domains or []):
+                head = conn.execute(
+                    "SELECT run_id, scanned_at FROM raw_scans WHERE domain=? "
+                    "ORDER BY scanned_at DESC, id DESC LIMIT 1", (d,)
+                ).fetchone()
+                if not head:
+                    continue
+                # "+run_id" keeps the planner on idx_raw_scans_domain; the
+                # run index would visit every row of a multi-thousand-domain run.
+                rows = conn.execute(
+                    "SELECT raw_json FROM raw_scans WHERE domain=? AND +run_id=? "
+                    "ORDER BY port, id", (d, head["run_id"])
+                ).fetchall()
+                scans = []
+                for r in rows:
+                    try:
+                        if r["raw_json"]:
+                            scans.append(json.loads(r["raw_json"]))
+                    except Exception:
+                        continue
+                out[d] = {"run_id": head["run_id"],
+                          "scanned_at": head["scanned_at"], "scans": scans}
+        return out
+
+    def latest_extra_for(self, domains, data_types) -> dict:
+        """
+        Latest enrichment blob per (domain, data_type) for the given domains:
+        {domain: {data_type: blob}}. Each dict blob gains '_recorded_at' and
+        '_run_id' like get_latest_domain_extra(), but only the wanted blobs
+        are read (seek on idx_domain_extra_domain).
+        """
+        types = list(dict.fromkeys(data_types or []))
+        out = {}
+        with self._connect() as conn:
+            for d in dict.fromkeys(domains or []):
+                got = {}
+                for t in types:
+                    row = conn.execute(
+                        "SELECT json_data, recorded_at, run_id FROM domain_extra "
+                        "WHERE domain=? AND data_type=? "
+                        "ORDER BY recorded_at DESC LIMIT 1", (d, t)
+                    ).fetchone()
+                    if not row:
+                        continue
+                    try:
+                        blob = json.loads(row["json_data"])
+                    except Exception:
+                        continue
+                    if isinstance(blob, dict):
+                        blob["_recorded_at"] = row["recorded_at"]
+                        blob["_run_id"] = row["run_id"]
+                    got[t] = blob
+                if got:
+                    out[d] = got
+        return out
+
+    def ct_certificates_for(self, domains, scan_limit: int = 200) -> dict:
+        """
+        Certificates seen in CT logs for each domain, latest expiry first:
+        {domain: [row dicts]}. At most `scan_limit` rows are read per domain;
+        validity filtering and the per-domain cap are left to the caller
+        (crt.sh timestamps are not uniformly formatted).
+        """
+        out = {}
+        with self._connect() as conn:
+            for d in dict.fromkeys(domains or []):
+                rows = conn.execute(
+                    "SELECT * FROM ct_certificates WHERE domain=? "
+                    "ORDER BY not_after DESC, id DESC LIMIT ?",
+                    (d, max(int(scan_limit), 0))
+                ).fetchall()
+                if not rows:
+                    continue
+                certs = []
+                for row in rows:
+                    c = dict(row)
+                    for f in ("pqc_algorithms", "sans"):
+                        if isinstance(c.get(f), str):
+                            try:
+                                c[f] = json.loads(c[f])
+                            except Exception:
+                                c[f] = []
+                    certs.append(c)
+                out[d] = certs
+        return out
+
     # ─── Certificate Transparency ─────────────────────────────────
 
     def save_ct_summary(self, summary: dict):

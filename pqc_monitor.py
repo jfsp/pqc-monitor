@@ -457,6 +457,66 @@ def export_cmd(ctx, fmt, run_id, output):
         click.echo(content, nl=False)
 
 
+@cli.command("cbom")
+@click.option("--org", "org_ref", required=True,
+              help="Organisation id, or its exact name (case-insensitive)")
+@click.option("--spec", type=click.Choice(["1.6", "1.7"]), default="1.6",
+              show_default=True, help="CycloneDX specification version")
+@click.option("--no-findings", is_flag=True,
+              help="Leave out the PQC-Monitor findings (annotations)")
+@click.option("--no-ct", is_flag=True,
+              help="Leave out certificates found only in CT logs")
+@click.option("--no-notls", is_flag=True,
+              help="Leave out domains without TLS and domains not yet assessed")
+@click.option("--output", "-o", default=None,
+              help="Output file (default: cbom-<org>-<date>.cdx.json; '-' for stdout)")
+@click.pass_context
+def cbom_cmd(ctx, org_ref, spec, no_findings, no_ct, no_notls, output):
+    """Export one organisation's CBOM (CycloneDX Cryptography Bill of Materials).
+
+    The same document as the dashboard's "CBOM" download for that organisation,
+    with all of its domains (CLI runs with full access).
+
+    Examples:
+      pqc_monitor.py cbom --org 12
+      pqc_monitor.py cbom --org "Banco Ejemplo" --spec 1.7 -o bank.cdx.json
+    """
+    cfg = ctx.obj["config"]
+    db  = Database(cfg.get("db_path", "data/pqc_monitor.db"))
+    sys.path.insert(0, ROOT)
+    from reports.cbom import generate_org_cbom, dumps, cbom_filename
+
+    org = db.get_organisation(int(org_ref)) if str(org_ref).isdigit() else None
+    if org is None:
+        matches = [o for o in db.get_organisations()
+                   if (o.get("name") or "").strip().lower() == str(org_ref).strip().lower()]
+        if len(matches) > 1:
+            click.echo(f"❌ {len(matches)} organisations are named '{org_ref}'; "
+                       f"use the id: " + ", ".join(f"#{o['id']}" for o in matches), err=True)
+            raise SystemExit(1)
+        org = matches[0] if matches else None
+    if org is None:
+        click.echo(f"❌ Organisation '{org_ref}' not found.", err=True)
+        raise SystemExit(1)
+
+    domains = db.get_org_domains(org["id"])
+    bom = generate_org_cbom(db, org, domains, spec=spec,
+                            include_findings=not no_findings,
+                            include_ct=not no_ct, include_no_tls=not no_notls)
+    content = dumps(bom)
+    if output == "-":
+        click.echo(content, nl=False)
+        return
+    path = output or cbom_filename(org)
+    import os as _os
+    _os.makedirs(_os.path.dirname(_os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    click.echo(f"✅ CBOM (CycloneDX {spec}) for '{org['name']}': "
+               f"{len(domains)} domains, {len(bom.get('components', []))} "
+               f"crypto components, {len(bom.get('services', []))} services → {path}")
+
+
 @cli.command("report")
 @click.option("--run-id", default=None, help="Specific scan run (default: latest per domain)")
 @click.option("--output", "-o", default="data/report.txt",

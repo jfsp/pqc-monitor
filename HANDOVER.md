@@ -1,8 +1,8 @@
 # PQC-Monitor — Developer Handover Document
 
 **Version:** 1.12.0 (released, tag `v1.12.0`)
-**Date:** 2026-09-19
-**Status:** Active development — v1.12.0: time-based Trends tab (snapshot/activity views, org/community scope, RBAC-scoped API, cached); DB-driven scheduler (APScheduler removed) with no-TLS rescan, DNS presence tracking and throttled SSL Labs sweep; domain detail screen. No schema change since v18. Production is a small VM (2 vCPU, ~1 GB RAM) behind a Cloudflare Tunnel — keep per-request work index-only and bounded (see §2.12c). Scheduler/sweep deployed and confirmed working 2026-09-19; follow-up debugging continues in a separate session (§2.12b "Open")
+**Date:** 2026-10-16 (CBOM export, unreleased; §2.12d)
+**Status:** Active development — v1.12.0: time-based Trends tab (snapshot/activity views, org/community scope, RBAC-scoped API, cached); DB-driven scheduler (APScheduler removed) with no-TLS rescan, DNS presence tracking and throttled SSL Labs sweep; domain detail screen. No schema change since v18. Production is a small VM (2 vCPU, ~1 GB RAM) behind a Cloudflare Tunnel — keep per-request work index-only and bounded (see §2.12c). Scheduler/sweep deployed and confirmed working 2026-09-19; follow-up debugging continues in a separate session (§2.12b "Open"). **Unreleased (2026-10-16):** per-organisation CycloneDX CBOM export (§2.12d). A code review the same day found open defects, two of them serious (a persistence regression and in-app reassessment wiping PQC status); see §8.8 before the next release
 **Purpose:** Context transfer for continuing development in a new session
 **Repository:** https://github.com/jfsp/pqc-monitor
 
@@ -98,6 +98,7 @@ copy it to `/etc/systemd/system/` and `systemctl daemon-reload` by hand.
 | 1.9.1 | Fix: MX priority/non-FQDN normalisation (+ DB repair script); SMTP/STARTTLS reported no-TLS on 465/587/2525 (protocol-based dispatch, added 2525) |
 | 1.11.0 | User management Phase 1 (mailer, `/forgot` + `/reset`, `session_epoch`, `must_change_password`, CSRF, auth hardening; **schema v18**); schedule coverage audit + monthly auto-schedule; dashboard shows TLS-serving ports |
 | 1.10.0 | **PQC detection was broken for every server ever scanned** — rewritten to enumerate the key-exchange groups the server *offers* (raw ClientHello + HelloRetryRequest). New `scanner/group_enum.py`, `scripts/pqc_selftest.py`, GREASE soundness control, `domain_extra` index fix (full table scan → indexed) |
+| Unreleased | **CBOM export** per organisation (CycloneDX 1.6 default / 1.7): `reports/cbom.py`, `GET /app/api/organisations/<id>/cbom`, `pqc_monitor.py cbom`, permission `cbom.export`; `/api/organisations` returns community orgs to community managers (+ `domains` for non-admins) |
 | 1.12.0 | Time-based **Trends** (`data/trends.py`: calendar buckets, auto granularity, snapshot/activity, org/community scope, RBAC fix, result cache, covering index `idx_assessments_trend`); DB-driven scheduler (`next_run` source of truth, APScheduler removed); no-TLS monthly rescan + `dns_status`; throttled SSL Labs sweep (inline scan lookup removed); domain detail screen (`#domain/<name>`); dashboard loading state; fix: IP-address SANs dropped the domain's result; fix: `/api/domain` never returned `group_enum` |
 
 ### 2.8 — v1.8.0 detail
@@ -768,16 +769,120 @@ set_real_ip_from ::1; real_ip_header CF-Connecting-IP;` and `$ssl_*`
 variables are empty. Access log uses the `apm_cf` format (request_time,
 upstream timings, cf_ray, request id).
 
+### 2.12d — Unreleased: CBOM export per organisation (2026-10-16)
+
+**Goal.** An organisation can take its cryptographic inventory out of
+PQC-Monitor and load it into its own tools. The format is a CycloneDX
+*Cryptography Bill of Materials*: the CBOM model that IBM/CBOM upstreamed
+into CycloneDX 1.6, as described in the OWASP *Authoritative Guide to CBOM*
+(2nd ed., CycloneDX 1.7). It is generated for **one organisation at a time**.
+There is deliberately no export of all organisations.
+
+**Spec version.** 1.6 is the default. CBOMkit-coeus (the viewer) reads
+the 1.6 relation fields: `signatureAlgorithmRef`, `subjectPublicKeyRef`,
+`algorithmRef` and `cryptoRefArray`. cyclonedx-core-java
+(Dependency-Track, CBOMkit) and cyclonedx-python-lib also read 1.6.
+`?spec=1.7` adds certificate `serialNumber`, `fingerprint`,
+`certificateState`, `certificateExtensions` (SAN, basicConstraints) and
+`relatedCryptographicAssets`, plus `algorithmFamily` and `ellipticCurve` from
+the CycloneDX cryptography registry. Fields deprecated in 1.7 are not
+emitted in 1.7. Verified for both versions: JSON-schema strict validation
+with cyclonedx-python-lib and @cyclonedx/cyclonedx-library (ajv), and
+deserialisation with cyclonedx-python-lib. The CBOMkit viewer source was
+checked to confirm it reads these relation fields.
+
+**Model** (`reports/cbom.py`, module docstring):
+
+| CycloneDX element | Content |
+|---|---|
+| `metadata.component` | `platform` "<org> — internet-facing services", `bom-ref org/<id>`; supplier = organisation; `lifecycles: discovery`; org/scope counts as `pqc-monitor:*` properties |
+| `services[]` | one per domain (`service/<host>`); `endpoints` = URIs of ports that completed a handshake (`https://h:443`, `smtp://h:25` for STARTTLS, …); score, level, has-pqc, grading basis, offered/PQC groups, CDN, SSL Labs grade, HSTS/DANE/DNSSEC, finding counts as properties. No-TLS (`level=na`, with `dns-status`) and not-yet-assessed domains have no endpoints |
+| `protocol` | one per endpoint and TLS version (`crypto/protocol/tls1.3@h:443`): cipher suites with algorithm refs and IANA code points (two-byte form `["0x13","0x01"]`, as in the schema example), offered TLS 1.3 groups in `cryptoRefArray` (1.6) / `relatedCryptographicAssets` and `tlsGroups` (1.7), `pqc-monitor:pqc-key-exchange` = offered / not offered / unknown, `cipher-suites-source` = enumerated / negotiated / server-preferred |
+| `algorithm` | deduplicated (`crypto/algorithm/<name>`); names follow cryptography-defs patterns (`AES-128-GCM`, `ECDH-P-256`, `RSA-PKCS1-1.5-SHA-256`, `ML-KEM-768`, …); `nistQuantumSecurityLevel`, `classicalSecurityLevel`, OIDs. Hybrid TLS groups are `kem` components that depend on their parts (X25519MLKEM768 → ML-KEM-768 + x25519) |
+| `certificate` | `crypto/certificate/sha256:<fp>`; leaf per endpoint, CA chain from the `chain` blob (issuer linked through dependencies), valid CT-log certificates (≤ 20 per domain, crt.sh URL as occurrence). The same fingerprint seen in several places merges into one component (role/source properties) |
+| `related-crypto-material` | public key of each certificate (size, state, algorithm ref) |
+| `evidence.occurrences` | every endpoint / crt.sh entry where the asset was seen (`additionalContext` says how) |
+| `dependencies` | org → services → protocols + leaf certs → algorithms / keys / issuer cert; every node declared |
+| `annotations` | one per PQC-Monitor finding on the domain's service (severity, category, guideline, message, recommendation) |
+| `compositions` | `incomplete`: only externally observable crypto |
+
+**Data source.** The source is the newest assessment per domain, together with
+the raw scans of the newest run that *actually probed* the domain
+(`latest_network_scans_for`), not those of the newest assessment's run. A
+score-only reassessment writes a run that has no raw scans. Enrichment data
+is the newest blob per type (`chain`, `cipher_enum`, `group_enum`, `cdn`,
+`ssllabs`, `dns_status`). Assessment names are matched exactly, with a
+case-insensitive fallback, because domains are not normalised on write.
+Domains in the org list with no assessment become "not assessed" services.
+
+**Performance (small VM).** Four new `Database` readers
+(`latest_assessments_for`, `latest_network_scans_for`, `latest_extra_for`,
+`ct_certificates_for`) do one indexed seek per domain inside one connection.
+`+run_id` keeps the planner on `idx_raw_scans_domain`, and
+`idx_domain_extra_domain` serves `(domain, data_type)`. The only scan is the
+case-insensitive fallback, which is index-only on `idx_assessments_domain`.
+Measured: 500 domains × 10 runs in about 0.5 s, producing a 6 MB file.
+
+**RBAC.** The new permission `cbom.export` is granted to all three roles; `_cbom_scope()` in
+`app_routes.py` applies it:
+- admin: any org, all domains.
+- community_manager: orgs in `_allowed_org_ids()` (communities + direct), all
+  domains. Those domains are already visible to them, because
+  `get_user_domains()` includes the community path.
+- analyst: directly assigned orgs only (`user.org_ids`), intersected with
+  `get_user_domains()`; the scope note in the CBOM says so if restricted.
+  Unknown and foreign org ids both return 403.
+Every export is audited: `cbom.export`, resource `org:<id>`, detail with
+spec/domain/component counts and flags.
+
+**UI.** The Dashboard has a "⬇ CBOM" button and a "CycloneDX 1.6/1.7"
+selector next to the organisation filter. The button is disabled until an
+organisation is selected. The Group Report has a new CBOM column with one
+button per organisation row (it uses the version chosen on the Dashboard).
+Admin → Organisations has a "⬇ CBOM" link that exports 1.6. Downloads go to
+`/app/api/...` directly with `window.location`; they are not `fetch()` calls,
+so no path rewrite is needed. `/api/organisations` now returns community
+orgs to community managers, and `domains`/`domain_count` to non-admins. This
+also fixes the region and country filters for non-admins, which did nothing
+before.
+
+**Known limits** (from the scanner, not the exporter):
+- chain-of-trust certificates appear only once §8.8 item 4 is fixed and
+  domains are rescanned;
+- TLS 1.3 suites are the server-preferred suite only (§8.8 item 9);
+- offered groups and full cipher lists exist only for port 443 (§8.8 item 5);
+  STARTTLS ports carry the negotiated suite only;
+- EC curves are inferred from the key size (P-256/384/521) because the
+  scanner stores no curve name. The property
+  `curve-inferred-from-key-size` marks this case. CT certificates carry the
+  real curve.
+
+**Files:** `reports/cbom.py` (new), `data/database.py`, `app_routes.py`,
+`auth/models.py`, `dashboard/app.py`, `admin/routes.py`, `pqc_monitor.py`,
+`tests/test_cbom.py` (new, 42 tests), `requirements-dev.txt` (new),
+`CHANGELOG.md`, `README.md`, `HANDOVER.md`, `docs/PQC-Monitor-USER_MANUAL.md`.
+No schema change. No new runtime dependency. `deploy.sh` already triggers a
+web restart on `reports/`, `data/`, `auth/`, `admin/` and `dashboard/`.
+
+**Deploy / verify**
+1. Deploy (web restarts; scheduler restarts because `data/` changed).
+2. As admin: Dashboard → pick an organisation → ⬇ CBOM. Check that
+   `audit_log` has a `cbom.export` row.
+3. Optional: drop the file into CBOMkit-coeus, or run
+   `cyclonedx-cli validate --input-file <file>`.
+4. CLI: `sudo -u pqcmonitor .venv/bin/python pqc_monitor.py --config
+   /etc/pqc-monitor/config.yaml cbom --org <id> -o /tmp/org.cdx.json`.
+
 ### 2.13 — Production actions taken on the live DB (v1.10.0 session)
 
 1. Ran `fix_mx_entries.py` — repaired malformed `domain` keys
-   (`5 smtp.bde.es` → `smtp.bde.es`, `20 mail01.bancaditalia.it` → …,
+   (`5 smtp.xxxx.xxxx` → `smtp.xxxxxx.xxx`, `20 xxxxx.xxxxxx.xxx` → …,
    `primary DNS domain` deleted).
-2. Discovered a batch of no-TLS hosts (`a-bancox2.bde.es`, `x-www.bde.es`,
-   several `escb.eu`) showing **"30 weak"**. Root cause: a reassess run
+2. Discovered a batch of no-TLS hosts showing **"30 weak"**.
+   Root cause: a reassess run
    (`06b6e9c1`, 2026-07-10 08:53) executed with the **pre-fix assessor**.
    Confirmed via `services_assessed=0` on those rows.
-3. Deleted the erroneous rows manually:
+4. Deleted the erroneous rows manually:
    `DELETE FROM assessments WHERE services_assessed=0 AND level!='na';`
    After the delete, the hosts correctly show **No TLS** again (the older
    `na` row became the newest).
@@ -925,7 +1030,8 @@ pqc-monitor/
 │   └── generator.py        # PQC migration roadmap generator
 ├── reports/
 │   ├── report_generator.py # CSV/JSON/text export
-│   └── community_report.py # Group Report: build_report(), export_csv(), export_pdf()
+│   ├── community_report.py # Group Report: build_report(), export_csv(), export_pdf()
+│   └── cbom.py             # CycloneDX CBOM per organisation (1.6 / 1.7) (NEW, §2.12d)
 ├── scanner/
 │   ├── orchestrator.py     # Scan coordinator (no SSL Labs calls since v1.12.0)
 │   ├── tls_probe.py        # TLS handshake prober
@@ -977,8 +1083,9 @@ pqc-monitor/
 ├── Dockerfile              # Container image (development convenience)
 ├── docker-compose.yml      # Compose stack for local runs
 ├── requirements.txt
-├── tests/                  # 597 tests at v1.12.0 (all passing on main; test_trends.py
-│                           #   and test_scheduler_sweep_dns.py NEW v1.12.0)
+├── requirements-dev.txt    # test-only: cyclonedx-python-lib (CBOM schema checks) (NEW)
+├── tests/                  # 639 tests (597 at v1.12.0 + 42 in test_cbom.py, NEW);
+│                           #   2 test_trends.py API tests are date-dependent (§8.8)
 └── config/
     └── config.yaml.example
 ```
@@ -1267,7 +1374,8 @@ Bulk collection is the scheduled sweep (§2.12b), not an endpoint.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/api/organisations` | user | Orgs visible to current user |
+| GET | `/api/organisations` | user | Orgs visible to current user (community managers: + their communities' orgs); non-admin rows include `domains`, `domain_count` |
+| GET | `/api/organisations/<id>/cbom` | `cbom.export` + scope | CycloneDX CBOM of one org (§2.12d). `spec=1.6\|1.7`, `findings=0`, `ct=0`, `notls=0`. 403 outside scope (incl. unknown ids for non-admins), 404 unknown id (admin), 400 bad spec. Audited `cbom.export` |
 | POST | `/api/organisations` | admin | Create org |
 | PUT | `/api/organisations/<id>` | admin | Update org |
 | DELETE | `/api/organisations/<id>` | admin | Delete org |
@@ -1281,8 +1389,8 @@ Bulk collection is the scheduled sweep (§2.12b), not an endpoint.
 | Role | Key permissions |
 |------|----------------|
 | `admin` | Everything: scan, discover, manage users/lists/orgs/communities, CT, roadmap |
-| `community_manager` | View Group Report for assigned communities only; cannot scan or manage |
-| `analyst` | View assessments/roadmaps/CT for assigned domains only |
+| `community_manager` | View Group Report for assigned communities only; CBOM export of those orgs; cannot scan or manage |
+| `analyst` | View assessments/roadmaps/CT for assigned domains only; CBOM export of directly assigned orgs (visible domains only) |
 
 ### Session and password handling (v1.11.0)
 
@@ -1309,7 +1417,8 @@ Access = union of:
 2. All orgs in `user.community_ids` (via `db.get_community_orgs(cid)`)
 
 Computed by `_allowed_org_ids(user, db)` in `app_routes.py`. Returns `None` for
-admins. Applied to all group report endpoints.
+admins. Applied to all group report endpoints, to `/api/organisations` for
+community managers and to the CBOM export (`_cbom_scope`).
 
 ### Dashboard tab visibility
 
@@ -1394,6 +1503,78 @@ Also run `python3 -m py_compile scanner/dns_enumerator.py` before deploying.
 - **Header nav overflows** horizontally below ~600 px.
 - `apscheduler` can be dropped from `requirements.txt` (no longer imported
   by the scheduler) once confirmed unused elsewhere.
+
+### 8.8 Code review 2026-10-16 (open; ranked)
+
+Verified against `main` (v1.12.0 + docs commits). None of these items is fixed
+by the CBOM delivery. The plan is to fix them as separate deltas.
+
+1. **`save_assessment` regression.** Commit `69a9259` (perf: index
+   domain_extra…) reverted fix `ae26eef` an hour after it landed. The INSERT
+   again omits `services_assessed` and `key_types`, so every row written
+   since 2026-07-12 has `0`/`NULL`. The audit's invariant checks fire again,
+   and `scripts/backfill_services_assessed.py` needs to run again after the
+   fix. This is the P3 class of bug (§11).
+2. **`Orchestrator.reassess_run` loses PQC.** It is used by
+   `POST /api/reassess`, `pqc_monitor.py reassess` and the legacy dashboard.
+   It does not pass `group_enum`, so every reassessed row becomes
+   `has_pqc=False` with basis "negotiated" and is then the newest row. It
+   also drops the chain, cipher and CDN extra findings, and it feeds failed
+   probes to the assessor. `scripts/reassess_all.py` does all of this
+   correctly; reuse its logic.
+3. **RBAC leaks.**
+   - `/api/export` has no scoping: analysts and community managers download
+     every domain. The user manual (§10) says these exports are scoped; they
+     are not.
+   - The Scan tab's Export buttons call `/api/export` without `/app`, so they
+     return 404 in production.
+   - `/api/runs` sends every run's `domain_list` to all users (§8.7).
+   - `GET /api/schedules` is unscoped.
+   - `/api/ct/stats`, `/api/ct/timeline` and `/api/roadmap/stats` are global
+     aggregates.
+4. **`chain_validator` analyses only the leaf.** On Python 3.13,
+   `SSLSocket.get_verified_chain()` returns DER `bytes`. The code then calls
+   `.public_bytes()` on them, hits `AttributeError` and silently falls back to
+   the leaf. This was reproduced against a local 3-certificate chain on 3.13.
+   Intermediate and root analysis has never run in production. Fix: use
+   `get_unverified_chain()` (the chain as sent) and accept `bytes`.
+5. **`primary_port` is hard-coded to 443** in `_scan_domain`. Chain, cipher
+   and group enumeration always probe 443, so mail-only hosts (25/465/587)
+   never get offered-group data and are graded on the "negotiated" basis;
+   `service_type` is always web. Use the first successful direct-TLS port (or
+   run per TLS port).
+6. **Client IP is spoofable.** `_get_client_ip()` takes the leftmost
+   `X-Forwarded-For` value, which the client controls, because nginx
+   *appends*. The per-IP limits on `/login` and `/forgot`, and the audit IPs,
+   can be forged. Use `X-Real-IP` set by nginx after `real_ip`, or ProxyFix
+   with one trusted hop. Related: the login limiter is in memory per worker.
+7. **Domain view shows no TLS ports after a score-only reassess.**
+   `_tls_ports_for` reads the raw scans of the newest *assessment's* run,
+   which has none. Use the latest probed run, as
+   `Database.latest_network_scans_for` does.
+8. **Time-bomb tests.** `test_trends.TestTrendsAPI.test_admin_sees_all` and
+   `test_analyst_scoped_to_own_domains` fail since about 2026-10: their
+   fixtures are dated July/August and drop out of the 90-day stale window.
+   Make the dates relative to now.
+9. **TLS 1.3 suites are not enumerated.** `_probe_tls13` stops after the
+   server-preferred suite, because the ssl module cannot restrict TLS 1.3
+   suites. A raw ClientHello (as in `group_enum`) would fix it. The TLS 1.2
+   probe list also lacks the ECDHE-ECDSA CBC suites.
+10. **`community` CLI subcommands open the wrong DB.** They read
+    `ctx.obj.get("db_path")`, but `ctx.obj` is `{"config": …}`, so they always
+    open the relative `data/pqc_monitor.db`.
+11. Low:
+    - `get_latest_assessments` returns duplicate rows for domains in more
+      than one org.
+    - `get_latest_domain_extra` reads every blob of a domain and filters in
+      Python.
+    - The `tls_probe` certificate parser stores no EC curve name or full DN,
+      and its signature map lacks PSS and ML-DSA.
+    - After ↻ Refresh the Dashboard's org/region/country selects keep their
+      value, but the table is unfiltered.
+    - Admin org buttons put `esc(name)` inside a JS string in an `onclick`
+      attribute. That is self-XSS by admins only, but should use
+      `data-*` attributes.
 
 ---
 
@@ -1683,8 +1864,8 @@ raise `IntegrityError`.
 
 ### P2 — Single `canonical_domain()` choke point (S/M)
 
-**Why:** the MX-priority bug class, case variants (`WWW.bde.es` vs
-`www.bde.es`), trailing dots and punycode/unicode IDN duplicates all exist
+**Why:** the MX-priority bug class, case variants (`WWW.xxxxx.xxxx` vs
+`www.xxxxx.xx`), trailing dots and punycode/unicode IDN duplicates all exist
 because normalisation happens per-module, inconsistently. One function, called
 at every ingress, removes four audit categories.
 
@@ -1812,8 +1993,11 @@ card shows the latest counts with a drill-down to the text report.
 
 ## Appendix A — Running the Test Suite
 
-Current suite at v1.12.0: **597 tests, all passing** on `main` (includes
-`test_trends.py` and `test_scheduler_sweep_dns.py`, both new in v1.12.0).
+Current suite: **639 tests** (597 at v1.12.0 + 42 in `test_cbom.py`). Since
+about 2026-10, two `test_trends.TestTrendsAPI` tests fail because their fixture
+dates are fixed (§8.8 item 8); everything else passes. `test_cbom.py` validates
+against the CycloneDX schemas only when `pip install -r requirements-dev.txt`
+has been run; without it that one test is skipped.
 
 ```bash
 source .venv/bin/activate

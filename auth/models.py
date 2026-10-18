@@ -42,6 +42,7 @@ PERMISSIONS = {
         "community.manage",      # create / edit / delete communities
         "community.view_all",    # see all communities
         "group_report.view",     # access Group Report tab
+        "cbom.export",           # CycloneDX CBOM of any organisation
     },
     ROLE_COMMUNITY_MANAGER: {
         "domain_list.view_own",  # see only assigned domain lists
@@ -52,6 +53,7 @@ PERMISSIONS = {
         "org.view_own",          # see own org assignments only
         "community.view_own",    # see assigned communities only
         "group_report.view",     # access Group Report tab
+        "cbom.export",           # CBOM of orgs in own communities / own orgs
     },
     ROLE_ANALYST: {
         "domain_list.view_own",  # see only assigned domain lists
@@ -60,6 +62,7 @@ PERMISSIONS = {
         "roadmap.view_own",      # roadmaps for assigned domains
         "report.export",         # download reports (scoped to own domains)
         "org.view_own",          # see own org assignments only
+        "cbom.export",           # CBOM of own orgs (own visible domains only)
     },
 }
 

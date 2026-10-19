@@ -64,6 +64,17 @@ This project uses [Semantic Versioning](https://semver.org/).
   Before, these filters did nothing for non-admins because `domains` was
   missing.
 
+### Fixed
+- **`services_assessed` and `key_types` were not saved again** (§8.8 #1).
+  Commit `69a9259` undid fix `ae26eef` an hour after it landed, so every
+  assessment written since 2026-07-12 stored `0` / `NULL`. The `INSERT` writes
+  both columns again, and `tests/test_data_integrity.py` now fails if any
+  assessment column is left unwritten.
+  `scripts/backfill_services_assessed.py` now also repairs rows from
+  score-only reassessment runs, which have no raw scans of their own: it uses
+  the domain's most recent probed run before the assessment.
+  `--same-run-only` turns this off. **Run the backfill once after deploying.**
+
 ### Notes
 - No schema change (still v18; v19 reserved for TOTP). Export reads are
   index seeks by domain (`latest_assessments_for`, `latest_network_scans_for`,

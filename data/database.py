@@ -282,13 +282,17 @@ class Database:
     # ─── Assessments ─────────────────────────────────────────────
 
     def save_assessment(self, run_id: str, assessment: dict):
+        # services_assessed and key_types MUST stay in this INSERT: they were
+        # missing from migration 4/5 until ae26eef (2026-07-12), then lost again
+        # by 69a9259 an hour later. tests/test_data_integrity.py guards it.
         with self._connect() as conn:
             conn.execute("""
                 INSERT INTO assessments
                 (run_id, domain, assessed_at, guidelines_used, score, level,
                  findings_json, tls_versions, cipher_suites, has_pqc,
-                 cert_expiry_days, errors_json, service_type)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 cert_expiry_days, errors_json, service_type,
+                 services_assessed, key_types)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 run_id,
                 assessment.get("domain", ""),
@@ -303,6 +307,8 @@ class Database:
                 assessment.get("certificate_expiry_days"),
                 json.dumps(assessment.get("errors", [])),
                 assessment.get("service_type"),
+                int(assessment.get("services_assessed") or 0),
+                json.dumps(assessment.get("key_types_found", []) or []),
             ))
 
     def get_latest_assessments(self, run_id: str = None,

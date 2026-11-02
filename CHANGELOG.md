@@ -99,6 +99,26 @@ This project uses [Semantic Versioning](https://semver.org/).
   long ago. It now scores each domain's newest probed run only, through the
   same `scanner/reassess.py`. Rows written by a score-only reassess before this
   fix are corrected by running it again.
+- **Security — data visible outside the user's scope** (§8.8 #3).
+  - `/api/export` (CSV/JSON/text) returned every domain to any user with
+    `report.export`. Non-admins now get their visible domains only, and the
+    JSON/text summary covers just those rows. The all-domains trend section
+    is left out of their text report.
+  - `/api/runs` gave every user each run's full `domain_list`. It now returns
+    a `domain_count` instead (this also removes the multi-MB payload), and
+    non-admins only see runs that assessed one of their domains.
+  - `GET /api/schedules` is reduced for non-admins to schedules touching their
+    domains, plus estate-wide jobs, with name, interval, next/last run and
+    status only.
+  - `/api/ct/stats`, `/api/ct/timeline` and `/api/roadmap/stats` are now
+    computed over the user's domains.
+  - `/api/ct/stats` now counts the latest CT query per domain. It used to sum
+    every query, so each CT run counted the same certificates again.
+  - The Scan tab's Export buttons called `/api/export` without the `/app`
+    prefix and got 404 in production.
+  - CSV exports now fill the `key_types` column. Exports no longer repeat a
+    domain that belongs to several organisations, and a run's metadata is
+    found even when the run is older than the last 50.
 
 ### Notes
 - No schema change (still v18; v19 reserved for TOTP). Export reads are

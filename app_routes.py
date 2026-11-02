@@ -46,6 +46,13 @@ def _dns_config() -> dict:
     """Return dns_enumeration config block from app config (or defaults)."""
     return current_app.config.get("DNS_ENUM_CONFIG", {})
 
+def _visible_domains(user) -> set | None:
+    """Domains `user` may see, or None for admins (no restriction)."""
+    if user.is_admin:
+        return None
+    return set(current_app.config["AUTH_STORE"].get_user_domains(user.id))
+
+
 def _allowed_org_ids(user, db) -> set | None:
     """
     Return the set of org IDs visible to `user`, or None for admins
@@ -645,7 +652,12 @@ def api_trend_scopes():
 @app_bp.route("/api/runs")
 @require_auth
 def api_runs():
-    return jsonify(_db().list_runs(20))
+    """
+    Recent scan runs. No domain_list (thousands of names per run): a
+    domain_count instead. Non-admins only see runs that assessed one of their
+    domains, and the count is of their domains only.
+    """
+    return jsonify(_db().list_runs_brief(20, domains=_visible_domains(current_user())))
 
 
 @app_bp.route("/api/domain-lists")
@@ -826,7 +838,7 @@ def api_save_domains():
 @app_bp.route("/api/ct/stats")
 @require_auth
 def api_ct_stats():
-    return jsonify(_db().get_ct_stats())
+    return jsonify(_db().get_ct_stats(domains=_visible_domains(current_user())))
 
 
 @app_bp.route("/api/ct/summaries")
@@ -864,7 +876,7 @@ def api_ct_certificates():
 @app_bp.route("/api/ct/timeline")
 @require_auth
 def api_ct_timeline():
-    return jsonify(_db().get_ct_timeline())
+    return jsonify(_db().get_ct_timeline(domains=_visible_domains(current_user())))
 
 
 @app_bp.route("/api/ct/monitor", methods=["POST"])
@@ -896,7 +908,7 @@ def api_ct_monitor():
 @app_bp.route("/api/roadmap/stats")
 @require_auth
 def api_roadmap_stats():
-    return jsonify(_db().get_roadmap_stats())
+    return jsonify(_db().get_roadmap_stats(domains=_visible_domains(current_user())))
 
 
 @app_bp.route("/api/roadmap")
@@ -992,17 +1004,22 @@ def api_export():
     fmt    = request.args.get("format", "csv")
     run_id = request.args.get("run_id") or None
     from reports.report_generator import export_csv, export_json, export_text_report
-    _audit("report.export", detail=f"format={fmt}")
+    # Scoped like every other domain endpoint (HANDOVER §9.5): admins get all
+    # domains, everyone else only the domains they can see.
+    domains = _visible_domains(current_user())
+    _audit("report.export",
+           detail=f"format={fmt} run={run_id or 'latest'} "
+                  f"scope={'all' if domains is None else len(domains)}")
     if fmt == "json":
-        content  = export_json(_db(), run_id)
+        content  = export_json(_db(), run_id, domains=domains)
         mimetype = "application/json"
         filename = "pqc_report.json"
     elif fmt == "text":
-        content  = export_text_report(_db(), run_id)
+        content  = export_text_report(_db(), run_id, domains=domains)
         mimetype = "text/plain"
         filename = "pqc_report.txt"
     else:
-        content  = export_csv(_db(), run_id)
+        content  = export_csv(_db(), run_id, domains=domains)
         mimetype = "text/csv"
         filename = "pqc_report.csv"
     return Response(
@@ -1013,12 +1030,35 @@ def api_export():
 
 # ── Schedules ─────────────────────────────────────────────────────────────────
 
+_SCHEDULE_PUBLIC_FIELDS = ("id", "name", "interval_days", "next_run", "last_run",
+                           "enabled")
+
+
 @app_bp.route("/api/schedules")
 @require_auth
 def api_schedules():
+    """
+    Schedules. Admins get the full rows. Everyone else gets only schedules
+    whose domain list contains one of their domains, or that have no list
+    (estate-wide jobs such as the SSL Labs sweep), reduced to name, interval,
+    next/last run and status: no list id, no config.
+    """
     from scheduler.scan_scheduler import ScanScheduler
-    sched = ScanScheduler(_orchestrator(), _db())
-    return jsonify(sched.list_schedules())
+    db = _db()
+    rows = ScanScheduler(_orchestrator(), db).list_schedules()
+    visible = _visible_domains(current_user())
+    if visible is None:
+        return jsonify(rows)
+    visible_lc = {d.lower() for d in visible}
+    out = []
+    for r in rows:
+        list_id = r.get("domain_list_id")
+        if list_id:
+            names = db.get_domain_list_by_id(list_id) or []
+            if not any((n or "").lower() in visible_lc for n in names):
+                continue
+        out.append({k: r.get(k) for k in _SCHEDULE_PUBLIC_FIELDS})
+    return jsonify(out)
 
 
 @app_bp.route("/api/schedules", methods=["POST"])

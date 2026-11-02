@@ -22,18 +22,60 @@ logger = logging.getLogger(__name__)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _load_assessments(db, run_id: Optional[str] = None) -> list:
+def _load_assessments(db, run_id: Optional[str] = None, domains=None) -> list:
+    """Latest assessment per domain (or of one run). `domains` (iterable)
+    restricts the rows — callers pass the requesting user's visible domains;
+    None means all (admin, CLI)."""
     rows = db.get_latest_assessments(run_id)
+    if domains is not None:
+        allowed = {d.lower() for d in domains if d}
+        rows = [r for r in rows if (r.get("domain") or "").lower() in allowed]
+    # One row per domain: the org LEFT JOIN repeats domains in several orgs.
+    seen, unique = set(), []
+    for r in rows:
+        key = (r.get("domain"), r.get("id"))
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+    rows = unique
     # Ensure JSON fields are parsed
     for row in rows:
         for field in ("findings_json", "tls_versions", "cipher_suites",
-                      "guidelines_used", "errors_json"):
+                      "guidelines_used", "errors_json", "key_types"):
             if isinstance(row.get(field), str):
                 try:
                     row[field] = json.loads(row[field])
                 except Exception:
                     row[field] = []
     return rows
+
+
+def _summary(rows: list) -> dict:
+    """Summary block computed from the exported rows (same rules as
+    Database.get_summary_stats: na rows count as domains, not as scores)."""
+    if not rows:
+        return {}
+    scored = [r for r in rows if r.get("level") != "na"]
+    scores = [r.get("score", 0) or 0 for r in scored]
+    return {
+        "total_domains":  len(rows),
+        "avg_score":      round(sum(scores) / len(scores), 1) if scores else 0,
+        "critical_count": sum(1 for r in scored if r.get("level") == "critical"),
+        "weak_count":     sum(1 for r in scored if r.get("level") == "weak"),
+        "moderate_count": sum(1 for r in scored if r.get("level") == "moderate"),
+        "ready_count":    sum(1 for r in scored if r.get("level") == "ready"),
+        "pqc_count":      sum(1 for r in rows if r.get("has_pqc")),
+        "na_count":       sum(1 for r in rows if r.get("level") == "na"),
+    }
+
+
+def _run_meta(db, run_id: Optional[str]) -> dict:
+    if not run_id:
+        return {}
+    try:
+        return db.get_run(run_id) or {}
+    except Exception:
+        return {}
 
 
 def _level_emoji(level: str) -> str:
@@ -55,12 +97,13 @@ CSV_COLUMNS = [
 ]
 
 
-def export_csv(db, run_id: Optional[str] = None) -> str:
+def export_csv(db, run_id: Optional[str] = None, domains=None) -> str:
     """
     Return assessment results as a UTF-8 CSV string.
     Suitable for writing to a file or returning as an HTTP response.
+    domains: optional scope (the requesting user's visible domains).
     """
-    rows = _load_assessments(db, run_id)
+    rows = _load_assessments(db, run_id, domains)
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=CSV_COLUMNS, extrasaction="ignore",
                             lineterminator="\n")
@@ -81,6 +124,7 @@ def export_csv(db, run_id: Optional[str] = None) -> str:
         tls = a.get("tls_versions") or []
         ciphers = a.get("cipher_suites") or []
         guidelines = a.get("guidelines_used") or []
+        key_types = a.get("key_types") or []
 
         writer.writerow({
             "domain":           a.get("domain", ""),
@@ -89,7 +133,7 @@ def export_csv(db, run_id: Optional[str] = None) -> str:
             "has_pqc":          "yes" if a.get("has_pqc") else "no",
             "tls_versions":     "; ".join(tls if isinstance(tls, list) else []),
             "cipher_suites":    "; ".join(ciphers if isinstance(ciphers, list) else []),
-            "key_types":        "",  # not stored in assessment row
+            "key_types":        "; ".join(key_types if isinstance(key_types, list) else []),
             "cert_expiry_days": a.get("cert_expiry_days", ""),
             "assessed_at":      (a.get("assessed_at") or "")[:19],
             "guidelines_used":  "; ".join(guidelines if isinstance(guidelines, list) else []),
@@ -104,14 +148,16 @@ def export_csv(db, run_id: Optional[str] = None) -> str:
 
 # ── JSON Export ───────────────────────────────────────────────────────────────
 
-def export_json(db, run_id: Optional[str] = None, pretty: bool = True) -> str:
+def export_json(db, run_id: Optional[str] = None, pretty: bool = True,
+                domains=None) -> str:
     """
     Return assessment results as a JSON string.
     Includes metadata envelope for traceability.
+    domains: optional scope (the requesting user's visible domains); the
+    summary is then computed over the exported rows only.
     """
-    rows = _load_assessments(db, run_id)
-    runs = db.list_runs(50)
-    run_meta = next((r for r in runs if r.get("run_id") == run_id), {}) if run_id else {}
+    rows = _load_assessments(db, run_id, domains)
+    run_meta = _run_meta(db, run_id)
 
     payload = {
         "export_metadata": {
@@ -124,7 +170,8 @@ def export_json(db, run_id: Optional[str] = None, pretty: bool = True) -> str:
             "license": "GPL-3.0-or-later",
             "ai_assisted": True,
         },
-        "summary": db.get_summary_stats(),
+        "summary": db.get_summary_stats() if domains is None and not run_id
+                   else _summary(rows),
         "assessments": rows,
     }
     indent = 2 if pretty else None
@@ -133,16 +180,19 @@ def export_json(db, run_id: Optional[str] = None, pretty: bool = True) -> str:
 
 # ── Text Summary Report ───────────────────────────────────────────────────────
 
-def export_text_report(db, run_id: Optional[str] = None) -> str:
+def export_text_report(db, run_id: Optional[str] = None, domains=None) -> str:
     """
     Return a human-readable plain-text report suitable for printing
     or including in an e-mail.
+    domains: optional scope (the requesting user's visible domains); the
+    summary is computed over those rows and the all-domains trend section
+    is left out.
     """
-    rows = _load_assessments(db, run_id)
-    stats = db.get_summary_stats()
-    trends = db.get_sector_trends()
-    runs = db.list_runs(50)
-    run_meta = next((r for r in runs if r.get("run_id") == run_id), {}) if run_id else {}
+    rows = _load_assessments(db, run_id, domains)
+    scoped = domains is not None
+    stats = _summary(rows) if (scoped or run_id) else db.get_summary_stats()
+    trends = [] if scoped else db.get_sector_trends()
+    run_meta = _run_meta(db, run_id)
 
     lines = []
     sep = "─" * 72

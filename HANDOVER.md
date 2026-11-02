@@ -1086,7 +1086,7 @@ pqc-monitor/
 ├── docker-compose.yml      # Compose stack for local runs
 ├── requirements.txt
 ├── requirements-dev.txt    # test-only: cyclonedx-python-lib (CBOM schema checks) (NEW)
-├── tests/                  # 650 tests (597 at v1.12.0 + 53 since);
+├── tests/                  # 657 tests (597 at v1.12.0 + 60 since);
 │                           #   (all passing)
 └── config/
     └── config.yaml.example
@@ -1369,8 +1369,8 @@ Bulk collection is the scheduled sweep (§2.12b), not an endpoint.
 | POST | `/api/reassess` | Re-score existing scan data |
 | POST | `/api/discover` | AI-powered domain discovery |
 | POST | `/api/dns-enumerate` | DNS deep-dive enumeration |
-| GET | `/api/runs` | List scan runs (includes `notes` and the full `domain_list` JSON per run) |
-| GET/POST | `/api/schedules` | List / add schedules (picked up by the daemon within a minute) |
+| GET | `/api/runs` | 20 most recent scan runs with `notes` and a `domain_count` (no `domain_list` since delta 04). Non-admins: only runs that assessed one of their domains; the count covers their domains only |
+| GET/POST | `/api/schedules` | List / add schedules (picked up by the daemon within a minute). GET for non-admins: only schedules whose list holds one of their domains, or that have no list, with id/name/interval/next/last/enabled only |
 
 ### Organisations
 
@@ -1493,7 +1493,8 @@ Also run `python3 -m py_compile scanner/dns_enumerator.py` before deploying.
 
 ### 8.7 Found during v1.12.0 (not yet addressed)
 
-- **`/api/runs` payload.** Each run row includes its full `domain_list` JSON
+- ~~**`/api/runs` payload.**~~ Resolved in delta 04: `domain_count` instead of the list.
+  Each run row included its full `domain_list` JSON
   (up to ~5,200 names); 20 runs ≈ MBs per Scan-tab load. Return a count
   instead.
 - **`/api/assessments?region=` / `?country_code=`** call
@@ -1546,6 +1547,10 @@ by the CBOM delivery. The plan is to fix them as separate deltas.
    - `GET /api/schedules` is unscoped.
    - `/api/ct/stats`, `/api/ct/timeline` and `/api/roadmap/stats` are global
      aggregates.
+   **Fixed — delta 04 (`fix(rbac)`).** All six endpoints are scoped through
+   `_visible_domains()`, and the Export buttons use `/app/api/export`. The user manual's
+   claim in §10 ("exports are scoped") is now true. `tests/test_rbac_scoping.py` covers
+   these endpoints.
 4. **`chain_validator` analyses only the leaf.** On Python 3.13,
    `SSLSocket.get_verified_chain()` returns DER `bytes`. The code then calls
    `.public_bytes()` on them, hits `AttributeError` and silently falls back to
@@ -1653,6 +1658,10 @@ nginx must pass: `proxy_set_header X-Forwarded-Proto $scheme;`
 ### 9.5 Domain-list scoping in new endpoints
 
 Every endpoint returning domain data **must** call `filter_assessments(data, user)`.
+Aggregates and exports take a domain scope instead: `_visible_domains(user)` in
+`app_routes.py` returns `None` for admins (no restriction) or the user's domain set,
+and is passed as `domains=` to `export_*`, `list_runs_brief`, `get_ct_stats`,
+`get_ct_timeline` and `get_roadmap_stats`.
 
 ### 9.6 Community scoping in group report endpoints
 
@@ -2013,7 +2022,7 @@ card shows the latest counts with a drill-down to the text report.
 
 ## Appendix A — Running the Test Suite
 
-Current suite: **650 tests** (597 at v1.12.0 + 53 added since). All pass
+Current suite: **657 tests** (597 at v1.12.0 + 60 added since). All pass
 (the two date-dependent `test_trends.TestTrendsAPI` tests were made relative to
 the clock in delta 02). `test_cbom.py` validates
 against the CycloneDX schemas only when `pip install -r requirements-dev.txt`

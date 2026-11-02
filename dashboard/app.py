@@ -2315,6 +2315,9 @@ function runSourceHtml(notes) {
   return '<span style="color:var(--muted)">manual</span>';
 }
 function runDomainCount(run) {
+  // /app/api/runs sends domain_count (no domain_list); the legacy dev
+  // server still sends the list.
+  if (run.domain_count != null) return run.domain_count;
   const l = tryJSON(run.domain_list);
   return Array.isArray(l) ? l.length : '—';
 }
@@ -3118,7 +3121,10 @@ async function generateRoadmap() {
 // ─── Export ──────────────────────────────────────────────────────────────────
 function doExport(fmt) {
   const runId = document.getElementById('export-run')?.value || '';
-  const url = `/api/export?format=${fmt}${runId ? '&run_id='+runId : ''}`;
+  // A navigation, not fetch(): the /api → /app/api rewrite does not apply,
+  // so add the /app prefix ourselves (absent on the legacy dev server).
+  const base = location.pathname.startsWith('/app') ? '/app' : '';
+  const url = `${base}/api/export?format=${encodeURIComponent(fmt)}${runId ? '&run_id='+encodeURIComponent(runId) : ''}`;
   window.location.href = url;
 }
 

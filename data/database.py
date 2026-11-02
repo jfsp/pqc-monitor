@@ -238,6 +238,67 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    _RUN_BRIEF_COLS = ("run_id, started_at, finished_at, sector, region, notes, "
+                       "status, country_code, country")
+
+    def list_runs_brief(self, limit: int = 20, domains=None) -> list:
+        """
+        Recent runs for the API, WITHOUT the domain_list JSON (thousands of
+        names per run) but with a domain_count.
+
+        domains=None   all runs; domain_count = size of the run's list.
+        domains=<set>  only runs that assessed at least one of these domains;
+                       domain_count = how many of them (RBAC scoping: a user
+                       never learns which other domains a run covered).
+        """
+        limit = max(int(limit), 1)
+        with self._connect() as conn:
+            if domains is None:
+                try:
+                    rows = conn.execute(
+                        f"SELECT {self._RUN_BRIEF_COLS}, "
+                        f"json_array_length(domain_list) AS domain_count "
+                        f"FROM scan_runs ORDER BY started_at DESC LIMIT ?",
+                        (limit,)).fetchall()
+                    return [dict(r) for r in rows]
+                except sqlite3.OperationalError:      # SQLite without JSON1
+                    rows = conn.execute(
+                        f"SELECT {self._RUN_BRIEF_COLS}, domain_list FROM scan_runs "
+                        f"ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
+                    out = []
+                    for r in rows:
+                        d = dict(r)
+                        try:
+                            d["domain_count"] = len(json.loads(d.pop("domain_list") or "[]"))
+                        except Exception:
+                            d["domain_count"] = None
+                        out.append(d)
+                    return out
+            names = sorted({d for d in domains if d})
+            counts: dict = {}
+            for i in range(0, len(names), self._CBOM_IN_CHUNK):
+                chunk = names[i:i + self._CBOM_IN_CHUNK]
+                ph = ",".join("?" * len(chunk))
+                for r in conn.execute(
+                        f"SELECT run_id, COUNT(DISTINCT domain) AS c FROM assessments "
+                        f"WHERE domain IN ({ph}) GROUP BY run_id", chunk):
+                    counts[r["run_id"]] = counts.get(r["run_id"], 0) + r["c"]
+            if not counts:
+                return []
+            ids = list(counts)
+            out = []
+            for i in range(0, len(ids), self._CBOM_IN_CHUNK):
+                chunk = ids[i:i + self._CBOM_IN_CHUNK]
+                ph = ",".join("?" * len(chunk))
+                out += [dict(r) for r in conn.execute(
+                    f"SELECT {self._RUN_BRIEF_COLS} FROM scan_runs "
+                    f"WHERE run_id IN ({ph})", chunk)]
+        out.sort(key=lambda r: r.get("started_at") or "", reverse=True)
+        out = out[:limit]
+        for r in out:
+            r["domain_count"] = counts.get(r["run_id"], 0)
+        return out
+
     # ─── Raw Scans ────────────────────────────────────────────────
 
     def save_scan_result(self, run_id: str, result: dict):
@@ -1484,11 +1545,29 @@ class Database:
             results.append(d)
         return results
 
-    def get_ct_timeline(self) -> list:
+    def get_ct_timeline(self, domains=None) -> list:
         """
         Aggregate PQC certificate counts by month for the timeline chart.
         Returns rows of (month, pqc_count, hybrid_count, classical_count).
+        domains: optional iterable restricting the scope (RBAC).
         """
+        if domains is not None:
+            allowed = {d.lower() for d in domains}
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT strftime('%Y-%m', queried_at) AS month, domain, "
+                    "pqc_certs, hybrid_certs, total_certs FROM ct_queries"
+                ).fetchall()
+            by_month: dict = {}
+            for r in rows:
+                if (r["domain"] or "").lower() not in allowed:
+                    continue
+                m = by_month.setdefault(r["month"], {"month": r["month"], "pqc_total": 0,
+                                                     "hybrid_total": 0, "all_total": 0})
+                m["pqc_total"] += r["pqc_certs"] or 0
+                m["hybrid_total"] += r["hybrid_certs"] or 0
+                m["all_total"] += r["total_certs"] or 0
+            return [by_month[k] for k in sorted(by_month)]
         with self._connect() as conn:
             rows = conn.execute("""
                 SELECT
@@ -1502,20 +1581,29 @@ class Database:
             """).fetchall()
         return [dict(r) for r in rows]
 
-    def get_ct_stats(self) -> dict:
-        """High-level CT statistics for dashboard summary cards."""
+    def get_ct_stats(self, domains=None) -> dict:
+        """
+        High-level CT statistics for the dashboard cards, from the LATEST
+        query per domain (summing every query counted a domain again on each
+        CT run). domains: optional iterable restricting the scope (RBAC).
+        """
         with self._connect() as conn:
-            row = conn.execute("""
-                SELECT
-                    COUNT(DISTINCT domain)                          as domains_monitored,
-                    SUM(total_certs)                                as total_certs,
-                    SUM(pqc_certs)                                  as total_pqc,
-                    SUM(hybrid_certs)                               as total_hybrid,
-                    COUNT(DISTINCT CASE WHEN pqc_certs > 0
-                          THEN domain END)                          as domains_with_pqc
-                FROM ct_queries
-            """).fetchone()
-        return dict(row) if row else {}
+            rows = conn.execute("""
+                SELECT q.domain, q.total_certs, q.pqc_certs, q.hybrid_certs
+                FROM ct_queries q
+                INNER JOIN (SELECT domain, MAX(id) AS mid FROM ct_queries
+                            GROUP BY domain) l ON q.id = l.mid
+            """).fetchall()
+        allowed = {d.lower() for d in domains} if domains is not None else None
+        rows = [r for r in rows
+                if allowed is None or (r["domain"] or "").lower() in allowed]
+        return {
+            "domains_monitored": len(rows),
+            "total_certs":  sum(r["total_certs"] or 0 for r in rows),
+            "total_pqc":    sum(r["pqc_certs"] or 0 for r in rows),
+            "total_hybrid": sum(r["hybrid_certs"] or 0 for r in rows),
+            "domains_with_pqc": sum(1 for r in rows if (r["pqc_certs"] or 0) > 0),
+        }
 
     # ─── Roadmap storage ──────────────────────────────────────────
 
@@ -1585,8 +1673,33 @@ class Database:
             results.append(d)
         return results
 
-    def get_roadmap_stats(self) -> dict:
-        """Summary statistics for roadmap dashboard card."""
+    def get_roadmap_stats(self, domains=None) -> dict:
+        """Summary statistics for roadmap dashboard card.
+        domains: optional iterable restricting the scope (RBAC)."""
+        if domains is not None:
+            allowed = {d.lower() for d in domains}
+            with self._connect() as conn:
+                rows = conn.execute("""
+                    SELECT r.domain, r.phase1_items, r.phase2_items, r.phase3_items,
+                           r.effort_min, r.effort_max, r.has_pqc
+                    FROM roadmaps r
+                    INNER JOIN (
+                        SELECT domain, MAX(generated_at) as max_ts
+                        FROM roadmaps GROUP BY domain
+                    ) latest ON r.domain=latest.domain AND r.generated_at=latest.max_ts
+                """).fetchall()
+            rows = [r for r in rows if (r["domain"] or "").lower() in allowed]
+            doms = {r["domain"] for r in rows}
+            return {
+                "domains": len(doms),
+                "total_p1_items": sum(r["phase1_items"] or 0 for r in rows),
+                "total_p2_items": sum(r["phase2_items"] or 0 for r in rows),
+                "total_p3_items": sum(r["phase3_items"] or 0 for r in rows),
+                "total_effort_min": sum(r["effort_min"] or 0 for r in rows),
+                "total_effort_max": sum(r["effort_max"] or 0 for r in rows),
+                "domains_need_p1": len({r["domain"] for r in rows if (r["phase1_items"] or 0) > 0}),
+                "domains_pqc_ready": len({r["domain"] for r in rows if r["has_pqc"]}),
+            }
         with self._connect() as conn:
             row = conn.execute("""
                 SELECT

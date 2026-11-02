@@ -1045,6 +1045,8 @@ pqc-monitor/
 │   ├── cdn_detector.py     # CDN fingerprinter
 │   ├── dns_status.py       # DNS resolvability status for no-TLS names (NEW v1.12.0)
 │   ├── dns_enumerator.py   # DNS deep-dive (CT SANs + wordlist + DNSDumpster + passive)
+│   ├── reassess.py         # Score-only reassessment of one probed run (shared by
+│   │                       #   /api/reassess and scripts/reassess_all.py) (NEW, delta 03)
 │   ├── service_discovery.py# Port scanner
 │   ├── shodan_client.py    # Shodan integration
 │   ├── ssllabs_client.py   # Qualys SSL Labs API v4 client (display-only grade)
@@ -1084,7 +1086,7 @@ pqc-monitor/
 ├── docker-compose.yml      # Compose stack for local runs
 ├── requirements.txt
 ├── requirements-dev.txt    # test-only: cyclonedx-python-lib (CBOM schema checks) (NEW)
-├── tests/                  # 644 tests (597 at v1.12.0 + 47 since);
+├── tests/                  # 650 tests (597 at v1.12.0 + 53 since);
 │                           #   (all passing)
 └── config/
     └── config.yaml.example
@@ -1527,6 +1529,13 @@ by the CBOM delivery. The plan is to fix them as separate deltas.
    also drops the chain, cipher and CDN extra findings, and it feeds failed
    probes to the assessor. `scripts/reassess_all.py` does all of this
    correctly; reuse its logic.
+   **Fixed — delta 03 (`fix(reassess)`).** `scanner/reassess.py` is shared by
+   `Orchestrator.reassess_run` and `scripts/reassess_all.py`. Each domain is re-scored
+   from one probed run: its raw scans, plus the chain, cipher_enum, cdn and group_enum
+   blobs of that run only. Extra findings are rebuilt and `service_type` is kept.
+   Re-assessing a re-assessment run falls back to the newest probed run at or before it.
+   `/api/reassess` is still synchronous: about 3.4 ms per domain locally, so very large
+   runs on the VM should use the script instead.
 3. **RBAC leaks.**
    - `/api/export` has no scoping: analysts and community managers download
      every domain. The user manual (§10) says these exports are scoped; they
@@ -1581,6 +1590,11 @@ by the CBOM delivery. The plan is to fix them as separate deltas.
     - Admin org buttons put `esc(name)` inside a JS string in an `onclick`
       attribute. That is self-XSS by admins only, but should use
       `data-*` attributes.
+12. **`reassess_all.py` score-only mixed every past scan** (found while fixing
+   #2). It used `get_domain_scans(domain)` across all runs, so historical scores were
+   averaged in, TLS versions and suites were unioned, and the certificate expiry came
+   from the oldest scan (possible false "EXPIRED" findings).
+   **Fixed — delta 03.** It now scores the newest probed run only.
 
 ---
 
@@ -1999,7 +2013,7 @@ card shows the latest counts with a drill-down to the text report.
 
 ## Appendix A — Running the Test Suite
 
-Current suite: **644 tests** (597 at v1.12.0 + 47 added since). All pass
+Current suite: **650 tests** (597 at v1.12.0 + 53 added since). All pass
 (the two date-dependent `test_trends.TestTrendsAPI` tests were made relative to
 the clock in delta 02). `test_cbom.py` validates
 against the CycloneDX schemas only when `pip install -r requirements-dev.txt`
@@ -2092,7 +2106,7 @@ python3 scripts/fix_notls_level.py
 | `scripts/deploy.sh` | Incremental git→/opt/pqc-monitor sync; restarts only affected services (does not install systemd units) |
 | `scripts/sync-tree.sh` | Full-tree repo→/opt audit/sync (excludes `.git`; never clobbers local config unless forced) |
 | `scripts/add_trend_index.py` | One-time covering index `idx_assessments_trend` for Trends; run with services stopped |
-| `scripts/reassess_all.py` | Reassess/rescan every domain (`--rescan`, `--only-missing`, `--only-missing-groups`) |
+| `scripts/reassess_all.py` | Reassess/rescan every domain (`--rescan`, `--only-missing`, `--only-missing-groups`); score-only re-scores each domain's newest probed run via `scanner/reassess.py` (shared with `/api/reassess`) |
 | `scripts/pqc_selftest.py` | PQC group-enum self-test (GREASE gate first) + testssl.sh cross-check |
 | `scripts/fix_mx_entries.py` | Repair malformed MX host keys across domain-keyed tables + `dns_enum` blobs |
 | `scripts/backfill_services_assessed.py` | Backfill `services_assessed` / `key_types` on old assessment rows |

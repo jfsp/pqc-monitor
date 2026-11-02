@@ -12,7 +12,9 @@ existing rows pick up the v1.9.0 fixes:
 Two modes
 ─────────
   score-only  (default) : NO network traffic. Re-runs the assessor against
-                          the stored raw scans + cipher_enum/chain/cdn blobs.
+                          the raw scans + chain/cipher_enum/cdn/group_enum
+                          blobs of each domain's NEWEST PROBED run (shared
+                          with the in-app reassess: scanner/reassess.py).
                           This is all that is needed for the v1.9.0 bug fixes,
                           because the enrichment data is already on disk.
                           CPU: light. Traffic: zero. API calls: zero.
@@ -146,9 +148,7 @@ if not os.path.exists(db_path):
 
 from data.database import Database                      # noqa: E402
 from scanner.crypto_assessor import CryptoAssessor      # noqa: E402
-from scanner.cipher_enum import cipher_enum_findings    # noqa: E402
-from scanner.chain_validator import chain_findings      # noqa: E402
-from scanner.cdn_detector import cdn_findings           # noqa: E402
+from scanner.reassess import reassess_domain            # noqa: E402
 
 db = Database(db_path)
 guideline_ids = cfg.get("guidelines",
@@ -158,16 +158,16 @@ guidelines_dir = cfg.get("guidelines_dir", os.path.join(ROOT, "guidelines"))
 
 # ── Target selection ──────────────────────────────────────────────────────────
 
+_LATEST_ROWS: dict = {}
+
+
 def all_domains() -> list[str]:
     """Distinct domains that have at least one assessment."""
     rows = db.get_latest_assessments()   # newest per domain
-    return sorted({r.get("domain", "") for r in rows if r.get("domain")})
-
-
-def latest_extra(domain: str) -> dict:
-    """Latest enrichment blobs across all runs for a domain."""
-    return db.get_latest_domain_extra(
-        domain, data_types=["cipher_enum", "chain", "cdn", "group_enum"])
+    for r in rows:
+        if r.get("domain"):
+            _LATEST_ROWS[r["domain"]] = r
+    return sorted(_LATEST_ROWS)
 
 
 logger.info("Loading domain list from the database ...")
@@ -236,96 +236,24 @@ _counts = {"ok": 0, "na": 0, "error": 0}
 
 
 def _score_only(domain: str):
-    """Reassess a single domain from stored data. No network."""
-    raw_scans = db.get_domain_scans(domain)          # newest-first, all runs
+    """
+    Reassess a single domain from stored data. No network.
 
-    # If every stored scan for this domain failed (no successful TLS
-    # handshake on any port/run), the host has no reachable TLS. Write a
-    # fresh na assessment so the newest row is correct — don't skip, or a
-    # stale (possibly wrong) row would remain the latest for this domain.
-    # assess_domain([]) yields exactly the canonical na result.
-    if raw_scans and not any(
-        s.get("success") or s.get("source") == "shodan" for s in raw_scans
-    ):
-        na = assessor.assess_domain(domain, [])   # → score 0, level na, no findings
-        db.save_assessment(new_run_id, na.to_dict())
-        _counts["na"] += 1
-        logger.info("○ %s (no reachable TLS — recorded na)", domain)
-        return "na"
-
-    extra     = latest_extra(domain)
-    chain     = extra.get("chain")
-    cenum     = extra.get("cipher_enum")
-    genum     = extra.get("group_enum")
-    cdn       = extra.get("cdn")
-
-    # Rebuild the "extra findings" that are normally produced at scan time,
-    # so the v1.9.0 named-cipher findings (and chain/CDN findings) reappear
-    # on reassessed rows. Each helper takes its dataclass, so reconstruct
-    # from the stored dict, coercing away provenance/unknown keys.
-    extra_findings = []
-    if cenum:
-        try:
-            from scanner.cipher_enum import CipherEnumResult
-            extra_findings += cipher_enum_findings(
-                _reconstruct(CipherEnumResult, cenum))
-        except Exception as e:
-            logger.debug("%s: cipher_enum_findings rebuild failed: %s", domain, e)
-    if chain:
-        try:
-            from scanner.chain_validator import ChainAnalysis
-            extra_findings += chain_findings(_reconstruct(ChainAnalysis, chain))
-        except Exception as e:
-            logger.debug("%s: chain_findings rebuild failed: %s", domain, e)
-    if cdn:
-        try:
-            from scanner.cdn_detector import CDNDetectionResult
-            extra_findings += cdn_findings(_reconstruct(CDNDetectionResult, cdn))
-        except Exception as e:
-            logger.debug("%s: cdn_findings rebuild failed: %s", domain, e)
-
-    assessment = assessor.assess_domain(
-        domain, raw_scans,
-        chain_analysis=chain,
-        cipher_enum=cenum,
-        group_enum=genum,
-        cdn_result=cdn,
-        extra_findings=extra_findings,
-    )
+    Scores the raw scans and blobs of the domain's newest PROBED run only
+    (scanner/reassess.py, shared with the in-app reassess). Until 2026-10-16
+    this fed the assessor every probe of every run: historical scores were
+    averaged in and the certificate expiry came from the oldest scan.
+    """
+    prev = _LATEST_ROWS.get(domain) or {}
+    assessment = reassess_domain(db, assessor, domain,
+                                 service_type=prev.get("service_type"))
     db.save_assessment(new_run_id, assessment.to_dict())
-
-
-def _reconstruct(cls, blob: dict):
-    """
-    Build a dataclass instance from a stored dict, keeping only fields the
-    class declares. Drops provenance keys (_recorded_at/_run_id from
-    get_latest_domain_extra) and any schema-drift extras so construction
-    never raises. Missing fields fall back to the dataclass defaults.
-    """
-    from dataclasses import fields, MISSING
-    allowed, required_no_default = {}, []
-    for f in fields(cls):
-        allowed[f.name] = f
-        if f.default is MISSING and f.default_factory is MISSING:  # type: ignore[attr-defined]
-            required_no_default.append(f.name)
-    kwargs = {k: v for k, v in blob.items() if k in allowed}
-    # Provide empty defaults for any required field the blob lacks, so we
-    # never crash on an older/partial blob.
-    for name in required_no_default:
-        kwargs.setdefault(name, _empty_for(allowed[name]))
-    return cls(**kwargs)
-
-
-def _empty_for(field):
-    """Best-effort empty value for a required dataclass field lacking a default."""
-    t = field.type
-    ts = t if isinstance(t, str) else getattr(t, "__name__", str(t))
-    if "bool" in ts:  return False
-    if "int" in ts:   return 0
-    if "float" in ts: return 0.0
-    if "list" in ts:  return []
-    if "dict" in ts:  return {}
-    return ""
+    if assessment.level == "na":
+        _counts["na"] += 1
+        logger.info("○ %s (no reachable TLS in its latest probed run — recorded na)",
+                    domain)
+        return "na"
+    return None
 
 
 def _rescan(domain: str):

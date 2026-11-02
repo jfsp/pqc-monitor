@@ -21,7 +21,7 @@ Two modes, very different resource profiles:
 
 | Mode | Network | CPU | When |
 |------|---------|-----|------|
-| **score-only** (default) | none | light | Fixes both v1.9.0 bugs on existing data — the `cipher_enum` blobs are already on disk. **Start here.** |
+| **score-only** (default) | none | light | Re-scores each domain's newest probed run (raw scans + chain/cipher_enum/cdn/group_enum blobs of that run; `scanner/reassess.py`). Fixes both v1.9.0 bugs on existing data — the `cipher_enum` blobs are already on disk. **Start here.** |
 | `--rescan` | dozens of TCP conns/domain | heavy (~5–15 s/domain) | Only for domains whose `cipher_enum` blob is genuinely missing. |
 
 It writes one new `scan_run` tagged `reassess-all (<mode>)`; old rows are

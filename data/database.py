@@ -224,6 +224,13 @@ class Database:
                 (ts, status, run_id)
             )
 
+    def get_run(self, run_id: str) -> Optional[dict]:
+        """One scan_runs row by run_id, or None."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM scan_runs WHERE run_id=?",
+                               (run_id,)).fetchone()
+        return dict(row) if row else None
+
     def list_runs(self, limit: int = 20) -> list:
         with self._connect() as conn:
             rows = conn.execute(
@@ -268,8 +275,12 @@ class Database:
     def get_domain_scans(self, domain: str, run_id: str = None) -> list:
         with self._connect() as conn:
             if run_id:
+                # "+run_id": stay on idx_raw_scans_domain. With both columns
+                # indexed the planner may otherwise walk idx_raw_scans_run,
+                # i.e. every row of a multi-thousand-domain run.
                 rows = conn.execute(
-                    "SELECT raw_json FROM raw_scans WHERE domain=? AND run_id=?",
+                    "SELECT raw_json FROM raw_scans WHERE domain=? AND +run_id=? "
+                    "ORDER BY id",
                     (domain, run_id)
                 ).fetchall()
             else:
@@ -1250,6 +1261,19 @@ class Database:
                 if row:
                     out[name] = self._parse_assessment_row(row)
         return out
+
+    def probed_runs_for(self, domain: str) -> list:
+        """
+        Runs that probed `domain` (have raw_scans rows), newest first:
+        [(run_id, last scanned_at)]. Score-only reassessment runs never
+        appear here. Index seek on idx_raw_scans_domain.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT run_id, MAX(scanned_at) AS seen FROM raw_scans "
+                "WHERE domain=? GROUP BY run_id ORDER BY seen DESC", (domain,)
+            ).fetchall()
+        return [(r["run_id"], r["seen"]) for r in rows]
 
     def latest_network_scans_for(self, domains) -> dict:
         """

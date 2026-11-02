@@ -79,6 +79,26 @@ This project uses [Semantic Versioning](https://semver.org/).
   (§8.8 #8). Their fixture had fixed July/August 2026 dates, which aged out of
   the stale window because the API computes trends as of now. The dates are
   now relative to the clock.
+- **Re-assessment in the app wiped PQC status** (§8.8 #2). `POST /api/reassess`,
+  `pqc_monitor.py reassess` and the legacy dashboard did not pass the
+  offered-group data (`group_enum`), so every re-assessed domain became "no
+  PQC" on the negotiated basis. They also dropped the chain, cipher and CDN
+  findings, recorded failed probes as errors, and lost `service_type`.
+  Re-assessing a re-assessment run turned every domain into "No TLS", because
+  such runs have no raw scans. Re-assessment now lives in one place,
+  `scanner/reassess.py`, used by both the app and the script.
+  - The app re-scores the probe results and blobs of a single probed run:
+    the selected run, or for a re-assessment run the newest run before it.
+  - Runs older than the 20 most recent can now be re-assessed too.
+  - If one domain fails, the rest of the run continues; the run is then
+    marked `partial`.
+- **`scripts/reassess_all.py` score-only mixed every past scan** (§8.8 #12).
+  It fed the assessor every probe of every run. The score therefore averaged
+  in old results, and the certificate expiry came from the *oldest* scan,
+  which could add "Certificate EXPIRED" findings for certificates replaced
+  long ago. It now scores each domain's newest probed run only, through the
+  same `scanner/reassess.py`. Rows written by a score-only reassess before this
+  fix are corrected by running it again.
 
 ### Notes
 - No schema change (still v18; v19 reserved for TOTP). Export reads are

@@ -135,39 +135,47 @@ class ScanOrchestrator:
         return run_id
 
     def reassess_run(self, run_id: str, guideline_ids: list = None) -> str:
-        """Re-assess a previous run against (updated) guidelines. No network traffic."""
+        """
+        Re-assess the domains of a previous run against (updated) guidelines.
+        No network traffic. Scoring is shared with scripts/reassess_all.py
+        (scanner/reassess.py): one probed run per domain, group_enum as the
+        PQC basis, chain/cipher/CDN findings rebuilt from the stored blobs.
+        """
+        from scanner.reassess import reassess_domain
         logger.info(f"Re-assessing run {run_id} with guidelines: {guideline_ids}")
-        runs     = self.db.list_runs(200)
-        original = next((r for r in runs if r["run_id"] == run_id), None)
+        original = self.db.get_run(run_id)
         if not original:
             raise ValueError(f"Run {run_id} not found")
 
-        domains      = json.loads(original.get("domain_list", "[]"))
+        domains      = json.loads(original.get("domain_list") or "[]")
         new_assessor = CryptoAssessor(
             guideline_ids or list(self.assessor.guidelines.keys()),
             os.path.join(os.path.dirname(__file__), "..", "guidelines")
         )
+        previous = {a["domain"]: a for a in self.db.get_latest_assessments(run_id)}
         new_run_id = self.db.create_run(
             domains,
-            sector=original.get("sector", ""),
-            region=original.get("region", ""),
-            country_code=original.get("country_code", ""),
-            country=original.get("country", ""),
+            sector=original.get("sector", "") or "",
+            region=original.get("region", "") or "",
+            country_code=original.get("country_code", "") or "",
+            country=original.get("country", "") or "",
             notes=f"Re-assessment of run {run_id}"
         )
+        failed = 0
         for domain in domains:
-            raw_scans  = self.db.get_domain_scans(domain, run_id)
-            # Re-assessment reuses stored scan data; no new network calls
-            extra = self.db.get_domain_extra(domain, run_id)
-            assessment = new_assessor.assess_domain(
-                domain, raw_scans,
-                chain_analysis=extra.get("chain"),
-                cipher_enum=extra.get("cipher_enum"),
-                cdn_result=extra.get("cdn"),
-            )
-            self.db.save_assessment(new_run_id, assessment.to_dict())
-        self.db.finish_run(new_run_id, "completed")
-        logger.info(f"Re-assessment complete. new_run_id={new_run_id}")
+            try:
+                assessment = reassess_domain(
+                    self.db, new_assessor, domain, run_id=run_id,
+                    as_of=original.get("started_at"),
+                    service_type=(previous.get(domain) or {}).get("service_type"),
+                )
+                self.db.save_assessment(new_run_id, assessment.to_dict())
+            except Exception as e:
+                failed += 1
+                logger.error(f"Re-assessment of {domain} failed: {e}")
+        self.db.finish_run(new_run_id, "completed" if not failed else "partial")
+        logger.info(f"Re-assessment complete. new_run_id={new_run_id} "
+                    f"domains={len(domains)} failed={failed}")
         return new_run_id
 
     def _scan_domain(self, domain: str, run_id: str, use_shodan: bool):

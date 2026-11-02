@@ -1084,8 +1084,8 @@ pqc-monitor/
 ├── docker-compose.yml      # Compose stack for local runs
 ├── requirements.txt
 ├── requirements-dev.txt    # test-only: cyclonedx-python-lib (CBOM schema checks) (NEW)
-├── tests/                  # 639 tests (597 at v1.12.0 + 42 in test_cbom.py, NEW);
-│                           #   2 test_trends.py API tests are date-dependent (§8.8)
+├── tests/                  # 644 tests (597 at v1.12.0 + 47 since);
+│                           #   (all passing)
 └── config/
     └── config.yaml.example
 ```
@@ -1561,6 +1561,7 @@ by the CBOM delivery. The plan is to fix them as separate deltas.
    `test_analyst_scoped_to_own_domains` fail since about 2026-10: their
    fixtures are dated July/August and drop out of the 90-day stale window.
    Make the dates relative to now.
+   **Fixed — delta 02 (`test(trends)`).** Fixture dates are relative to now.
 9. **TLS 1.3 suites are not enumerated.** `_probe_tls13` stops after the
    server-preferred suite, because the ssl module cannot restrict TLS 1.3
    suites. A raw ClientHello (as in `group_enum`) would fix it. The TLS 1.2
@@ -1998,9 +1999,9 @@ card shows the latest counts with a drill-down to the text report.
 
 ## Appendix A — Running the Test Suite
 
-Current suite: **639 tests** (597 at v1.12.0 + 42 in `test_cbom.py`). Since
-about 2026-10, two `test_trends.TestTrendsAPI` tests fail because their fixture
-dates are fixed (§8.8 item 8); everything else passes. `test_cbom.py` validates
+Current suite: **644 tests** (597 at v1.12.0 + 47 added since). All pass
+(the two date-dependent `test_trends.TestTrendsAPI` tests were made relative to
+the clock in delta 02). `test_cbom.py` validates
 against the CycloneDX schemas only when `pip install -r requirements-dev.txt`
 has been run; without it that one test is skipped.
 

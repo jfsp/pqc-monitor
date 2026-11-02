@@ -260,10 +260,16 @@ class TestTrendsAPI(unittest.TestCase):
         self.comm = self.db.create_community("Banks")
         self.db.set_community_orgs(self.comm, [self.org_a, self.org_b])
 
-        for dom, ts, score in [("a1.com", "2026-07-01T00:00:00+00:00", 40),
-                               ("a2.com", "2026-07-01T00:00:00+00:00", 60),
-                               ("b1.com", "2026-07-01T00:00:00+00:00", 90),
-                               ("x.com",  "2026-08-01T00:00:00+00:00", 10)]:
+        # Relative to the real clock: the API computes buckets "as of now",
+        # and fixed dates age out of the stale window (these tests started
+        # failing in 2026-10 with the original July/August fixture).
+        real_now = datetime.now(UTC)
+        older = (real_now - timedelta(days=45)).isoformat()
+        newer = (real_now - timedelta(days=15)).isoformat()
+        for dom, ts, score in [("a1.com", older, 40),
+                               ("a2.com", older, 60),
+                               ("b1.com", older, 90),
+                               ("x.com",  newer, 10)]:
             run = self.db.create_run([dom])
             self.db.save_assessment(run, {
                 "domain": dom, "assessment_timestamp": ts, "score": score,
@@ -359,7 +365,8 @@ class TestTrendsAPI(unittest.TestCase):
         # A new assessment changes the data version -> miss
         run = self.db.create_run(["new.com"])
         self.db.save_assessment(run, {"domain": "new.com",
-            "assessment_timestamp": "2026-09-01T00:00:00+00:00", "score": 50,
+            "assessment_timestamp": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+            "score": 50,
             "level": "moderate", "findings": [], "has_pqc": False})
         d4 = self.client.get("/app/api/trends?granularity=month").get_json()
         self.assertFalse(d4["meta"]["cached"])

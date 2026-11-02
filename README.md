@@ -628,7 +628,7 @@ sudo -u pqcmonitor /opt/pqc-monitor/.venv/bin/python3 \
     -m unittest discover -s /opt/pqc-monitor/tests -p 'test_*.py'
 ```
 
-639 tests covering: scoring engine, database layer, guidelines JSON, scanner
+644 tests covering: scoring engine, database layer, guidelines JSON, scanner
 modules, CDN detection, certificate chain validation, cipher enumeration,
 STARTTLS/MX handling, SSL Labs client and sweep, scheduler, DNS status of
 no-TLS domains, trends, CT monitor, roadmap generator, CBOM export,

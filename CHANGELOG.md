@@ -74,6 +74,11 @@ This project uses [Semantic Versioning](https://semver.org/).
   score-only reassessment runs, which have no raw scans of their own: it uses
   the domain's most recent probed run before the assessment.
   `--same-run-only` turns this off. **Run the backfill once after deploying.**
+- Two `test_trends.TestTrendsAPI` tests (`test_admin_sees_all`,
+  `test_analyst_scoped_to_own_domains`) had been failing since 2026-10
+  (§8.8 #8). Their fixture had fixed July/August 2026 dates, which aged out of
+  the stale window because the API computes trends as of now. The dates are
+  now relative to the clock.
 
 ### Notes
 - No schema change (still v18; v19 reserved for TOTP). Export reads are

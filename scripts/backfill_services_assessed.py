@@ -6,8 +6,8 @@ Repairs the historic fallout of a write-path bug: save_assessment() in
 data/database.py omitted the `services_assessed` and `key_types` columns
 from its INSERT, so every assessment row ever written carried the schema
 defaults (0 / NULL) even though the assessor computed real values in
-memory. Fixed on 2026-07-12; this script reconstructs the historic rows
-from what the scanner recorded at the time.
+memory. See "History" below; this script reconstructs the affected rows from what
+the scanner recorded at the time.
 
 Reconstruction logic
 ────────────────────
@@ -24,8 +24,17 @@ For each assessment row (run_id, domain):
                       value is NULL, '' or '[]'.
 
 Rows with level='na' legitimately have zero successful services and are
-left untouched. Rows whose raw_scans rows are missing entirely (orphaned
-run data) cannot be reconstructed and are reported.
+left untouched.
+
+Score-only reassessment runs (scripts/reassess_all.py, /api/reassess) write
+assessments under a NEW run that has no raw_scans rows. For those rows the
+source is the domain's most recent probed run at or before the assessment
+time (the data the reassessment scored). --same-run-only disables this
+fallback. Rows with no usable raw_scans at all are reported.
+
+History: the write path was fixed on 2026-07-12 (ae26eef), lost again an hour
+later (69a9259) and restored on 2026-10-16. Re-run this script once after
+deploying that restore: every row written in between carries 0 / NULL.
 
 The script only ever *raises* services_assessed from 0 and only fills
 *empty* key_types — it never overwrites a non-default value, so it is
@@ -68,7 +77,40 @@ def _parse_args(argv=None):
     parser.add_argument("--db", help="Override the database path directly.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Report changes without writing.")
+    parser.add_argument("--same-run-only", action="store_true",
+                        help="Only use raw_scans of the assessment's own run "
+                             "(no fallback for score-only reassessment runs).")
     return parser.parse_args(argv)
+
+
+def _ts(value):
+    """Comparable UTC datetime for the ISO timestamps stored in the DB."""
+    from datetime import datetime, timezone
+    if not value:
+        return None
+    s = str(value).strip().replace(" ", "T", 1)
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _fallback_run(runs: list, assessed_at):
+    """Newest probed run (run_id, scanned_at) at or before assessed_at; the
+    newest run overall when the timestamp is unusable. runs is newest-first."""
+    if not runs:
+        return None
+    t = _ts(assessed_at)
+    if t is None:
+        return runs[0][0]
+    for run_id, scanned_at in runs:
+        st = _ts(scanned_at)
+        if st is not None and st <= t:
+            return run_id
+    return None
 
 
 def resolve_db_path(args) -> str:
@@ -97,26 +139,43 @@ def main(argv=None) -> int:
         # Per-(run, domain) reconstruction source, one pass over raw_scans.
         counts: dict[tuple, int] = {}
         keytypes: dict[tuple, set] = {}
+        run_seen: dict[tuple, str] = {}       # (run, domain) → latest scanned_at
         for r in conn.execute(
-                "SELECT run_id, domain, key_type FROM raw_scans WHERE success=1"):
+                "SELECT run_id, domain, key_type, scanned_at FROM raw_scans "
+                "WHERE success=1"):
             key = (r["run_id"], r["domain"])
             counts[key] = counts.get(key, 0) + 1
             if r["key_type"]:
                 keytypes.setdefault(key, set()).add(r["key_type"])
+            if (r["scanned_at"] or "") > run_seen.get(key, ""):
+                run_seen[key] = r["scanned_at"] or ""
+        # domain → [(run_id, scanned_at)] newest first, for the fallback
+        probed: dict[str, list] = {}
+        for (run_id, domain), seen in run_seen.items():
+            probed.setdefault(domain, []).append((run_id, seen))
+        for runs in probed.values():
+            runs.sort(key=lambda x: _ts(x[1]) or _ts("1970-01-01"), reverse=True)
 
         svc_updates: list[tuple] = []     # (count, id)
         kt_updates: list[tuple] = []      # (json, id)
         unreconstructable = 0
+        via_fallback = 0
 
         for row in conn.execute(
-                "SELECT id, run_id, domain, level, services_assessed, key_types "
-                "FROM assessments"):
+                "SELECT id, run_id, domain, level, assessed_at, "
+                "services_assessed, key_types FROM assessments"):
             key = (row["run_id"], row["domain"])
+            fallback = False
+            if key not in counts and not args.same_run_only:
+                fb = _fallback_run(probed.get(row["domain"], []), row["assessed_at"])
+                if fb is not None:
+                    key, fallback = (fb, row["domain"]), True
             cnt = counts.get(key, 0)
 
             if (row["services_assessed"] or 0) == 0 and row["level"] != "na":
                 if cnt > 0:
                     svc_updates.append((cnt, row["id"]))
+                    via_fallback += 1 if fallback else 0
                 else:
                     unreconstructable += 1
 
@@ -127,6 +186,10 @@ def main(argv=None) -> int:
 
         logger.info("services_assessed to backfill: %d row(s)", len(svc_updates))
         logger.info("key_types to backfill:         %d row(s)", len(kt_updates))
+        if via_fallback:
+            logger.info("  %d scored row(s) belong to runs without raw scans "
+                        "(score-only reassessment); sourced from the domain's "
+                        "latest probed run before the assessment", via_fallback)
         if unreconstructable:
             logger.warning(
                 "%d scored row(s) have no successful raw_scans for their "

@@ -1515,6 +1515,11 @@ by the CBOM delivery. The plan is to fix them as separate deltas.
    since 2026-07-12 has `0`/`NULL`. The audit's invariant checks fire again,
    and `scripts/backfill_services_assessed.py` needs to run again after the
    fix. This is the P3 class of bug (§11).
+   **Fixed — delta 01 (`fix(data)`, 2026-10-16).** INSERT restored;
+   `tests/test_data_integrity.py` checks that no column is left NULL. After deploying,
+   run `scripts/backfill_services_assessed.py --dry-run`, then run it without
+   `--dry-run`. It now also fills rows of score-only reassessment runs from the latest
+   probed run.
 2. **`Orchestrator.reassess_run` loses PQC.** It is used by
    `POST /api/reassess`, `pqc_monitor.py reassess` and the legacy dashboard.
    It does not pass `group_enum`, so every reassessed row becomes
